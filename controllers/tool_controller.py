@@ -529,6 +529,7 @@ class ToolController:
         self.window.btn_export_cells.clicked.connect(self.export_cells)
         self.window.btn_export_veins.clicked.connect(self.export_veins)
         self.window.btn_export_all.clicked.connect(self.export_all)
+        self.window.btn_export_coco.clicked.connect(self.export_coco_sidecar)
         self.window.btn_import.clicked.connect(self.load_annotations)
         self.window.btn_load_seg.clicked.connect(self.load_segmentation)
         self.window.btn_run_sam.clicked.connect(self.run_sam_segmentation)
@@ -1740,19 +1741,32 @@ class ToolController:
         if not path:
             return
 
+        from core import sidecar
+
         ext = os.path.splitext(path)[1].lower()
         try:
             if ext in ('.tif', '.tiff'):
                 mask_io.save_mask_tif(seg.masks, path)
+                meta_extra = ""
+                if source:
+                    meta_path = sidecar.meta_path_for(path)
+                    meta = sidecar.collect_meta_from_annotations(self.annotations)
+                    sidecar.save_meta(meta, meta_path)
+                    meta_extra = f"\nmeta: {os.path.basename(meta_path)}"
             elif ext == '.avi':
                 seg.save_masks(path)
+                meta_extra = ""
             else:
                 # No extension given — default to TIF so the file is
                 # readable by the collaborator pipeline.
                 path = path + '.tif'
                 mask_io.save_mask_tif(seg.masks, path)
+                meta_path = sidecar.meta_path_for(path)
+                meta = sidecar.collect_meta_from_annotations(self.annotations)
+                sidecar.save_meta(meta, meta_path)
+                meta_extra = f"\nmeta: {os.path.basename(meta_path)}"
             QMessageBox.information(self.window, "Save Seg",
-                                    f"Saved {seg.num_frames} frames to:\n{path}")
+                                    f"Saved {seg.num_frames} frames to:\n{path}{meta_extra}")
         except Exception as e:
             QMessageBox.critical(self.window, "Error", str(e))
 
@@ -1947,6 +1961,32 @@ class ToolController:
                 anno_count += 1
 
         self.anno_counter = max_stair
+
+        # Apply per-instance metadata from the meta sidecar (if present)
+        # so names, class_type, and locked state survive a save/load cycle.
+        from core import sidecar
+        meta = sidecar.load_meta(sidecar.meta_path_for(path))
+        if meta is not None:
+            instances = meta.get('instances', {})
+            for anno in self.annotations:
+                if anno.instance_id is None:
+                    continue
+                rec = instances.get(str(int(anno.instance_id)))
+                if not rec:
+                    continue
+                # Annotation2D normalizes 'vein' -> 'vessel' in __init__,
+                # but here we have an already-constructed object.
+                ct = rec.get('class_type', 'cell')
+                if ct == 'vein':
+                    ct = 'vessel'
+                if ct in ('cell', 'vessel', 'capillary'):
+                    anno.class_type = ct
+                if 'name' in rec and rec['name']:
+                    anno.name = rec['name']
+                if rec.get('locked'):
+                    anno.set_locked(True)
+                if 'notes' in rec:
+                    anno.notes = rec['notes']
 
         # Show annotations for the current frame
         cur = self.window._current_frame_idx
@@ -2286,6 +2326,48 @@ class ToolController:
     # keep old name as alias so Ctrl+S still works
     def save_annotations(self):
         self.export_all()
+
+    def export_coco_sidecar(self):
+        """Write a COCO JSON describing every committed instance mask.
+
+        Uses the current seg_data (mask source of truth) + the metadata
+        derived from this session's annotations (class_type per instance).
+        Round-trip import isn't part of this path — anyone consuming the
+        export reads it with standard pycocotools tooling.
+        """
+        from core import coco_export, sidecar
+
+        seg = self.window.seg_data
+        if seg is None or not np.any(seg.masks):
+            QMessageBox.information(
+                self.window, "Export COCO",
+                "No segmentation data to export. Paint or load a mask first.")
+            return
+
+        # Default filename: {image_stem}_coco.json next to the image.
+        source = self.window._current_file
+        if source:
+            default = os.path.join(
+                os.path.dirname(source),
+                os.path.splitext(os.path.basename(source))[0] + "_coco.json")
+        else:
+            default = os.path.join(os.getcwd(), "annotations_coco.json")
+
+        path, _ = QFileDialog.getSaveFileName(
+            self.window, "Export COCO",
+            default, "COCO JSON (*.json);;All Files (*)")
+        if not path:
+            return
+
+        try:
+            meta = sidecar.collect_meta_from_annotations(self.annotations)
+            n = coco_export.export_coco(
+                source or default, seg, meta, path)
+            QMessageBox.information(
+                self.window, "Export COCO",
+                f"Wrote {n} annotations across {seg.num_frames} frames to:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self.window, "Error", f"COCO export failed:\n{e}")
 
     def load_annotations(self):
         if not self.window.video_data:

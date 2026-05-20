@@ -356,6 +356,18 @@ class MainWindow(QMainWindow):
         export_row.addWidget(self.btn_export_all)
         io_layout.addLayout(export_row)
 
+        # COCO sidecar export — the modern, training-pipeline-friendly format.
+        coco_row = QHBoxLayout()
+        coco_row.setSpacing(4)
+        self.btn_export_coco = QPushButton("Export COCO")
+        self.btn_export_coco.setToolTip(
+            "Write a COCO JSON sidecar (RLE masks + bboxes + categories).\n"
+            "Ready to drop into Detectron2 / MMDetection / Roboflow / "
+            "pycocotools.")
+        self.btn_export_coco.setStyleSheet("color: #4cc9f0; font-weight: bold;")
+        coco_row.addWidget(self.btn_export_coco)
+        io_layout.addLayout(coco_row)
+
         # Import row
         import_row = QHBoxLayout()
         import_row.setSpacing(4)
