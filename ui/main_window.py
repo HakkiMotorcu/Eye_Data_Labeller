@@ -1,7 +1,8 @@
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QLabel, QComboBox, QGroupBox, QListWidget,
                              QFileDialog, QMessageBox, QSlider, QScrollArea,
-                             QSizePolicy, QSpinBox, QButtonGroup)
+                             QSizePolicy, QSpinBox, QButtonGroup, QSplitter,
+                             QCheckBox, QFrame)
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QColor
 import pyqtgraph as pg
@@ -12,7 +13,7 @@ import os
 class MainWindow(QMainWindow):
     def __init__(self, video_data=None):
         super().__init__()
-        self.resize(1300, 800)
+        self.resize(1500, 900)
         self.video_data = video_data
         self.seg_data = None
         self._current_file = None
@@ -26,7 +27,13 @@ class MainWindow(QMainWindow):
         self._bg_subtract_on = False
         self._bg_subtract_window = 2
         self._clahe_on = False
+        self._clahe_clip = 2.0
+        self._clahe_tile = 8
         self._frangi_on = False
+        self._frangi_sigma_min = 1.0
+        self._frangi_sigma_max = 4.0
+        self._frangi_n_sigmas = 4
+        self._frangi_black_ridges = False
         self._gamma = 1.0
         self._invert = False
 
@@ -34,11 +41,18 @@ class MainWindow(QMainWindow):
         self._setup_ui()
 
         # Wire every View-panel control to the same re-render path.
+        self.btn_reset_view.clicked.connect(self._reset_view_filters)
         self.combo_projection.currentTextChanged.connect(self._on_projection_changed)
         self.chk_bg_subtract.toggled.connect(self._on_bg_subtract_toggled)
         self.slider_bg_window.valueChanged.connect(self._on_bg_window_changed)
         self.chk_clahe.toggled.connect(self._on_clahe_toggled)
+        self.slider_clahe_clip.valueChanged.connect(self._on_clahe_clip_changed)
+        self.slider_clahe_tile.valueChanged.connect(self._on_clahe_tile_changed)
         self.chk_frangi.toggled.connect(self._on_frangi_toggled)
+        self.chk_frangi_black.toggled.connect(self._on_frangi_black_toggled)
+        self.slider_frangi_smin.valueChanged.connect(self._on_frangi_smin_changed)
+        self.slider_frangi_smax.valueChanged.connect(self._on_frangi_smax_changed)
+        self.slider_frangi_n.valueChanged.connect(self._on_frangi_n_changed)
         self.slider_gamma.valueChanged.connect(self._on_gamma_changed)
         self.chk_invert.toggled.connect(self._on_invert_toggled)
 
@@ -46,16 +60,35 @@ class MainWindow(QMainWindow):
             self.load_video()
         self._update_title()
 
+    @staticmethod
+    def _filter_divider(title):
+        """Section divider used between filter families in the View panel."""
+        w = QWidget()
+        lay = QHBoxLayout(w)
+        lay.setContentsMargins(0, 6, 0, 0)
+        lay.setSpacing(4)
+        line_left = QFrame()
+        line_left.setFrameShape(QFrame.Shape.HLine)
+        line_left.setStyleSheet("color:#2c2c33;")
+        line_left.setFixedWidth(8)
+        lbl = QLabel(title)
+        lbl.setStyleSheet("color:#888;font-size:10px;")
+        line_right = QFrame()
+        line_right.setFrameShape(QFrame.Shape.HLine)
+        line_right.setStyleSheet("color:#2c2c33;")
+        lay.addWidget(line_left)
+        lay.addWidget(lbl)
+        lay.addWidget(line_right, stretch=1)
+        return w
+
     def _setup_ui(self):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
-        # --- Top area: frame view + right panel ---
-        top_layout = QHBoxLayout()
-
         # --- Left: Frame view ---
         frame_container = QWidget()
+        frame_container.setMinimumWidth(400)
         frame_layout = QVBoxLayout(frame_container)
         frame_layout.setContentsMargins(5, 5, 5, 5)
 
@@ -73,12 +106,11 @@ class MainWindow(QMainWindow):
         self.view_frame.getView().addItem(self._seg_overlay)
         self._seg_visible = True
 
-        top_layout.addWidget(frame_container, stretch=1)
-
-        # --- Right: Scrollable Panels ---
+        # --- Right: Scrollable Panels (draggable splitter on the left edge) ---
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
-        scroll_area.setFixedWidth(350)
+        scroll_area.setMinimumWidth(320)
+        scroll_area.setMaximumWidth(600)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         right_panel_widget = QWidget()
@@ -395,28 +427,43 @@ class MainWindow(QMainWindow):
         cmap_layout.addWidget(self.combo_colormap, stretch=1)
         display_layout.addLayout(cmap_layout)
 
-        # --- Temporal projection ---
-        # When mode != None, the displayed image is a projection across the
-        # whole stack (computed once, cached). Slider still navigates frames
-        # for annotation purposes; the IMAGE is the projection regardless.
+        # ==============================================================
+        # FILTER PIPELINE (display-only, applied in this order):
+        #   raw or projection or bg-subtract  ->  CLAHE  ->  Frangi
+        #   ->  gamma  ->  invert  ->  display
+        # Every control re-renders the current frame through this chain.
+        # ==============================================================
+
+        reset_row = QHBoxLayout()
+        reset_row.setSpacing(4)
+        reset_row.addStretch(1)
+        self.btn_reset_view = QPushButton("Reset View")
+        self.btn_reset_view.setToolTip(
+            "Return every filter to its default state:\n"
+            "  Projection = None, BG sub off, CLAHE off, Vesselness off,\n"
+            "  Gamma = 1.00, Invert off.")
+        reset_row.addWidget(self.btn_reset_view)
+        display_layout.addLayout(reset_row)
+
+        # ---- Projection ------------------------------------------------
+        display_layout.addWidget(self._filter_divider("Projection"))
         proj_row = QHBoxLayout()
         proj_row.setSpacing(4)
-        proj_row.addWidget(QLabel("Projection"))
+        proj_row.addWidget(QLabel("Mode"))
         self.combo_projection = QComboBox()
         self.combo_projection.addItems(["None", "Std", "Max", "Mean", "Sum", "Min"])
         self.combo_projection.setToolTip(
             "Replace the live frame with a temporal projection across the "
-            "whole stack.\n"
-            "Std is the headline mode for retinal data — stationary vessel\n"
-            "walls drop out, moving cells inside vessels pop.")
+            "whole stack.\nStd is the headline mode for retinal AOSLO — "
+            "stationary vessel walls drop out, moving cells pop.")
         proj_row.addWidget(self.combo_projection, stretch=1)
         display_layout.addLayout(proj_row)
 
-        # --- Background subtraction (per-frame motion surface) ---
+        # ---- Background subtraction -----------------------------------
+        display_layout.addWidget(self._filter_divider("Background subtraction"))
         bg_row = QHBoxLayout()
         bg_row.setSpacing(4)
-        from PyQt6.QtWidgets import QCheckBox  # already imported elsewhere; safe
-        self.chk_bg_subtract = QCheckBox("BG sub")
+        self.chk_bg_subtract = QCheckBox("Enabled")
         self.chk_bg_subtract.setToolTip(
             "Subtract a rolling-mean background around the current frame.\n"
             "Surfaces slow-moving immune cells inside a stationary vessel.")
@@ -427,29 +474,119 @@ class MainWindow(QMainWindow):
         self.slider_bg_window.setValue(2)
         self.slider_bg_window.setToolTip("Half-width of the rolling-mean window")
         bg_row.addWidget(self.slider_bg_window, stretch=1)
+        self.lbl_bg_window = QLabel("2")
+        self.lbl_bg_window.setFixedWidth(28)
+        self.lbl_bg_window.setStyleSheet("font-family: monospace; color: #aaa;")
+        bg_row.addWidget(self.lbl_bg_window)
         display_layout.addLayout(bg_row)
 
-        # --- Vessel enhancement: CLAHE + Frangi ---
-        enh_row = QHBoxLayout()
-        enh_row.setSpacing(4)
-        self.chk_clahe = QCheckBox("CLAHE")
+        # ---- CLAHE -----------------------------------------------------
+        display_layout.addWidget(self._filter_divider("CLAHE (contrast)"))
+        clahe_row = QHBoxLayout()
+        clahe_row.setSpacing(4)
+        self.chk_clahe = QCheckBox("Enabled")
         self.chk_clahe.setToolTip("Contrast-Limited Adaptive Histogram Equalization")
-        self.chk_frangi = QCheckBox("Vesselness")
-        self.chk_frangi.setToolTip(
-            "Multi-scale Frangi vesselness — bright ridges on dark "
-            "background.\nReplaces the displayed image with the vesselness "
-            "response.")
-        enh_row.addWidget(self.chk_clahe)
-        enh_row.addWidget(self.chk_frangi)
-        enh_row.addStretch(1)
-        display_layout.addLayout(enh_row)
+        clahe_row.addWidget(self.chk_clahe)
+        clahe_row.addStretch(1)
+        display_layout.addLayout(clahe_row)
 
-        # --- Display LUT: gamma + invert ---
+        clahe_clip_row = QHBoxLayout()
+        clahe_clip_row.setSpacing(4)
+        clahe_clip_row.addWidget(QLabel("Clip"))
+        self.slider_clahe_clip = QSlider(Qt.Orientation.Horizontal)
+        self.slider_clahe_clip.setRange(5, 100)      # mapped to 0.5 .. 10.0
+        self.slider_clahe_clip.setValue(20)          # default 2.0
+        self.slider_clahe_clip.setToolTip(
+            "Clip limit. Higher = stronger local contrast.")
+        clahe_clip_row.addWidget(self.slider_clahe_clip, stretch=1)
+        self.lbl_clahe_clip = QLabel("2.0")
+        self.lbl_clahe_clip.setFixedWidth(36)
+        self.lbl_clahe_clip.setStyleSheet("font-family: monospace; color: #aaa;")
+        clahe_clip_row.addWidget(self.lbl_clahe_clip)
+        display_layout.addLayout(clahe_clip_row)
+
+        clahe_tile_row = QHBoxLayout()
+        clahe_tile_row.setSpacing(4)
+        clahe_tile_row.addWidget(QLabel("Tiles"))
+        self.slider_clahe_tile = QSlider(Qt.Orientation.Horizontal)
+        self.slider_clahe_tile.setRange(2, 16)
+        self.slider_clahe_tile.setValue(8)
+        self.slider_clahe_tile.setToolTip(
+            "Number of tiles across the image; smaller = more local.")
+        clahe_tile_row.addWidget(self.slider_clahe_tile, stretch=1)
+        self.lbl_clahe_tile = QLabel("8")
+        self.lbl_clahe_tile.setFixedWidth(28)
+        self.lbl_clahe_tile.setStyleSheet("font-family: monospace; color: #aaa;")
+        clahe_tile_row.addWidget(self.lbl_clahe_tile)
+        display_layout.addLayout(clahe_tile_row)
+
+        # ---- Frangi vesselness ----------------------------------------
+        display_layout.addWidget(self._filter_divider("Vesselness (Frangi)"))
+        frangi_row = QHBoxLayout()
+        frangi_row.setSpacing(4)
+        self.chk_frangi = QCheckBox("Enabled")
+        self.chk_frangi.setToolTip(
+            "Multi-scale Frangi vesselness response.\n"
+            "Slow filter — ~1 sec for a 500×500 frame; tweak sigmas to taste.")
+        self.chk_frangi_black = QCheckBox("Dark ridges")
+        self.chk_frangi_black.setToolTip(
+            "Off (default): bright vessels on dark background (AOSLO).\n"
+            "On: dark vessels on bright background (fundus-style).")
+        frangi_row.addWidget(self.chk_frangi)
+        frangi_row.addWidget(self.chk_frangi_black)
+        frangi_row.addStretch(1)
+        display_layout.addLayout(frangi_row)
+
+        sigmin_row = QHBoxLayout()
+        sigmin_row.setSpacing(4)
+        sigmin_row.addWidget(QLabel("σ min"))
+        self.slider_frangi_smin = QSlider(Qt.Orientation.Horizontal)
+        self.slider_frangi_smin.setRange(5, 100)     # 0.5 .. 10.0
+        self.slider_frangi_smin.setValue(10)         # 1.0
+        self.slider_frangi_smin.setToolTip("Smallest vessel radius (px)")
+        sigmin_row.addWidget(self.slider_frangi_smin, stretch=1)
+        self.lbl_frangi_smin = QLabel("1.0")
+        self.lbl_frangi_smin.setFixedWidth(36)
+        self.lbl_frangi_smin.setStyleSheet("font-family: monospace; color: #aaa;")
+        sigmin_row.addWidget(self.lbl_frangi_smin)
+        display_layout.addLayout(sigmin_row)
+
+        sigmax_row = QHBoxLayout()
+        sigmax_row.setSpacing(4)
+        sigmax_row.addWidget(QLabel("σ max"))
+        self.slider_frangi_smax = QSlider(Qt.Orientation.Horizontal)
+        self.slider_frangi_smax.setRange(10, 200)    # 1.0 .. 20.0
+        self.slider_frangi_smax.setValue(40)         # 4.0
+        self.slider_frangi_smax.setToolTip("Largest vessel radius (px)")
+        sigmax_row.addWidget(self.slider_frangi_smax, stretch=1)
+        self.lbl_frangi_smax = QLabel("4.0")
+        self.lbl_frangi_smax.setFixedWidth(36)
+        self.lbl_frangi_smax.setStyleSheet("font-family: monospace; color: #aaa;")
+        sigmax_row.addWidget(self.lbl_frangi_smax)
+        display_layout.addLayout(sigmax_row)
+
+        nsig_row = QHBoxLayout()
+        nsig_row.setSpacing(4)
+        nsig_row.addWidget(QLabel("Scales"))
+        self.slider_frangi_n = QSlider(Qt.Orientation.Horizontal)
+        self.slider_frangi_n.setRange(1, 8)
+        self.slider_frangi_n.setValue(4)
+        self.slider_frangi_n.setToolTip(
+            "Number of scales sampled between σ min and σ max.\n"
+            "More scales = slower but smoother across vessel widths.")
+        nsig_row.addWidget(self.slider_frangi_n, stretch=1)
+        self.lbl_frangi_n = QLabel("4")
+        self.lbl_frangi_n.setFixedWidth(28)
+        self.lbl_frangi_n.setStyleSheet("font-family: monospace; color: #aaa;")
+        nsig_row.addWidget(self.lbl_frangi_n)
+        display_layout.addLayout(nsig_row)
+
+        # ---- Display LUT (gamma + invert) -----------------------------
+        display_layout.addWidget(self._filter_divider("Display LUT"))
         lut_row = QHBoxLayout()
         lut_row.setSpacing(4)
         lut_row.addWidget(QLabel("Gamma"))
         self.slider_gamma = QSlider(Qt.Orientation.Horizontal)
-        # slider range 10..400 mapped to gamma 0.1..4.0 (1.0 = 100)
         self.slider_gamma.setRange(10, 400)
         self.slider_gamma.setValue(100)
         self.slider_gamma.setToolTip("Display gamma (1.00 = identity)")
@@ -518,9 +655,24 @@ class MainWindow(QMainWindow):
         right_panel.addStretch(1)
 
         scroll_area.setWidget(right_panel_widget)
-        top_layout.addWidget(scroll_area)
 
-        main_layout.addLayout(top_layout, stretch=1)
+        # Horizontal splitter so the user can drag-resize the divider
+        # between the frame view and the right panel. Sensible minimums
+        # on each side prevent the user from collapsing either to zero.
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(frame_container)
+        splitter.addWidget(scroll_area)
+        splitter.setStretchFactor(0, 1)   # frame view absorbs window growth
+        splitter.setStretchFactor(1, 0)   # sidebar stays at its size
+        splitter.setSizes([1100, 380])    # initial split
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(4)
+        splitter.setStyleSheet(
+            "QSplitter::handle{background:#2c2c33;}"
+            "QSplitter::handle:hover{background:#3d6ea8;}"
+        )
+
+        main_layout.addWidget(splitter, stretch=1)
 
         # --- Bottom: Timeline ---
         timeline_group = QGroupBox()
@@ -604,13 +756,23 @@ class MainWindow(QMainWindow):
         else:
             base = self.video_data.get_frame(idx)
 
-        # Step 2: enhancement filters.
+        # Step 2: enhancement filters with their tuned parameters.
         if self._clahe_on:
             from core import enhance
-            base = enhance.apply_clahe(base)
+            base = enhance.apply_clahe(
+                base,
+                clip_limit=self._clahe_clip,
+                tile_grid_size=self._clahe_tile,
+            )
         if self._frangi_on:
             from core import enhance
-            base = enhance.frangi_vesselness(base)
+            base = enhance.frangi_vesselness(
+                base,
+                sigma_min=self._frangi_sigma_min,
+                sigma_max=self._frangi_sigma_max,
+                n_sigmas=self._frangi_n_sigmas,
+                black_ridges=self._frangi_black_ridges,
+            )
 
         # Step 3: display LUT (gamma + invert).
         if abs(self._gamma - 1.0) > 1e-3:
@@ -659,6 +821,7 @@ class MainWindow(QMainWindow):
 
     def _on_bg_window_changed(self, value):
         self._bg_subtract_window = int(value)
+        self.lbl_bg_window.setText(str(int(value)))
         if self._bg_subtract_on:
             self._rerender()
 
@@ -666,9 +829,57 @@ class MainWindow(QMainWindow):
         self._clahe_on = bool(checked)
         self._rerender()
 
+    def _on_clahe_clip_changed(self, value):
+        self._clahe_clip = value / 10.0
+        self.lbl_clahe_clip.setText(f"{self._clahe_clip:.1f}")
+        if self._clahe_on:
+            self._rerender()
+
+    def _on_clahe_tile_changed(self, value):
+        self._clahe_tile = int(value)
+        self.lbl_clahe_tile.setText(str(int(value)))
+        if self._clahe_on:
+            self._rerender()
+
     def _on_frangi_toggled(self, checked):
         self._frangi_on = bool(checked)
         self._rerender()
+
+    def _on_frangi_black_toggled(self, checked):
+        self._frangi_black_ridges = bool(checked)
+        if self._frangi_on:
+            self._rerender()
+
+    def _on_frangi_smin_changed(self, value):
+        self._frangi_sigma_min = value / 10.0
+        self.lbl_frangi_smin.setText(f"{self._frangi_sigma_min:.1f}")
+        # Keep min ≤ max to avoid weird Frangi output.
+        if self._frangi_sigma_min > self._frangi_sigma_max:
+            self.slider_frangi_smax.blockSignals(True)
+            self.slider_frangi_smax.setValue(int(self._frangi_sigma_min * 10))
+            self.slider_frangi_smax.blockSignals(False)
+            self._frangi_sigma_max = self._frangi_sigma_min
+            self.lbl_frangi_smax.setText(f"{self._frangi_sigma_max:.1f}")
+        if self._frangi_on:
+            self._rerender()
+
+    def _on_frangi_smax_changed(self, value):
+        self._frangi_sigma_max = value / 10.0
+        self.lbl_frangi_smax.setText(f"{self._frangi_sigma_max:.1f}")
+        if self._frangi_sigma_max < self._frangi_sigma_min:
+            self.slider_frangi_smin.blockSignals(True)
+            self.slider_frangi_smin.setValue(int(self._frangi_sigma_max * 10))
+            self.slider_frangi_smin.blockSignals(False)
+            self._frangi_sigma_min = self._frangi_sigma_max
+            self.lbl_frangi_smin.setText(f"{self._frangi_sigma_min:.1f}")
+        if self._frangi_on:
+            self._rerender()
+
+    def _on_frangi_n_changed(self, value):
+        self._frangi_n_sigmas = int(value)
+        self.lbl_frangi_n.setText(str(int(value)))
+        if self._frangi_on:
+            self._rerender()
 
     def _on_gamma_changed(self, value):
         self._gamma = max(0.1, value / 100.0)
@@ -677,6 +888,63 @@ class MainWindow(QMainWindow):
 
     def _on_invert_toggled(self, checked):
         self._invert = bool(checked)
+        self._rerender()
+
+    def _reset_view_filters(self):
+        """Return every View-panel filter to its default state.
+
+        Block signals during the slider/checkbox updates so we don't fire
+        a re-render per widget — single re-render at the end.
+        """
+        defaults = [
+            (self.combo_projection, 0),
+            (self.chk_bg_subtract, False),
+            (self.slider_bg_window, 2),
+            (self.chk_clahe, False),
+            (self.slider_clahe_clip, 20),
+            (self.slider_clahe_tile, 8),
+            (self.chk_frangi, False),
+            (self.chk_frangi_black, False),
+            (self.slider_frangi_smin, 10),
+            (self.slider_frangi_smax, 40),
+            (self.slider_frangi_n, 4),
+            (self.slider_gamma, 100),
+            (self.chk_invert, False),
+        ]
+        for w, val in defaults:
+            w.blockSignals(True)
+            if hasattr(w, 'setChecked'):
+                w.setChecked(bool(val))
+            elif hasattr(w, 'setCurrentIndex'):
+                w.setCurrentIndex(val)
+            else:
+                w.setValue(val)
+            w.blockSignals(False)
+
+        self._projection_mode = 'none'
+        self._projection_cache = None
+        self._bg_subtract_on = False
+        self._bg_subtract_window = 2
+        self._clahe_on = False
+        self._clahe_clip = 2.0
+        self._clahe_tile = 8
+        self._frangi_on = False
+        self._frangi_sigma_min = 1.0
+        self._frangi_sigma_max = 4.0
+        self._frangi_n_sigmas = 4
+        self._frangi_black_ridges = False
+        self._gamma = 1.0
+        self._invert = False
+
+        # Sync the live numeric labels.
+        self.lbl_bg_window.setText("2")
+        self.lbl_clahe_clip.setText("2.0")
+        self.lbl_clahe_tile.setText("8")
+        self.lbl_frangi_smin.setText("1.0")
+        self.lbl_frangi_smax.setText("4.0")
+        self.lbl_frangi_n.setText("4")
+        self.lbl_gamma.setText("1.00")
+
         self._rerender()
 
     def _apply_icons(self):
