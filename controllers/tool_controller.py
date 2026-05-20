@@ -350,14 +350,10 @@ class Annotation2D(QObject):
                 width = 2
             z_val = 10 if self.is_selected else (5 if self.is_locked else 2)
         elif self.is_locked:
-            if self.controller._hide_locked_borders:
-                color = None
-                width = 0
-            else:
-                color = 'g'
-                width = 3 if self.is_selected else 1
-                if self.is_selected:
-                    style = Qt.PenStyle.DashLine
+            color = 'g'
+            width = 3 if self.is_selected else 1
+            if self.is_selected:
+                style = Qt.PenStyle.DashLine
             z_val = 5
         elif self.is_selected:
             color = 'y'
@@ -492,7 +488,6 @@ class ToolController:
         self._last_size = (40, 40)
         self._undo_stack = UndoStack()
         self._geometry_snapshot = None
-        self._hide_locked_borders = False
         self._label_color_mode = False  # status-based R/Y/G coloring
         self._seg_edit_mode = 'select'  # 'select' | 'paint' | 'erase'
         self._is_painting = False       # True while mouse is pressed in paint/erase mode
@@ -513,7 +508,6 @@ class ToolController:
         self.window.btn_unlock_all.clicked.connect(self.unlock_all)
         self.window.btn_toggle_shape.clicked.connect(self.toggle_shape_view)
         self.window.btn_hide_locked.clicked.connect(self.toggle_hide_locked)
-        self.window.btn_hide_borders.clicked.connect(self.toggle_hide_borders)
         self.window.btn_label_colors.clicked.connect(self.toggle_label_colors)
         self.window.btn_export_cells.clicked.connect(self.export_cells)
         self.window.btn_export_veins.clicked.connect(self.export_veins)
@@ -553,7 +547,6 @@ class ToolController:
             QShortcut(QKeySequence("L"),          self.window, self.lock_active),
             QShortcut(QKeySequence("U"),          self.window, self.unlock_active),
             QShortcut(QKeySequence("H"),          self.window, self._shortcut_hide_locked),
-            QShortcut(QKeySequence("B"),          self.window, self._shortcut_hide_borders),
             QShortcut(QKeySequence("O"),          self.window, self._shortcut_toggle_shape),
             QShortcut(QKeySequence("R"),          self.window, self.reset_zoom),
             QShortcut(QKeySequence("Delete"),     self.window, self.delete_selected),
@@ -1276,12 +1269,6 @@ class ToolController:
             if anno.is_locked:
                 anno.set_visible(not checked)
 
-    def toggle_hide_borders(self, checked):
-        self._hide_locked_borders = checked
-        for anno in self._get_frame_annotations():
-            if anno.is_locked:
-                anno.update_visuals()
-
     def toggle_label_colors(self, checked):
         self._label_color_mode = checked
         for anno in self._get_frame_annotations():
@@ -1293,11 +1280,6 @@ class ToolController:
         btn = self.window.btn_hide_locked
         btn.setChecked(not btn.isChecked())
         self.toggle_hide_locked(btn.isChecked())
-
-    def _shortcut_hide_borders(self):
-        btn = self.window.btn_hide_borders
-        btn.setChecked(not btn.isChecked())
-        self.toggle_hide_borders(btn.isChecked())
 
     def _shortcut_toggle_shape(self):
         btn = self.window.btn_toggle_shape
@@ -2271,8 +2253,6 @@ class ToolController:
         self.window.list_annotations.clear()
         self._undo_stack.clear()
         self.window.btn_hide_locked.setChecked(False)
-        self.window.btn_hide_borders.setChecked(False)
-        self._hide_locked_borders = False
         self.update_inspector()
 
     # ------------------------------------------------------------------

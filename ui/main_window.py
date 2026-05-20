@@ -156,12 +156,8 @@ class MainWindow(QMainWindow):
         self.btn_hide_locked = QPushButton("Hide Lkd [H]")
         self.btn_hide_locked.setCheckable(True)
         self.btn_hide_locked.setToolTip("Toggle visibility of locked annotations (H)")
-        self.btn_hide_borders = QPushButton("Hide Brd [B]")
-        self.btn_hide_borders.setCheckable(True)
-        self.btn_hide_borders.setToolTip("Toggle border visibility on locked annotations (B)")
         toggle_row.addWidget(self.btn_toggle_shape)
         toggle_row.addWidget(self.btn_hide_locked)
-        toggle_row.addWidget(self.btn_hide_borders)
 
         toggle_row2 = QHBoxLayout()
         toggle_row2.setSpacing(4)
@@ -565,7 +561,7 @@ class MainWindow(QMainWindow):
             f"({self.video_data.width} x {self.video_data.height})")
 
     def _update_title(self):
-        base = "Cell Video Labeller"
+        base = "Eye Data Labeller"
         if self._current_file:
             base += f"  \u2014  {os.path.basename(self._current_file)}"
         self.setWindowTitle(base)
