@@ -24,6 +24,12 @@ class MainWindow(QMainWindow):
         # what is composed into the pyqtgraph ImageItem.
         self._projection_mode = 'none'      # 'none' | 'std' | 'max' | 'mean' | 'sum' | 'min'
         self._projection_cache = None       # (H, W) uint8
+        self._projection_cache_key = None   # tuple — invalidates cache when changed
+        self._proj_window_mode = 'all'      # 'all' | 'sliding' | 'range'
+        self._proj_sliding_n = 3
+        self._proj_range_lo = 0
+        self._proj_range_hi = 0
+        self._proj_percentile_clip = False
         self._bg_subtract_on = False
         self._bg_subtract_window = 2
         self._clahe_on = False
@@ -43,6 +49,11 @@ class MainWindow(QMainWindow):
         # Wire every View-panel control to the same re-render path.
         self.btn_reset_view.clicked.connect(self._reset_view_filters)
         self.combo_projection.currentTextChanged.connect(self._on_projection_changed)
+        self.combo_proj_window.currentTextChanged.connect(self._on_proj_window_mode_changed)
+        self.slider_proj_sliding.valueChanged.connect(self._on_proj_sliding_changed)
+        self.spin_proj_range_lo.valueChanged.connect(self._on_proj_range_lo_changed)
+        self.spin_proj_range_hi.valueChanged.connect(self._on_proj_range_hi_changed)
+        self.chk_proj_clip.toggled.connect(self._on_proj_clip_toggled)
         self.chk_bg_subtract.toggled.connect(self._on_bg_subtract_toggled)
         self.slider_bg_window.valueChanged.connect(self._on_bg_window_changed)
         self.chk_clahe.toggled.connect(self._on_clahe_toggled)
@@ -447,17 +458,81 @@ class MainWindow(QMainWindow):
 
         # ---- Projection ------------------------------------------------
         display_layout.addWidget(self._filter_divider("Projection"))
+
+        # Reduction mode + Window mode share a row
         proj_row = QHBoxLayout()
         proj_row.setSpacing(4)
         proj_row.addWidget(QLabel("Mode"))
         self.combo_projection = QComboBox()
         self.combo_projection.addItems(["None", "Std", "Max", "Mean", "Sum", "Min"])
         self.combo_projection.setToolTip(
-            "Replace the live frame with a temporal projection across the "
-            "whole stack.\nStd is the headline mode for retinal AOSLO — "
-            "stationary vessel walls drop out, moving cells pop.")
+            "Reduction across the selected frame window.\n"
+            "Std is the headline mode for AOSLO — stationary vessel walls\n"
+            "drop out, moving cells pop.")
         proj_row.addWidget(self.combo_projection, stretch=1)
         display_layout.addLayout(proj_row)
+
+        win_mode_row = QHBoxLayout()
+        win_mode_row.setSpacing(4)
+        win_mode_row.addWidget(QLabel("Window"))
+        self.combo_proj_window = QComboBox()
+        self.combo_proj_window.addItems(["All frames", "Sliding ±N", "Range"])
+        self.combo_proj_window.setToolTip(
+            "All frames: project across the whole stack (cached, one image).\n"
+            "Sliding ±N: project around the current frame — projection "
+            "follows the timeline.\n"
+            "Range: project over a fixed [lo..hi] frame range.")
+        win_mode_row.addWidget(self.combo_proj_window, stretch=1)
+        display_layout.addLayout(win_mode_row)
+
+        # Sliding ±N slider (visible only in 'sliding' mode)
+        self.proj_sliding_row = QWidget()
+        slide_lay = QHBoxLayout(self.proj_sliding_row)
+        slide_lay.setContentsMargins(0, 0, 0, 0)
+        slide_lay.setSpacing(4)
+        slide_lay.addWidget(QLabel("± N"))
+        self.slider_proj_sliding = QSlider(Qt.Orientation.Horizontal)
+        self.slider_proj_sliding.setRange(1, 30)
+        self.slider_proj_sliding.setValue(3)
+        self.slider_proj_sliding.setToolTip(
+            "Half-width of the sliding window around the current frame.")
+        slide_lay.addWidget(self.slider_proj_sliding, stretch=1)
+        self.lbl_proj_sliding = QLabel("3")
+        self.lbl_proj_sliding.setFixedWidth(28)
+        self.lbl_proj_sliding.setStyleSheet("font-family: monospace; color: #aaa;")
+        slide_lay.addWidget(self.lbl_proj_sliding)
+        display_layout.addWidget(self.proj_sliding_row)
+        self.proj_sliding_row.setVisible(False)
+
+        # Range [lo..hi] spinboxes (visible only in 'range' mode)
+        self.proj_range_row = QWidget()
+        rng_lay = QHBoxLayout(self.proj_range_row)
+        rng_lay.setContentsMargins(0, 0, 0, 0)
+        rng_lay.setSpacing(4)
+        rng_lay.addWidget(QLabel("Range"))
+        self.spin_proj_range_lo = QSpinBox()
+        self.spin_proj_range_lo.setRange(0, 0)
+        self.spin_proj_range_lo.setPrefix("lo: ")
+        rng_lay.addWidget(self.spin_proj_range_lo)
+        self.spin_proj_range_hi = QSpinBox()
+        self.spin_proj_range_hi.setRange(0, 0)
+        self.spin_proj_range_hi.setPrefix("hi: ")
+        rng_lay.addWidget(self.spin_proj_range_hi)
+        rng_lay.addStretch(1)
+        display_layout.addWidget(self.proj_range_row)
+        self.proj_range_row.setVisible(False)
+
+        # Percentile-clip toggle for normalization
+        clip_row = QHBoxLayout()
+        clip_row.setSpacing(4)
+        self.chk_proj_clip = QCheckBox("Percentile clip (1–99%)")
+        self.chk_proj_clip.setToolTip(
+            "Normalize the projection using the 1st..99th percentile of its\n"
+            "values instead of full min/max. Stops a single hot pixel from\n"
+            "washing out the displayed contrast.")
+        clip_row.addWidget(self.chk_proj_clip)
+        clip_row.addStretch(1)
+        display_layout.addLayout(clip_row)
 
         # ---- Background subtraction -----------------------------------
         display_layout.addWidget(self._filter_divider("Background subtraction"))
@@ -792,18 +867,39 @@ class MainWindow(QMainWindow):
                                for i in range(self.video_data.num_frames)])
         return motion.bg_subtract(frames, idx, self._bg_subtract_window)
 
+    def _projection_cache_key_now(self):
+        """Tuple identifying the inputs the cached projection depends on.
+
+        For Sliding-window mode, the cache must invalidate every time the
+        current frame moves; for All / Range it persists across frames.
+        """
+        ctr = self._current_frame_idx if self._proj_window_mode == 'sliding' else None
+        return (self._projection_mode, self._proj_window_mode, self._proj_sliding_n,
+                self._proj_range_lo, self._proj_range_hi,
+                self._proj_percentile_clip, ctr)
+
     def _get_projection(self):
-        if self._projection_cache is not None:
-            return self._projection_cache
         if not self.video_data:
             return None
+        key = self._projection_cache_key_now()
+        if self._projection_cache is not None and key == self._projection_cache_key:
+            return self._projection_cache
         from core import projections
         frames = getattr(self.video_data, 'frames', None)
         if frames is None:
             import numpy as np
             frames = np.stack([self.video_data.get_frame(i)
                                for i in range(self.video_data.num_frames)])
-        self._projection_cache = projections.project_stack(frames, self._projection_mode)
+        self._projection_cache = projections.project_stack(
+            frames, self._projection_mode,
+            window_mode=self._proj_window_mode,
+            window=self._proj_sliding_n,
+            center=self._current_frame_idx,
+            range_lo=self._proj_range_lo,
+            range_hi=self._proj_range_hi,
+            percentile_clip=self._proj_percentile_clip,
+        )
+        self._projection_cache_key = key
         return self._projection_cache
 
     def _rerender(self):
@@ -814,6 +910,50 @@ class MainWindow(QMainWindow):
         self._projection_mode = (text or 'none').lower()
         self._projection_cache = None
         self._rerender()
+
+    def _on_proj_window_mode_changed(self, text):
+        mode_map = {"All frames": 'all', "Sliding ±N": 'sliding', "Range": 'range'}
+        self._proj_window_mode = mode_map.get(text, 'all')
+        self.proj_sliding_row.setVisible(self._proj_window_mode == 'sliding')
+        self.proj_range_row.setVisible(self._proj_window_mode == 'range')
+        self._projection_cache = None
+        if self._projection_mode != 'none':
+            self._rerender()
+
+    def _on_proj_sliding_changed(self, value):
+        self._proj_sliding_n = int(value)
+        self.lbl_proj_sliding.setText(str(int(value)))
+        if self._projection_mode != 'none' and self._proj_window_mode == 'sliding':
+            self._projection_cache = None
+            self._rerender()
+
+    def _on_proj_range_lo_changed(self, value):
+        self._proj_range_lo = int(value)
+        if self._proj_range_lo > self._proj_range_hi:
+            self.spin_proj_range_hi.blockSignals(True)
+            self.spin_proj_range_hi.setValue(self._proj_range_lo)
+            self.spin_proj_range_hi.blockSignals(False)
+            self._proj_range_hi = self._proj_range_lo
+        if self._projection_mode != 'none' and self._proj_window_mode == 'range':
+            self._projection_cache = None
+            self._rerender()
+
+    def _on_proj_range_hi_changed(self, value):
+        self._proj_range_hi = int(value)
+        if self._proj_range_hi < self._proj_range_lo:
+            self.spin_proj_range_lo.blockSignals(True)
+            self.spin_proj_range_lo.setValue(self._proj_range_hi)
+            self.spin_proj_range_lo.blockSignals(False)
+            self._proj_range_lo = self._proj_range_hi
+        if self._projection_mode != 'none' and self._proj_window_mode == 'range':
+            self._projection_cache = None
+            self._rerender()
+
+    def _on_proj_clip_toggled(self, checked):
+        self._proj_percentile_clip = bool(checked)
+        self._projection_cache = None
+        if self._projection_mode != 'none':
+            self._rerender()
 
     def _on_bg_subtract_toggled(self, checked):
         self._bg_subtract_on = bool(checked)
@@ -896,8 +1036,14 @@ class MainWindow(QMainWindow):
         Block signals during the slider/checkbox updates so we don't fire
         a re-render per widget — single re-render at the end.
         """
+        n_frames = self.video_data.num_frames if self.video_data else 1
         defaults = [
             (self.combo_projection, 0),
+            (self.combo_proj_window, 0),
+            (self.slider_proj_sliding, 3),
+            (self.spin_proj_range_lo, 0),
+            (self.spin_proj_range_hi, max(0, n_frames - 1)),
+            (self.chk_proj_clip, False),
             (self.chk_bg_subtract, False),
             (self.slider_bg_window, 2),
             (self.chk_clahe, False),
@@ -923,6 +1069,14 @@ class MainWindow(QMainWindow):
 
         self._projection_mode = 'none'
         self._projection_cache = None
+        self._projection_cache_key = None
+        self._proj_window_mode = 'all'
+        self._proj_sliding_n = 3
+        self._proj_range_lo = 0
+        self._proj_range_hi = max(0, n_frames - 1)
+        self._proj_percentile_clip = False
+        self.proj_sliding_row.setVisible(False)
+        self.proj_range_row.setVisible(False)
         self._bg_subtract_on = False
         self._bg_subtract_window = 2
         self._clahe_on = False
@@ -937,6 +1091,7 @@ class MainWindow(QMainWindow):
         self._invert = False
 
         # Sync the live numeric labels.
+        self.lbl_proj_sliding.setText("3")
         self.lbl_bg_window.setText("2")
         self.lbl_clahe_clip.setText("2.0")
         self.lbl_clahe_tile.setText("8")
@@ -1086,6 +1241,19 @@ class MainWindow(QMainWindow):
         self.spin_frame.setRange(0, n - 1)
         self.spin_frame.setValue(0)
         self.lbl_total_frames.setText(f"/ {n - 1}")
+
+        # Projection range defaults to the whole stack.
+        for spin in (self.spin_proj_range_lo, self.spin_proj_range_hi):
+            spin.blockSignals(True)
+            spin.setRange(0, n - 1)
+            spin.blockSignals(False)
+        self.spin_proj_range_lo.setValue(0)
+        self.spin_proj_range_hi.setValue(n - 1)
+        self._proj_range_lo = 0
+        self._proj_range_hi = n - 1
+        self._projection_cache = None
+        # Cap sliding ±N at half the stack so it can never exceed it.
+        self.slider_proj_sliding.setMaximum(max(1, n // 2 + 1))
 
         self._init_level_sliders()
         self.display_frame(0, auto_range=True)

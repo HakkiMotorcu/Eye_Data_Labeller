@@ -18,27 +18,54 @@ def available_modes():
     return _MODES
 
 
-def project_stack(frames, mode, window=None, center=None):
+def _select_frames(frames, window_mode, center, window, range_lo, range_hi):
+    """Slice ``frames`` along axis 0 according to the window mode.
+
+    ``window_mode`` ∈ {'all', 'sliding', 'range'}.
+    """
+    T = frames.shape[0]
+    if window_mode == 'sliding' and center is not None and window is not None:
+        lo = max(0, int(center) - int(window))
+        hi = min(T, int(center) + int(window) + 1)
+        return frames[lo:hi]
+    if window_mode == 'range' and range_lo is not None and range_hi is not None:
+        lo = max(0, int(range_lo))
+        hi = min(T, int(range_hi) + 1)
+        if hi <= lo:
+            hi = lo + 1
+        return frames[lo:hi]
+    return frames
+
+
+def project_stack(frames, mode, *,
+                  window_mode='all', window=None, center=None,
+                  range_lo=None, range_hi=None,
+                  percentile_clip=False, clip_lo=1.0, clip_hi=99.0):
     """Reduce a ``(T, H, W)`` stack to one ``(H, W)`` projection.
 
     ``mode``: one of available_modes(). ``'none'`` is a no-op pass-through.
-    ``window`` + ``center``: if both set, projects over the ±window frames
-    around ``center`` instead of the whole stack. Useful for "what's moving
-    around frame i" workflows.
 
-    Output is a uint8 image scaled to the data's own min/max.
+    ``window_mode``:
+      * ``'all'``     — project across every frame in the stack (default).
+      * ``'sliding'`` — project across ``±window`` frames around ``center``.
+                        Both must be supplied. The projection then follows
+                        the active frame.
+      * ``'range'``   — project across frames ``[range_lo, range_hi]``.
+
+    ``percentile_clip``: when True, normalize using the [clip_lo, clip_hi]
+    percentiles of the projection instead of its raw min/max. Stops a
+    single hot pixel from washing out the displayed contrast.
+
+    Output is a uint8 image.
     """
     if mode == 'none' or mode is None:
         return None
     if frames.ndim == 2:
         frames = frames[np.newaxis, ...]
 
-    if window is not None and center is not None:
-        lo = max(0, int(center) - int(window))
-        hi = min(frames.shape[0], int(center) + int(window) + 1)
-        frames = frames[lo:hi]
+    selected = _select_frames(frames, window_mode, center, window, range_lo, range_hi)
 
-    f = frames.astype(np.float32, copy=False)
+    f = selected.astype(np.float32, copy=False)
     if mode == 'std':
         out = f.std(axis=0)
     elif mode == 'max':
@@ -52,7 +79,11 @@ def project_stack(frames, mode, window=None, center=None):
     else:
         raise ValueError(f"Unknown projection mode: {mode!r}")
 
-    mn, mx = float(out.min()), float(out.max())
+    if percentile_clip:
+        mn, mx = float(np.percentile(out, clip_lo)), float(np.percentile(out, clip_hi))
+    else:
+        mn, mx = float(out.min()), float(out.max())
+
     if mx <= mn:
         return np.zeros(out.shape, dtype=np.uint8)
-    return ((out - mn) / (mx - mn) * 255.0).astype(np.uint8)
+    return np.clip((out - mn) / (mx - mn) * 255.0, 0, 255).astype(np.uint8)
