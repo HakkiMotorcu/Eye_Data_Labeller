@@ -786,6 +786,58 @@ class ToolController:
         self.window._update_seg_overlay()
 
     # ------------------------------------------------------------------
+    # ANNOTATION CRUD HELPERS
+    # ------------------------------------------------------------------
+    def _ensure_seg_data(self):
+        """Guarantee ``window.seg_data`` exists once a video is loaded.
+
+        Paint-only classes (vessel, capillary) need a segmentation layer to
+        write into. We previously created the seg layer only when loading a
+        pre-existing mask file or running SAM — opening a raw video and
+        clicking Vessel/Capillary did nothing because there was no seg to
+        paint. Now we auto-create an empty layer on first annotation.
+        """
+        if self.window.seg_data is not None:
+            return self.window.seg_data
+        vd = self.window.video_data
+        if vd is None:
+            return None
+        from core.volume_data import SegmentationData
+        self.window.seg_data = SegmentationData.empty(vd.width, vd.height, vd.num_frames)
+        self.window._seg_visible = True
+        return self.window.seg_data
+
+    def _next_available_name(self, prefix):
+        """Lowest unused integer suffix for ``{prefix}_{n}``.
+
+        Naming is gap-filling: with Cell_1, Cell_4 present, the next add is
+        Cell_2; after that Cell_3, then Cell_5. Each prefix (Cell / Vessel /
+        Capillary) has its own number space.
+
+        Annotations on multiple frames sharing one identity (same
+        instance_id) are counted once.
+        """
+        used = set()
+        needle = f"{prefix}_"
+        for anno in self.annotations:
+            if not anno.name.startswith(needle):
+                continue
+            tail = anno.name[len(needle):]
+            try:
+                used.add(int(tail))
+            except ValueError:
+                # SAM may produce 'Cell_5_2' — count the primary number only.
+                head = tail.split('_', 1)[0]
+                try:
+                    used.add(int(head))
+                except ValueError:
+                    pass
+        n = 1
+        while n in used:
+            n += 1
+        return n, f"{prefix}_{n}"
+
+    # ------------------------------------------------------------------
     # ANNOTATION CRUD
     # ------------------------------------------------------------------
     def spawn_new_annotation(self, start_pos=None):
@@ -795,6 +847,11 @@ class ToolController:
             return
 
         frame_idx = self.window._current_frame_idx
+
+        # Auto-create the seg layer if this is the first annotation on a raw
+        # video. Needed so cells get an instance_id assigned (and so
+        # vessels/capillaries can be painted at all).
+        self._ensure_seg_data()
 
         if start_pos is None:
             cx, cy = self._get_visible_center()
@@ -813,7 +870,7 @@ class ToolController:
             if seg is not None and instance_id is not None:
                 seg.register_instance_color(instance_id, color)
         else:
-            # No match — assign a new instance
+            # No match — assign a new instance with a gap-filled name.
             seg = self.window.seg_data
             instance_id = None
             color = None
@@ -821,8 +878,8 @@ class ToolController:
                 instance_id = seg.next_instance_id()
                 color = seg.register_instance_color(instance_id)
                 self.anno_counter = max(self.anno_counter, instance_id)
-            self.anno_counter += 1
-            name = f"Cell_{self.anno_counter}"
+            n, name = self._next_available_name('Cell')
+            self.anno_counter = max(self.anno_counter, n)
 
         new_anno = Annotation2D(
             name, self.window.view_frame, self,
@@ -867,9 +924,12 @@ class ToolController:
         frame_idx = self.window._current_frame_idx
         total_frames = self.window.video_data.num_frames
 
+        # Paint-only classes have no bbox; the seg layer IS their only
+        # representation. Auto-create one if the user opened a raw video.
+        seg = self._ensure_seg_data()
+
         default_color = self._PAINT_ONLY_COLORS.get(class_type, (180, 180, 180))
 
-        seg = self.window.seg_data
         instance_id = None
         color = None
         if seg is not None:
@@ -877,8 +937,8 @@ class ToolController:
             color = seg.register_instance_color(instance_id, color=default_color)
             self.anno_counter = max(self.anno_counter, instance_id)
 
-        self.anno_counter += 1
-        name = f"{name_prefix}_{self.anno_counter}"
+        n, name = self._next_available_name(name_prefix)
+        self.anno_counter = max(self.anno_counter, n)
 
         # --- Propagation dialog ---
         propagate_all = False
@@ -1896,15 +1956,12 @@ class ToolController:
 
         # Create SegmentationData from the result
         from core.volume_data import SegmentationData
-        # Create a custom segmentation data for single frame
-        seg_data = SegmentationData.__new__(SegmentationData)
-        seg_data.filepath = None
-        seg_data.num_frames = self.window.video_data.num_frames
-        seg_data.height = self.window.video_data.height
-        seg_data.width = self.window.video_data.width
-        seg_data.masks = np.zeros((seg_data.num_frames, seg_data.height, seg_data.width), dtype=np.int32)
+        seg_data = SegmentationData.empty(
+            self.window.video_data.width,
+            self.window.video_data.height,
+            self.window.video_data.num_frames,
+        )
         seg_data.masks[frame_idx] = segmentation.astype(np.int32)
-        seg_data.instance_colors = {}
         # Assign colors
         unique_ids = np.unique(segmentation)
         unique_ids = unique_ids[unique_ids != 0]

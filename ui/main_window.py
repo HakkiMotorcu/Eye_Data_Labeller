@@ -91,7 +91,7 @@ class MainWindow(QMainWindow):
             self.list_annotations.EditTrigger.DoubleClicked)
         list_layout.addWidget(self.list_annotations)
 
-        # Add / Delete rows (two rows to fit the expanded class set)
+        # Row 1: create — Cell / Vessel / Capillary
         add_row = QHBoxLayout()
         add_row.setSpacing(4)
         self.btn_add = QPushButton("Cell [A]")
@@ -107,25 +107,20 @@ class MainWindow(QMainWindow):
         add_row.addWidget(self.btn_add_capillary)
         list_layout.addLayout(add_row)
 
-        del_row = QHBoxLayout()
-        del_row.setSpacing(4)
+        # Row 2: modify — Delete / Rename / Fit BBox
+        actions_row = QHBoxLayout()
+        actions_row.setSpacing(4)
         self.btn_delete = QPushButton("Del [Del]")
         self.btn_delete.setToolTip("Delete the selected annotation")
-        self.btn_delete.setStyleSheet("color: red;")
-        del_row.addWidget(self.btn_delete)
-        del_row.addStretch(1)
-        list_layout.addLayout(del_row)
-
-        # Rename / Fit row
-        rename_fit_row = QHBoxLayout()
-        rename_fit_row.setSpacing(4)
+        self.btn_delete.setStyleSheet("color: #e76f51;")
         self.btn_rename = QPushButton("Rename")
         self.btn_rename.setToolTip("Rename selected annotation (double-click list item)")
         self.btn_fit_bbox = QPushButton("Fit BBox")
         self.btn_fit_bbox.setToolTip("Fit bbox to actual seg pixels")
-        rename_fit_row.addWidget(self.btn_rename)
-        rename_fit_row.addWidget(self.btn_fit_bbox)
-        list_layout.addLayout(rename_fit_row)
+        actions_row.addWidget(self.btn_delete)
+        actions_row.addWidget(self.btn_rename)
+        actions_row.addWidget(self.btn_fit_bbox)
+        list_layout.addLayout(actions_row)
 
         list_group.setLayout(list_layout)
 

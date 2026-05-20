@@ -414,6 +414,23 @@ class SegmentationData:
             # Safe mode: only fill background or own pixels
             region[(region == 0) | (region == instance_id)] = instance_id
 
+    @classmethod
+    def empty(cls, width, height, num_frames):
+        """Construct an empty SegmentationData of the given shape.
+
+        Used when the user starts labeling on a raw video/image with no
+        pre-existing segmentation file — paint/erase need a (T, H, W) int
+        mask layer to write into.
+        """
+        seg = cls.__new__(cls)
+        seg.filepath = None
+        seg.num_frames = int(num_frames)
+        seg.height = int(height)
+        seg.width = int(width)
+        seg.masks = np.zeros((seg.num_frames, seg.height, seg.width), dtype=np.int32)
+        seg.instance_colors = {}
+        return seg
+
     def next_instance_id(self):
         """Return an unused instance ID (max existing + 4, quantised)."""
         max_mask = int(self.masks.max()) if self.masks.size > 0 else 0
