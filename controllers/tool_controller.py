@@ -509,7 +509,6 @@ class ToolController:
         self.window.btn_unlock.clicked.connect(self.unlock_active)
         self.window.btn_lock_all.clicked.connect(self.lock_all)
         self.window.btn_unlock_all.clicked.connect(self.unlock_all)
-        self.window.btn_toggle_shape.clicked.connect(self.toggle_shape_view)
         self.window.btn_hide_locked.clicked.connect(self.toggle_hide_locked)
         self.window.btn_label_colors.clicked.connect(self.toggle_label_colors)
         self.window.btn_export_cells.clicked.connect(self.export_cells)
@@ -550,7 +549,6 @@ class ToolController:
             QShortcut(QKeySequence("L"),          self.window, self.lock_active),
             QShortcut(QKeySequence("U"),          self.window, self.unlock_active),
             QShortcut(QKeySequence("H"),          self.window, self._shortcut_hide_locked),
-            QShortcut(QKeySequence("O"),          self.window, self._shortcut_toggle_shape),
             QShortcut(QKeySequence("R"),          self.window, self.reset_zoom),
             QShortcut(QKeySequence("Delete"),     self.window, self.delete_selected),
             QShortcut(QKeySequence("Backspace"),  self.window, self.delete_selected),
@@ -1264,13 +1262,6 @@ class ToolController:
         self._undo_stack.push(DeleteAnnotationCmd(self, target, index))
         self.state.annotations_changed.emit()
 
-    def toggle_shape_view(self, checked):
-        self.current_shape_mode = 'ellipse' if checked else 'rect'
-        label = 'Oval [O]' if checked else 'BBox [O]'
-        self.window.btn_toggle_shape.setText(label)
-        for anno in self._get_frame_annotations():
-            anno.set_shape_mode(self.current_shape_mode)
-
     def toggle_hide_locked(self, checked):
         for anno in self._get_frame_annotations():
             if anno.is_locked:
@@ -1287,11 +1278,6 @@ class ToolController:
         btn = self.window.btn_hide_locked
         btn.setChecked(not btn.isChecked())
         self.toggle_hide_locked(btn.isChecked())
-
-    def _shortcut_toggle_shape(self):
-        btn = self.window.btn_toggle_shape
-        btn.setChecked(not btn.isChecked())
-        self.toggle_shape_view(btn.isChecked())
 
     def _shortcut_toggle_force_paint(self):
         btn = self.window.btn_force_paint

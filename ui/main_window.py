@@ -142,13 +142,11 @@ class MainWindow(QMainWindow):
 
         toggle_row = QHBoxLayout()
         toggle_row.setSpacing(4)
-        self.btn_toggle_shape = QPushButton("BBox [O]")
-        self.btn_toggle_shape.setCheckable(True)
-        self.btn_toggle_shape.setToolTip("Toggle between BBox and Oval mode (O)")
-        self.btn_hide_locked = QPushButton("Hide Lkd [H]")
+        self.btn_hide_locked = QPushButton("Hide Locked BBoxes [H]")
         self.btn_hide_locked.setCheckable(True)
-        self.btn_hide_locked.setToolTip("Toggle visibility of locked annotations (H)")
-        toggle_row.addWidget(self.btn_toggle_shape)
+        self.btn_hide_locked.setToolTip(
+            "Hide bboxes of locked annotations so they don't get in the way\n"
+            "when labeling neighboring cells (H)")
         toggle_row.addWidget(self.btn_hide_locked)
 
         toggle_row2 = QHBoxLayout()
