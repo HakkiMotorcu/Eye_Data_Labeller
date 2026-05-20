@@ -464,6 +464,47 @@ class MainWindow(QMainWindow):
 
         main_layout.addWidget(timeline_group)
 
+        # --- Bottom status bar (napari-style: frame / coords / pixel value) ---
+        sb = self.statusBar()
+        sb.setSizeGripEnabled(False)
+        sb.setStyleSheet(
+            "QStatusBar{background:#1f1f24;border-top:1px solid #2c2c33;}"
+            "QStatusBar::item{border:0;}"
+        )
+
+        self.lbl_status_image = QLabel("no image")
+        self.lbl_status_frame = QLabel("Frame: — / —")
+        self.lbl_status_coords = QLabel("(—, —)")
+        self.lbl_status_value = QLabel("val: —")
+        for w in (self.lbl_status_image, self.lbl_status_frame,
+                  self.lbl_status_coords, self.lbl_status_value):
+            w.setStyleSheet("font-family: monospace; color: #bbb; padding: 0 10px;")
+        # Add a leading info label on the left, others on the right
+        sb.addWidget(self.lbl_status_image)
+        sb.addPermanentWidget(self.lbl_status_frame)
+        sb.addPermanentWidget(self.lbl_status_coords)
+        sb.addPermanentWidget(self.lbl_status_value)
+
+        # Pyqtgraph mouse-move signal — drives coords/value readout.
+        self.view_frame.scene.sigMouseMoved.connect(self._on_mouse_moved)
+
+    def _on_mouse_moved(self, scene_pos):
+        if not self.video_data:
+            return
+        view = self.view_frame.getView()
+        if view is None:
+            return
+        pt = view.mapSceneToView(scene_pos)
+        x, y = int(pt.x()), int(pt.y())
+        if 0 <= x < self.video_data.width and 0 <= y < self.video_data.height:
+            frame = self.video_data.get_frame(self._current_frame_idx)
+            val = int(frame[y, x])
+            self.lbl_status_coords.setText(f"(x={x}, y={y})")
+            self.lbl_status_value.setText(f"val: {val}")
+        else:
+            self.lbl_status_coords.setText("(—, —)")
+            self.lbl_status_value.setText("val: —")
+
     @staticmethod
     def _make_collapsible_group(title, base_ss=""):
         grp = QGroupBox(title)
@@ -559,6 +600,14 @@ class MainWindow(QMainWindow):
         self.lbl_frame_title.setText(
             f"Frame {idx} / {self.video_data.num_frames - 1}  "
             f"({self.video_data.width} x {self.video_data.height})")
+        # Status bar mirror
+        if hasattr(self, 'lbl_status_frame'):
+            self.lbl_status_frame.setText(
+                f"Frame: {idx} / {self.video_data.num_frames - 1}")
+            if self._current_file:
+                self.lbl_status_image.setText(
+                    f"{os.path.basename(self._current_file)} — "
+                    f"{self.video_data.width}×{self.video_data.height}")
 
     def _update_title(self):
         base = "Eye Data Labeller"
