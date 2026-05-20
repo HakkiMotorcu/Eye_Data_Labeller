@@ -67,25 +67,17 @@ class MainWindow(QMainWindow):
         _COMPACT_SS = ("QGroupBox{padding-top:14px;margin-top:4px}"
                        "QGroupBox::title{subcontrol-origin:margin;left:6px}")
 
-        # 1. Inspector
-        inspector_group = QGroupBox("Inspector")
-        inspector_group.setStyleSheet(_COMPACT_SS)
-        inspector_layout = QVBoxLayout()
-        inspector_layout.setContentsMargins(4, 2, 4, 4)
-        inspector_layout.setSpacing(2)
-
-        self.lbl_coords = QLabel("No annotation selected")
-        self.lbl_coords.setStyleSheet("font-family: monospace; color: #888; font-size: 11px;")
-        self.lbl_coords.setWordWrap(True)
-        inspector_layout.addWidget(self.lbl_coords)
-        inspector_group.setLayout(inspector_layout)
-
-        # 2. Annotation List + stats
+        # 1. Annotations (formerly Inspector + Annotations, merged)
         list_group = QGroupBox("Annotations")
         list_group.setStyleSheet(_COMPACT_SS)
         list_layout = QVBoxLayout()
         list_layout.setContentsMargins(4, 2, 4, 4)
         list_layout.setSpacing(2)
+
+        self.lbl_coords = QLabel("No annotation selected")
+        self.lbl_coords.setStyleSheet("font-family: monospace; color: #888; font-size: 11px;")
+        self.lbl_coords.setWordWrap(True)
+        list_layout.addWidget(self.lbl_coords)
 
         self.lbl_stats = QLabel("0 annotations")
         self.lbl_stats.setStyleSheet("font-family: monospace; color: #aaa; font-size: 10px;")
@@ -171,13 +163,16 @@ class MainWindow(QMainWindow):
         tools_layout.addLayout(lock_all_layout)
         tools_layout.addLayout(toggle_row)
         tools_layout.addLayout(toggle_row2)
-        tools_group.setLayout(tools_layout)
 
-        # --- Seg Editing tools ---
-        seg_edit_group = self._make_collapsible_group("Seg Editing", _COMPACT_SS)
-        seg_edit_layout = QVBoxLayout()
-        seg_edit_layout.setContentsMargins(4, 2, 4, 4)
-        seg_edit_layout.setSpacing(3)
+        # --- Seg Editing controls (merged into Tools panel) ---
+        from PyQt6.QtWidgets import QFrame
+        _seg_divider = QFrame()
+        _seg_divider.setFrameShape(QFrame.Shape.HLine)
+        _seg_divider.setStyleSheet("color:#444")
+        tools_layout.addWidget(_seg_divider)
+        _seg_label = QLabel("Seg editing")
+        _seg_label.setStyleSheet("color:#888; font-size:10px;")
+        tools_layout.addWidget(_seg_label)
 
         # Mode selector row
         mode_row = QHBoxLayout()
@@ -200,7 +195,7 @@ class MainWindow(QMainWindow):
         mode_row.addWidget(self.btn_mode_select)
         mode_row.addWidget(self.btn_mode_paint)
         mode_row.addWidget(self.btn_mode_erase)
-        seg_edit_layout.addLayout(mode_row)
+        tools_layout.addLayout(mode_row)
 
         # Brush size
         brush_row = QHBoxLayout()
@@ -214,7 +209,7 @@ class MainWindow(QMainWindow):
         self.lbl_brush_size.setFixedWidth(20)
         self.lbl_brush_size.setStyleSheet("font-family: monospace; color: #aaa;")
         brush_row.addWidget(self.lbl_brush_size)
-        seg_edit_layout.addLayout(brush_row)
+        tools_layout.addLayout(brush_row)
 
         # Action buttons
         action_row = QHBoxLayout()
@@ -226,7 +221,7 @@ class MainWindow(QMainWindow):
         self.btn_save_seg.setStyleSheet("color: #2a9d8f; font-weight: bold;")
         action_row.addWidget(self.btn_fill_bbox)
         action_row.addWidget(self.btn_save_seg)
-        seg_edit_layout.addLayout(action_row)
+        tools_layout.addLayout(action_row)
 
         # Force paint toggle (bypasses safe-paint mode)
         force_row = QHBoxLayout()
@@ -242,7 +237,7 @@ class MainWindow(QMainWindow):
             "QPushButton:checked { color: #e76f51; font-weight: bold; }"
             "QPushButton:!checked { color: #2a9d8f; }")
         force_row.addWidget(self.btn_force_paint)
-        seg_edit_layout.addLayout(force_row)
+        tools_layout.addLayout(force_row)
 
         # Propagate mask row
         propagate_row = QHBoxLayout()
@@ -260,11 +255,11 @@ class MainWindow(QMainWindow):
             "  4. Navigate frame-by-frame to adjust where needed")
         self.btn_propagate_mask.setStyleSheet("color: #9370db; font-weight: bold;")
         propagate_row.addWidget(self.btn_propagate_mask)
-        seg_edit_layout.addLayout(propagate_row)
+        tools_layout.addLayout(propagate_row)
 
-        seg_edit_group.setLayout(seg_edit_layout)
+        tools_group.setLayout(tools_layout)
 
-        # 4. File I/O
+        # 3. File I/O
         io_group = self._make_collapsible_group("Import / Export", _COMPACT_SS)
         io_layout = QVBoxLayout()
         io_layout.setContentsMargins(4, 2, 4, 4)
@@ -347,8 +342,8 @@ class MainWindow(QMainWindow):
 
         io_group.setLayout(io_layout)
 
-        # 5. Display
-        display_group = self._make_collapsible_group("Display", _COMPACT_SS)
+        # 4. View (display + segmentation overlay; Phase 3 will add image-enhancement controls here)
+        display_group = self._make_collapsible_group("View", _COMPACT_SS)
         display_layout = QVBoxLayout()
         display_layout.setContentsMargins(4, 2, 4, 4)
         display_layout.setSpacing(2)
@@ -412,12 +407,10 @@ class MainWindow(QMainWindow):
         display_group.setLayout(display_layout)
 
         # Assemble right panel
-        right_panel.addWidget(inspector_group)
-        right_panel.addWidget(list_group)
-        right_panel.addWidget(tools_group)
-        right_panel.addWidget(seg_edit_group)
-        right_panel.addWidget(io_group)
-        right_panel.addWidget(display_group)
+        right_panel.addWidget(list_group)       # Annotations
+        right_panel.addWidget(tools_group)      # Tools (incl. seg editing)
+        right_panel.addWidget(display_group)    # View
+        right_panel.addWidget(io_group)         # I/O (Phase 2 will rework)
         right_panel.addStretch(1)
 
         scroll_area.setWidget(right_panel_widget)
