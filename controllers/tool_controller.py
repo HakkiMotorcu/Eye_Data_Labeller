@@ -7,6 +7,8 @@ from PyQt6.QtCore import QObject, pyqtSignal, Qt, QTimer
 from PyQt6.QtWidgets import QFileDialog, QMessageBox
 from PyQt6.QtGui import QColor, QFont, QShortcut, QKeySequence
 
+from core.app_state import AppState
+
 try:
     import micro_sam
     from micro_sam import util
@@ -481,6 +483,7 @@ class ToolController:
 
     def __init__(self, main_window):
         self.window = main_window
+        self.state = AppState()
         self.annotations = []
         self.active_annotation = None
         self.anno_counter = 0
@@ -601,6 +604,7 @@ class ToolController:
         self.window.spin_frame.blockSignals(False)
         self.window.display_frame(value)
         self._show_frame_annotations(value)
+        self.state.frame_changed.emit(value)
 
     def _on_spin_frame_changed(self, value):
         self._maybe_fit_bbox(self.active_annotation)
@@ -609,6 +613,7 @@ class ToolController:
         self.window.slider_timeline.blockSignals(False)
         self.window.display_frame(value)
         self._show_frame_annotations(value)
+        self.state.frame_changed.emit(value)
 
     def _go_first_frame(self):
         self.window.slider_timeline.setValue(0)
@@ -821,6 +826,7 @@ class ToolController:
         self._show_frame_annotations(frame_idx)
         self.select_annotation(new_anno)
         self._undo_stack.push(AddAnnotationCmd(self, new_anno))
+        self.state.annotations_changed.emit()
 
     def spawn_vein(self):
         """Create a bbox-less 'vein' annotation, optionally propagated across frames."""
@@ -1256,6 +1262,7 @@ class ToolController:
         self._show_frame_annotations(self.window._current_frame_idx)
         self.window._update_seg_overlay()
         self._undo_stack.push(DeleteAnnotationCmd(self, target, index))
+        self.state.annotations_changed.emit()
 
     def toggle_shape_view(self, checked):
         self.current_shape_mode = 'ellipse' if checked else 'rect'
