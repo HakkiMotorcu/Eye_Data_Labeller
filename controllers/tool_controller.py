@@ -1708,22 +1708,49 @@ class ToolController:
         self.window._update_seg_overlay()
 
     def save_seg_map(self):
-        """Save the modified segmentation masks as a lossless AVI."""
+        """Save the segmentation masks.
+
+        Default format is a multi-page uint16 instance-mask TIF named
+        ``{video}_Masks.tif`` — the collaborator's pipeline format. The
+        legacy AVI export path is kept selectable for backwards-compat
+        with older saved files.
+        """
+        from core import mask_io
+
         seg = self.window.seg_data
         if seg is None:
             QMessageBox.warning(self.window, "Save Seg",
                                 "No segmentation data loaded.")
             return
-        default = os.path.splitext(
-            os.path.basename(seg.filepath))[0] + "_edited.avi"
-        path, _ = QFileDialog.getSaveFileName(
+
+        # Default filename: derive from the input image when seg has no
+        # filepath of its own (i.e. it was auto-created on open).
+        source = seg.filepath or self.window._current_file
+        if source:
+            default_dir = os.path.dirname(source)
+            default_name = os.path.basename(mask_io.default_mask_path(source))
+        else:
+            default_dir = os.getcwd()
+            default_name = "Masks.tif"
+
+        path, selected_filter = QFileDialog.getSaveFileName(
             self.window, "Save Segmentation Masks",
-            os.path.join(os.path.dirname(seg.filepath), default),
-            "AVI Video (*.avi);;All Files (*)")
+            os.path.join(default_dir, default_name),
+            "Instance mask TIF (*.tif *.tiff);;AVI Video (*.avi);;All Files (*)")
         if not path:
             return
+
+        ext = os.path.splitext(path)[1].lower()
         try:
-            seg.save_masks(path)
+            if ext in ('.tif', '.tiff'):
+                mask_io.save_mask_tif(seg.masks, path)
+            elif ext == '.avi':
+                seg.save_masks(path)
+            else:
+                # No extension given — default to TIF so the file is
+                # readable by the collaborator pipeline.
+                path = path + '.tif'
+                mask_io.save_mask_tif(seg.masks, path)
             QMessageBox.information(self.window, "Save Seg",
                                     f"Saved {seg.num_frames} frames to:\n{path}")
         except Exception as e:
@@ -1825,13 +1852,44 @@ class ToolController:
 
     def load_segmentation(self):
         from core.volume_data import SegmentationData
+        from core import mask_io
+
+        # Default search dir = location of the open image, if any.
+        start_dir = (os.path.dirname(self.window._current_file)
+                     if self.window._current_file else os.getcwd())
         path, _ = QFileDialog.getOpenFileName(
             self.window, "Load Segmentation Map",
-            os.getcwd(), "Video Files (*.avi *.mp4);;All Files (*)")
+            start_dir,
+            "Instance mask TIF (*.tif *.tiff);;Video Files (*.avi *.mp4);;All Files (*)")
         if not path:
             return
+
+        ext = os.path.splitext(path)[1].lower()
         try:
-            seg = SegmentationData(path)
+            if ext in ('.tif', '.tiff'):
+                masks = mask_io.load_mask_tif(path)
+                # Pad / crop to match the open image's frame count if it
+                # was loaded; otherwise trust the TIF.
+                vd = self.window.video_data
+                if vd is not None:
+                    if masks.shape[1:] != (vd.height, vd.width):
+                        QMessageBox.warning(
+                            self.window, "Load Seg",
+                            f"Mask size {masks.shape[1:]} does not match image "
+                            f"{(vd.height, vd.width)}. Loading anyway — overlay "
+                            f"will be resized at display time.")
+                seg = SegmentationData.empty(
+                    masks.shape[2], masks.shape[1], masks.shape[0])
+                seg.filepath = path
+                seg.masks = masks.astype(np.int32)
+                # Pre-register colors for every ID present so the overlay
+                # palette is stable.
+                for iid in np.unique(masks):
+                    if iid == 0:
+                        continue
+                    seg.register_instance_color(int(iid))
+            else:
+                seg = SegmentationData(path)
         except Exception as e:
             QMessageBox.critical(self.window, "Error", str(e))
             return

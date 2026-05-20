@@ -4,8 +4,25 @@ from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QPainterPath, QColor, QPen
 from PyQt6.QtCore import Qt, QRectF
 from core.volume_data import VideoData
+from core.frame_source import TiffFrameSource
 from ui.main_window import MainWindow
 from controllers.tool_controller import ToolController
+
+
+_VIDEO_EXTS = {'.avi', '.mp4', '.mkv', '.mov'}
+_TIFF_EXTS = {'.tif', '.tiff'}
+
+
+def load_frame_source(path):
+    """Open a file as the right kind of frame source based on extension."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext in _TIFF_EXTS:
+        return TiffFrameSource(path)
+    if ext in _VIDEO_EXTS:
+        return VideoData(path)
+    raise ValueError(
+        f"Unsupported file type '{ext}'. "
+        f"Accepted: {sorted(_VIDEO_EXTS | _TIFF_EXTS)}")
 
 
 def _make_eye_icon(size=64):
@@ -64,9 +81,10 @@ def pick_video_file(parent=None):
     """Open a file dialog and return the selected path (or None if cancelled)."""
     path, _ = QFileDialog.getOpenFileName(
         parent,
-        "Open Video",
+        "Open Image or Video",
         os.getcwd(),
-        "Video Files (*.avi *.mp4 *.mkv *.mov);;All Files (*)",
+        "All supported (*.tif *.tiff *.avi *.mp4 *.mkv *.mov);;"
+        "TIFF (*.tif *.tiff);;Video (*.avi *.mp4 *.mkv *.mov);;All Files (*)",
     )
     return path if path else None
 
@@ -82,9 +100,9 @@ def main():
     if not file_path:
         sys.exit(0)
 
-    print("Loading Video Data...")
+    print(f"Loading: {file_path}")
     try:
-        data = VideoData(file_path)
+        data = load_frame_source(file_path)
     except Exception as e:
         QMessageBox.critical(None, "Load Error", str(e))
         sys.exit(1)
