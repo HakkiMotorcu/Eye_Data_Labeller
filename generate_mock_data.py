@@ -127,7 +127,7 @@ def try_place_blob(volume, mask, center, radius, intensity_range=(0.6, 1.0), thr
 
     kz0, kz1 = -min(cz-rz,0), bz-max(cz+rz-Z+1,0)
     ky0, ky1 = -min(cy-ry,0), by-max(cy+ry-Y+1,0)
-    kx0, kx1 = -min(cx-rx,0), bz-max(cx+rx-X+1,0)
+    kx0, kx1 = -min(cx-rx,0), bx-max(cx+rx-X+1,0)
 
     vz0, vz1 = max(cz-rz,0), min(cz+rz+1,Z)
     vy0, vy1 = max(cy-ry,0), min(cy+ry+1,Y)

@@ -1812,12 +1812,21 @@ class ToolController:
             QMessageBox.critical(self.window, "Error", "MicroSAM is not installed.")
             return
 
+        if self.window.video_data is None:
+            QMessageBox.critical(self.window, "Error", "Load a video before running SAM.")
+            return
+
         # Load the predictor if not already loaded
         if self._sam_predictor is None:
             try:
-                checkpoint_path = "/Users/hakkimotorcu/Desktop/ Eye_Data_Labeller/models/checkpoints/sam_hela/best.pt"
+                project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                checkpoint_path = os.path.join(
+                    project_root, 'models', 'checkpoints', 'sam_hela', 'best.pt')
                 if not os.path.exists(checkpoint_path):
-                    QMessageBox.critical(self.window, "Error", f"Checkpoint not found: {checkpoint_path}")
+                    QMessageBox.critical(
+                        self.window, "Error",
+                        f"Checkpoint not found: {checkpoint_path}\n\n"
+                        f"Place the fine-tuned weights at models/checkpoints/sam_hela/best.pt.")
                     return
                 self._sam_predictor = util.get_sam_model(model_type="vit_b", checkpoint_path=checkpoint_path)
             except Exception as e:
@@ -1873,8 +1882,10 @@ class ToolController:
         # Clear existing annotations
         self._clear_all_annotations()
 
-        # Create annotations from the segmentation
-        bboxes = seg_data.get_all_bboxes(0)
+        # Create annotations from the segmentation on the frame we actually segmented.
+        # (Previously hardcoded to frame 0, which silently dropped all results when
+        # SAM was run on any other frame.)
+        bboxes = seg_data.get_all_bboxes(frame_idx)
         anno_count = 0
         for (stair_id, blob_idx), (x0, y0, w, h) in bboxes.items():
             color = seg_data.instance_colors.get(stair_id, (255, 80, 80))
