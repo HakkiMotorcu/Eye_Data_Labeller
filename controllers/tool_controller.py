@@ -1863,6 +1863,10 @@ class ToolController:
         Frames that already have pixels for this instance are skipped unless the
         user explicitly confirms overwriting — so per-frame manual edits are
         always preserved by default.
+
+        Only paint-only classes (vessel, capillary) are propagatable. Cells
+        are per-frame identities — a Cell_5 on frame 0 is a different cell
+        than a Cell_5 on frame 3 (tracking happens later, not here).
         """
         anno = self.active_annotation
         seg = self.window.seg_data
@@ -1870,6 +1874,14 @@ class ToolController:
             QMessageBox.information(
                 self.window, "Propagate Mask",
                 "Select an annotation with a segmentation instance first.")
+            return
+        if not anno.is_paint_only:
+            QMessageBox.information(
+                self.window, "Propagate Mask",
+                f"Propagate Mask only applies to vessels and capillaries — "
+                f"not cells.\n\n"
+                f"'{anno.name}' is a {anno.class_type}, which is a per-frame "
+                f"identity. Tracking cells across frames is a Phase 5 feature.")
             return
         if seg is None:
             QMessageBox.information(
