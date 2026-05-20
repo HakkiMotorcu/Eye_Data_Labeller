@@ -18,8 +18,30 @@ class MainWindow(QMainWindow):
         self._current_file = None
         self._current_frame_idx = 0
 
+        # ----- View state (display-only enhancement pipeline) -----
+        # These never mutate the underlying frame data. They only affect
+        # what is composed into the pyqtgraph ImageItem.
+        self._projection_mode = 'none'      # 'none' | 'std' | 'max' | 'mean' | 'sum' | 'min'
+        self._projection_cache = None       # (H, W) uint8
+        self._bg_subtract_on = False
+        self._bg_subtract_window = 2
+        self._clahe_on = False
+        self._frangi_on = False
+        self._gamma = 1.0
+        self._invert = False
+
         pg.setConfigOptions(imageAxisOrder='row-major')
         self._setup_ui()
+
+        # Wire every View-panel control to the same re-render path.
+        self.combo_projection.currentTextChanged.connect(self._on_projection_changed)
+        self.chk_bg_subtract.toggled.connect(self._on_bg_subtract_toggled)
+        self.slider_bg_window.valueChanged.connect(self._on_bg_window_changed)
+        self.chk_clahe.toggled.connect(self._on_clahe_toggled)
+        self.chk_frangi.toggled.connect(self._on_frangi_toggled)
+        self.slider_gamma.valueChanged.connect(self._on_gamma_changed)
+        self.chk_invert.toggled.connect(self._on_invert_toggled)
+
         if self.video_data:
             self.load_video()
         self._update_title()
@@ -361,6 +383,74 @@ class MainWindow(QMainWindow):
         cmap_layout.addWidget(self.combo_colormap, stretch=1)
         display_layout.addLayout(cmap_layout)
 
+        # --- Temporal projection ---
+        # When mode != None, the displayed image is a projection across the
+        # whole stack (computed once, cached). Slider still navigates frames
+        # for annotation purposes; the IMAGE is the projection regardless.
+        proj_row = QHBoxLayout()
+        proj_row.setSpacing(4)
+        proj_row.addWidget(QLabel("Projection"))
+        self.combo_projection = QComboBox()
+        self.combo_projection.addItems(["None", "Std", "Max", "Mean", "Sum", "Min"])
+        self.combo_projection.setToolTip(
+            "Replace the live frame with a temporal projection across the "
+            "whole stack.\n"
+            "Std is the headline mode for retinal data — stationary vessel\n"
+            "walls drop out, moving cells inside vessels pop.")
+        proj_row.addWidget(self.combo_projection, stretch=1)
+        display_layout.addLayout(proj_row)
+
+        # --- Background subtraction (per-frame motion surface) ---
+        bg_row = QHBoxLayout()
+        bg_row.setSpacing(4)
+        from PyQt6.QtWidgets import QCheckBox  # already imported elsewhere; safe
+        self.chk_bg_subtract = QCheckBox("BG sub")
+        self.chk_bg_subtract.setToolTip(
+            "Subtract a rolling-mean background around the current frame.\n"
+            "Surfaces slow-moving immune cells inside a stationary vessel.")
+        bg_row.addWidget(self.chk_bg_subtract)
+        bg_row.addWidget(QLabel("± win"))
+        self.slider_bg_window = QSlider(Qt.Orientation.Horizontal)
+        self.slider_bg_window.setRange(1, 10)
+        self.slider_bg_window.setValue(2)
+        self.slider_bg_window.setToolTip("Half-width of the rolling-mean window")
+        bg_row.addWidget(self.slider_bg_window, stretch=1)
+        display_layout.addLayout(bg_row)
+
+        # --- Vessel enhancement: CLAHE + Frangi ---
+        enh_row = QHBoxLayout()
+        enh_row.setSpacing(4)
+        self.chk_clahe = QCheckBox("CLAHE")
+        self.chk_clahe.setToolTip("Contrast-Limited Adaptive Histogram Equalization")
+        self.chk_frangi = QCheckBox("Vesselness")
+        self.chk_frangi.setToolTip(
+            "Multi-scale Frangi vesselness — bright ridges on dark "
+            "background.\nReplaces the displayed image with the vesselness "
+            "response.")
+        enh_row.addWidget(self.chk_clahe)
+        enh_row.addWidget(self.chk_frangi)
+        enh_row.addStretch(1)
+        display_layout.addLayout(enh_row)
+
+        # --- Display LUT: gamma + invert ---
+        lut_row = QHBoxLayout()
+        lut_row.setSpacing(4)
+        lut_row.addWidget(QLabel("Gamma"))
+        self.slider_gamma = QSlider(Qt.Orientation.Horizontal)
+        # slider range 10..400 mapped to gamma 0.1..4.0 (1.0 = 100)
+        self.slider_gamma.setRange(10, 400)
+        self.slider_gamma.setValue(100)
+        self.slider_gamma.setToolTip("Display gamma (1.00 = identity)")
+        lut_row.addWidget(self.slider_gamma, stretch=1)
+        self.lbl_gamma = QLabel("1.00")
+        self.lbl_gamma.setFixedWidth(40)
+        self.lbl_gamma.setStyleSheet("font-family: monospace; color: #aaa;")
+        lut_row.addWidget(self.lbl_gamma)
+        self.chk_invert = QCheckBox("Invert")
+        self.chk_invert.setToolTip("Invert display values (255 - x)")
+        lut_row.addWidget(self.chk_invert)
+        display_layout.addLayout(lut_row)
+
         level_grid = QHBoxLayout()
         level_grid.setSpacing(4)
         min_col = QVBoxLayout()
@@ -485,6 +575,97 @@ class MainWindow(QMainWindow):
 
         # Decorate buttons with FontAwesome icons (no-op without qtawesome).
         self._apply_icons()
+
+    # ------------------------------------------------------------------
+    # DISPLAY PIPELINE — composes the image fed to pyqtgraph from the raw
+    # frame plus any active enhancements. The underlying FrameSource is
+    # never mutated; enhancements affect display only.
+    # ------------------------------------------------------------------
+    def _compose_display_frame(self, idx):
+        # Step 1: base image — projection trumps live frame; bg-subtract
+        # is per-frame so it can sit on top of either.
+        if self._bg_subtract_on:
+            base = self._bg_subtract_for_frame(idx)
+        elif self._projection_mode != 'none':
+            cached = self._get_projection()
+            base = cached if cached is not None else self.video_data.get_frame(idx)
+        else:
+            base = self.video_data.get_frame(idx)
+
+        # Step 2: enhancement filters.
+        if self._clahe_on:
+            from core import enhance
+            base = enhance.apply_clahe(base)
+        if self._frangi_on:
+            from core import enhance
+            base = enhance.frangi_vesselness(base)
+
+        # Step 3: display LUT (gamma + invert).
+        if abs(self._gamma - 1.0) > 1e-3:
+            from core import enhance
+            base = enhance.apply_gamma(base, self._gamma)
+        if self._invert:
+            base = 255 - base
+
+        return base
+
+    def _bg_subtract_for_frame(self, idx):
+        import numpy as np
+        from core import motion
+        frames = getattr(self.video_data, 'frames', None)
+        if frames is None:
+            frames = np.stack([self.video_data.get_frame(i)
+                               for i in range(self.video_data.num_frames)])
+        return motion.bg_subtract(frames, idx, self._bg_subtract_window)
+
+    def _get_projection(self):
+        if self._projection_cache is not None:
+            return self._projection_cache
+        if not self.video_data:
+            return None
+        from core import projections
+        frames = getattr(self.video_data, 'frames', None)
+        if frames is None:
+            import numpy as np
+            frames = np.stack([self.video_data.get_frame(i)
+                               for i in range(self.video_data.num_frames)])
+        self._projection_cache = projections.project_stack(frames, self._projection_mode)
+        return self._projection_cache
+
+    def _rerender(self):
+        if self.video_data:
+            self.display_frame(self._current_frame_idx, auto_range=False)
+
+    def _on_projection_changed(self, text):
+        self._projection_mode = (text or 'none').lower()
+        self._projection_cache = None
+        self._rerender()
+
+    def _on_bg_subtract_toggled(self, checked):
+        self._bg_subtract_on = bool(checked)
+        self._rerender()
+
+    def _on_bg_window_changed(self, value):
+        self._bg_subtract_window = int(value)
+        if self._bg_subtract_on:
+            self._rerender()
+
+    def _on_clahe_toggled(self, checked):
+        self._clahe_on = bool(checked)
+        self._rerender()
+
+    def _on_frangi_toggled(self, checked):
+        self._frangi_on = bool(checked)
+        self._rerender()
+
+    def _on_gamma_changed(self, value):
+        self._gamma = max(0.1, value / 100.0)
+        self.lbl_gamma.setText(f"{self._gamma:.2f}")
+        self._rerender()
+
+    def _on_invert_toggled(self, checked):
+        self._invert = bool(checked)
+        self._rerender()
 
     def _apply_icons(self):
         """Attach FontAwesome icons to common-action buttons.
@@ -636,7 +817,7 @@ class MainWindow(QMainWindow):
         idx = max(0, min(idx, self.video_data.num_frames - 1))
         self._current_frame_idx = idx
 
-        frame = self.video_data.get_frame(idx)
+        frame = self._compose_display_frame(idx)
         cmap = self.get_colormap()
         self.view_frame.setImage(frame, autoLevels=False, autoRange=auto_range)
         self.view_frame.setColorMap(cmap)
