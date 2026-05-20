@@ -9,13 +9,7 @@ from PyQt6.QtGui import QColor, QFont, QShortcut, QKeySequence
 
 from core.app_state import AppState
 
-try:
-    import micro_sam
-    from micro_sam import util
-    from micro_sam.automatic_segmentation import get_predictor_and_segmenter
-    SAM_AVAILABLE = True
-except ImportError:
-    SAM_AVAILABLE = False
+from core.sam_service import SamService, SAM_AVAILABLE, default_sam_hela_path
 
 
 # ======================================================================
@@ -550,7 +544,11 @@ class ToolController:
         self._is_painting = False       # True while mouse is pressed in paint/erase mode
         self._brush_cursor = None       # circle item showing brush on view
         self._brush_mask_snapshot = None # mask copy before current brush stroke
-        self._sam_predictor = None      # SAM predictor, loaded on demand
+        # SAM service — lazy-loaded on first use. Default model is the
+        # collaborators' fine-tuned ViT-B (sam_hela). User can swap via
+        # the SAM section in the View panel.
+        self.sam_service = SamService(
+            model_type='vit_b', checkpoint_path=default_sam_hela_path())
 
         # --- Button connections ---
         self.window.btn_add.clicked.connect(self.spawn_new_annotation)
@@ -573,6 +571,8 @@ class ToolController:
         self.window.btn_import.clicked.connect(self.load_annotations)
         self.window.btn_load_seg.clicked.connect(self.load_segmentation)
         self.window.btn_run_sam.clicked.connect(self.run_sam_segmentation)
+        self.window.combo_sam_model.currentIndexChanged.connect(self._on_sam_model_changed)
+        self._refresh_sam_status()
         self.window.slider_seg_opacity.valueChanged.connect(self._on_seg_opacity_changed)
         self.window.btn_toggle_seg.clicked.connect(self._on_toggle_seg)
         # Seg editing connections
@@ -2085,8 +2085,47 @@ class ToolController:
             f"Created {anno_count} bbox annotations from "
             f"{len(all_stairs)} stairs across {seg.num_frames} frames.")
 
+    # ------------------------------------------------------------------
+    # SAM panel helpers (Phase 4.1)
+    # ------------------------------------------------------------------
+    # Map combo-box index -> (model_type, checkpoint_path | None).
+    _SAM_MODEL_CHOICES = [
+        ('vit_b', 'sam_hela'),   # fine-tuned default; checkpoint resolved at runtime
+        ('vit_b_lm', None),
+        ('vit_t', None),
+        ('vit_b', None),
+        ('vit_l', None),
+    ]
+
+    def _on_sam_model_changed(self, idx):
+        model_type, hint = self._SAM_MODEL_CHOICES[
+            idx if 0 <= idx < len(self._SAM_MODEL_CHOICES) else 0]
+        if hint == 'sam_hela':
+            ckpt = default_sam_hela_path()
+        else:
+            ckpt = None
+        self.sam_service = SamService(model_type=model_type, checkpoint_path=ckpt)
+        self._refresh_sam_status()
+
+    def _refresh_sam_status(self):
+        """Update the status line under the SAM model selector."""
+        if not SamService.available():
+            text = "model: micro_sam not installed"
+        elif self.sam_service.is_loaded():
+            ckpt = (os.path.basename(os.path.dirname(self.sam_service.checkpoint_path))
+                    if self.sam_service.checkpoint_path else "(registry)")
+            text = f"model: {self.sam_service.model_type} · {ckpt} · LOADED"
+        else:
+            ckpt = (os.path.basename(os.path.dirname(self.sam_service.checkpoint_path))
+                    if self.sam_service.checkpoint_path else "(registry)")
+            ckpt_ok = (self.sam_service.checkpoint_path is None
+                       or os.path.exists(self.sam_service.checkpoint_path))
+            badge = "ready" if ckpt_ok else "checkpoint missing"
+            text = f"model: {self.sam_service.model_type} · {ckpt} · {badge}"
+        self.window.lbl_sam_status.setText(text)
+
     def run_sam_segmentation(self):
-        if not SAM_AVAILABLE:
+        if not SamService.available():
             QMessageBox.critical(self.window, "Error", "MicroSAM is not installed.")
             return
 
@@ -2094,46 +2133,31 @@ class ToolController:
             QMessageBox.critical(self.window, "Error", "Load a video before running SAM.")
             return
 
-        # Load the predictor if not already loaded
-        if self._sam_predictor is None:
-            try:
-                project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                checkpoint_path = os.path.join(
-                    project_root, 'models', 'checkpoints', 'sam_hela', 'best.pt')
-                if not os.path.exists(checkpoint_path):
-                    QMessageBox.critical(
-                        self.window, "Error",
-                        f"Checkpoint not found: {checkpoint_path}\n\n"
-                        f"Place the fine-tuned weights at models/checkpoints/sam_hela/best.pt.")
-                    return
-                self._sam_predictor = util.get_sam_model(model_type="vit_b", checkpoint_path=checkpoint_path)
-            except Exception as e:
-                QMessageBox.critical(self.window, "Error", f"Failed to load SAM model: {str(e)}")
-                return
+        # Lazy-load the model on first run. Surface a clear error if the
+        # checkpoint is missing.
+        try:
+            self.sam_service.load()
+        except FileNotFoundError as e:
+            QMessageBox.critical(
+                self.window, "Error",
+                f"{e}\n\nPlace the fine-tuned weights at "
+                f"models/checkpoints/sam_hela/best.pt or switch the SAM "
+                f"model in the SAM panel.")
+            return
+        except Exception as e:
+            QMessageBox.critical(self.window, "Error", f"Failed to load SAM model: {str(e)}")
+            return
 
-        # Get the current frame
         frame_idx = self.window._current_frame_idx
         frame = self.window.video_data.get_frame(frame_idx)
         if frame is None:
             QMessageBox.critical(self.window, "Error", "No frame data available.")
             return
 
-        # Convert to RGB for SAM
-        frame_rgb = np.stack([frame, frame, frame], axis=-1).astype(np.uint8)
-
-        # Run automatic segmentation
+        # SAM runs on the *raw* frame, not on the enhanced display
+        # (per the locked decision for Phase 4).
         try:
-            predictor, segmenter = get_predictor_and_segmenter(
-                model_type="vit_b",
-                predictor=self._sam_predictor
-            )
-            segmentation = micro_sam.automatic_segmentation.automatic_instance_segmentation(
-                predictor=predictor,
-                segmenter=segmenter,
-                input_path=frame_rgb,
-                ndim=2,  # 2d RGB
-                verbose=False
-            )
+            segmentation = self.sam_service.auto_segment(frame)
         except Exception as e:
             QMessageBox.critical(self.window, "Error", f"Segmentation failed: {str(e)}")
             return
@@ -2187,6 +2211,7 @@ class ToolController:
         self._show_frame_annotations(frame_idx)
         self.window._update_seg_overlay()
 
+        self._refresh_sam_status()
         QMessageBox.information(
             self.window, "SAM Segmentation Complete",
             f"Created {anno_count} annotations from SAM segmentation.")

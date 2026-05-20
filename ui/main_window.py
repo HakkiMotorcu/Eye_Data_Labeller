@@ -422,7 +422,68 @@ class MainWindow(QMainWindow):
 
         tools_group.setLayout(tools_layout)
 
-        # 3. File I/O
+        # 3. SAM (Segment Anything assisted labeling) -----------------
+        sam_group = self._make_collapsible_group("SAM", _COMPACT_SS)
+        sam_layout = QVBoxLayout()
+        sam_layout.setContentsMargins(4, 2, 4, 4)
+        sam_layout.setSpacing(3)
+
+        # Model selector
+        model_row = QHBoxLayout()
+        model_row.setSpacing(4)
+        model_row.addWidget(QLabel("Model"))
+        self.combo_sam_model = QComboBox()
+        self.combo_sam_model.addItems([
+            "sam_hela (fine-tuned ViT-B)",
+            "vit_b_lm (light microscopy)",
+            "vit_t (mobile, fastest)",
+            "vit_b (SAM base)",
+            "vit_l (SAM large)",
+        ])
+        self.combo_sam_model.setToolTip(
+            "Which SAM variant to load.\n"
+            "sam_hela is the collaborators' fine-tuned checkpoint at\n"
+            "models/checkpoints/sam_hela/best.pt — the default.")
+        model_row.addWidget(self.combo_sam_model, stretch=1)
+        sam_layout.addLayout(model_row)
+
+        # Status line — driven by SamService state
+        self.lbl_sam_status = QLabel("model: not loaded")
+        self.lbl_sam_status.setStyleSheet(
+            "font-family: monospace; color: #888; font-size: 10px;")
+        self.lbl_sam_status.setWordWrap(True)
+        sam_layout.addWidget(self.lbl_sam_status)
+
+        # Embedding precompute — wires up in Phase 4.2
+        emb_row = QHBoxLayout()
+        emb_row.setSpacing(4)
+        self.btn_sam_precompute = QPushButton("Precompute embeddings")
+        self.btn_sam_precompute.setToolTip(
+            "Pre-encode every frame so subsequent prompts are interactive.\n"
+            "First time may take 1–2 s/frame on CPU, ~0.1 s on GPU.\n"
+            "Result cached to {video}_sam_embeddings.zarr next to the image.\n"
+            "(Wires up in Phase 4.2 — currently a placeholder.)")
+        self.btn_sam_precompute.setEnabled(False)  # enabled when 4.2 lands
+        emb_row.addWidget(self.btn_sam_precompute)
+        sam_layout.addLayout(emb_row)
+
+        # Run SAM — automatic instance segmentation on current frame
+        # (Existing handler. Kept the attribute name btn_run_sam so the
+        # controller binding doesn't need to change.)
+        run_row = QHBoxLayout()
+        run_row.setSpacing(4)
+        self.btn_run_sam = QPushButton("Auto-segment current frame")
+        self.btn_run_sam.setToolTip(
+            "Run automatic instance segmentation on the current raw frame.\n"
+            "WARNING (current behavior): replaces any existing annotations.\n"
+            "Phase 4.6 will make this additive.")
+        self.btn_run_sam.setStyleSheet("color: #4cc9f0; font-weight: bold;")
+        run_row.addWidget(self.btn_run_sam)
+        sam_layout.addLayout(run_row)
+
+        sam_group.setLayout(sam_layout)
+
+        # 4. File I/O
         io_group = self._make_collapsible_group("Import / Export", _COMPACT_SS)
         io_layout = QVBoxLayout()
         io_layout.setContentsMargins(4, 2, 4, 4)
@@ -441,15 +502,6 @@ class MainWindow(QMainWindow):
         fmt_row.addWidget(self.combo_export_format, stretch=1)
         fmt_row.addWidget(self.btn_load_seg)
         io_layout.addLayout(fmt_row)
-
-        # SAM segmentation row
-        sam_row = QHBoxLayout()
-        sam_row.setSpacing(4)
-        self.btn_run_sam = QPushButton("Run SAM")
-        self.btn_run_sam.setToolTip("Run Segment Anything Model on current frame")
-        self.btn_run_sam.setStyleSheet("color: #264653; font-weight: bold;")
-        sam_row.addWidget(self.btn_run_sam)
-        io_layout.addLayout(sam_row)
 
         # Export options checkboxes
         from PyQt6.QtWidgets import QCheckBox
@@ -838,6 +890,7 @@ class MainWindow(QMainWindow):
         # Assemble right panel
         right_panel.addWidget(list_group)       # Annotations
         right_panel.addWidget(tools_group)      # Tools (incl. seg editing)
+        right_panel.addWidget(sam_group)        # SAM (model + auto + future prompts)
         right_panel.addWidget(display_group)    # View
         right_panel.addWidget(io_group)         # I/O (Phase 2 will rework)
         right_panel.addStretch(1)
