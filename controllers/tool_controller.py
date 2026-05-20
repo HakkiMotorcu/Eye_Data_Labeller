@@ -221,6 +221,12 @@ class Annotation2D(QObject):
     sig_clicked = pyqtSignal(object)
     sig_updated = pyqtSignal(object)
 
+    # class_type slot values:
+    #   'cell'       - has a bbox, drawn via ROI
+    #   'vessel'     - paint-only (no bbox); larger retinal vessel
+    #   'capillary'  - paint-only (no bbox); small retinal capillary
+    # Non-cell classes use the same paint-only rendering path.
+
     def __init__(self, name, view, controller,
                  start_pos=(100, 100), start_size=(40, 40),
                  shape_mode='rect', frame_idx=0,
@@ -233,7 +239,10 @@ class Annotation2D(QObject):
         self.frame_idx = frame_idx
         self.instance_id = instance_id  # seg instance ID (if from seg map)
         self.color = color              # (R, G, B) display colour
-        self.class_type = class_type    # 'cell' or 'vein'
+        # Backwards compat: 'vein' was the old name for 'vessel'
+        if class_type == 'vein':
+            class_type = 'vessel'
+        self.class_type = class_type
 
         self._seg_dirty = False         # True when seg pixels were painted/erased
         self._is_syncing = False
@@ -247,8 +256,8 @@ class Annotation2D(QObject):
         self.view.addItem(self.roi)
         self._connect_roi_signals()
 
-        if class_type == 'vein':
-            # Veins have no visible bbox
+        if self.is_paint_only:
+            # Paint-only classes have no visible bbox
             self.roi.setPen(pg.mkPen(None))
             self.roi.hoverPen = pg.mkPen(None)
             self.roi.translatable = False
@@ -258,6 +267,11 @@ class Annotation2D(QObject):
             self.roi.setVisible(False)
         else:
             self.update_visuals()
+
+    @property
+    def is_paint_only(self):
+        """True for non-cell classes (vessel, capillary): paint-only, no visible bbox."""
+        return self.class_type != 'cell'
 
     @staticmethod
     def _make_rect_roi(pos, size):
@@ -332,7 +346,7 @@ class Annotation2D(QObject):
         self.update_visuals()
 
     def update_visuals(self):
-        if self.class_type == 'vein':
+        if self.is_paint_only:
             # Veins never show ROI
             return
         style = Qt.PenStyle.SolidLine
@@ -410,7 +424,7 @@ class Annotation2D(QObject):
         seg = ctrl.window.seg_data
         frame = self.frame_idx
         has_seg = (seg is not None and self.instance_id is not None
-                   and self.class_type != 'vein')
+                   and not self.is_paint_only)
 
         # Detect translate vs resize (0.5 px tolerance on size)
         _EPS = 0.5
@@ -465,7 +479,7 @@ class Annotation2D(QObject):
         self.view.removeItem(self.roi)
 
     def set_visible(self, visible):
-        if self.class_type == 'vein':
+        if self.is_paint_only:
             return  # vein ROIs always hidden
         self.roi.setVisible(visible)
 
@@ -500,7 +514,8 @@ class ToolController:
 
         # --- Button connections ---
         self.window.btn_add.clicked.connect(self.spawn_new_annotation)
-        self.window.btn_add_vein.clicked.connect(self.spawn_vein)
+        self.window.btn_add_vessel.clicked.connect(self.spawn_vessel)
+        self.window.btn_add_capillary.clicked.connect(self.spawn_capillary)
         self.window.btn_delete.clicked.connect(self.delete_selected)
         self.window.btn_rename.clicked.connect(self._start_rename)
         self.window.btn_fit_bbox.clicked.connect(self._manual_fit_bbox)
@@ -575,7 +590,8 @@ class ToolController:
             QShortcut(QKeySequence("E"),          self.window, lambda: self._set_seg_mode('erase')),
             QShortcut(QKeySequence("Escape"),     self.window, lambda: self._set_seg_mode('select')),
             QShortcut(QKeySequence("F"),          self.window, self.fill_bbox_cmd),
-            QShortcut(QKeySequence("V"),          self.window, self.spawn_vein),
+            QShortcut(QKeySequence("V"),          self.window, self.spawn_vessel),
+            QShortcut(QKeySequence("C"),          self.window, self.spawn_capillary),
             QShortcut(QKeySequence("X"),          self.window, self._shortcut_toggle_force_paint),
             QShortcut(QKeySequence("Ctrl+P"),     self.window, self.propagate_vein_mask),
         ]
@@ -642,7 +658,7 @@ class ToolController:
         visible_annos = []
         for anno in self.annotations:
             if anno.frame_idx == frame_idx:
-                if anno.class_type == 'vein':
+                if anno.is_paint_only:
                     anno.roi.setVisible(False)  # veins never show ROI
                 else:
                     anno.roi.setVisible(True)
@@ -700,7 +716,7 @@ class ToolController:
         """Resize the annotation's ROI to tightly fit its seg pixels."""
         if anno is None or anno.instance_id is None:
             return
-        if anno.class_type == 'vein':
+        if anno.is_paint_only:
             return  # veins have no bbox to fit
         seg = self.window.seg_data
         if seg is None:
@@ -745,7 +761,7 @@ class ToolController:
 
     def _move_seg_pixels(self, anno, old_geom, new_geom):
         """Move seg mask pixels when a bbox is dragged or resized."""
-        if anno.class_type == 'vein':
+        if anno.is_paint_only:
             return  # veins don't move with bbox
         scale = self._seg_scale()
         if scale is None or anno.instance_id is None:
@@ -826,35 +842,54 @@ class ToolController:
         self._undo_stack.push(AddAnnotationCmd(self, new_anno))
         self.state.annotations_changed.emit()
 
+    # Default colors for the paint-only retinal-structure classes.
+    _PAINT_ONLY_COLORS = {
+        'vessel':    (120, 80, 200),   # purple — larger retinal vessels
+        'capillary': (235, 130, 200),  # pink — small capillaries
+    }
+
+    def spawn_vessel(self):
+        """Create a paint-only vessel annotation, optionally propagated across frames."""
+        self._spawn_paint_only('vessel', 'Vessel')
+
+    def spawn_capillary(self):
+        """Create a paint-only capillary annotation, optionally propagated across frames."""
+        self._spawn_paint_only('capillary', 'Capillary')
+
+    # Backwards-compat alias for any external callers still using the old name.
     def spawn_vein(self):
-        """Create a bbox-less 'vein' annotation, optionally propagated across frames."""
+        self.spawn_vessel()
+
+    def _spawn_paint_only(self, class_type, name_prefix):
+        """Shared spawn path for non-cell, paint-only retinal structures."""
         if not self.window.video_data:
             return
         frame_idx = self.window._current_frame_idx
         total_frames = self.window.video_data.num_frames
+
+        default_color = self._PAINT_ONLY_COLORS.get(class_type, (180, 180, 180))
 
         seg = self.window.seg_data
         instance_id = None
         color = None
         if seg is not None:
             instance_id = seg.next_instance_id()
-            color = seg.register_instance_color(instance_id,
-                                                  color=(120, 80, 200))
+            color = seg.register_instance_color(instance_id, color=default_color)
             self.anno_counter = max(self.anno_counter, instance_id)
 
         self.anno_counter += 1
-        name = f"Vein_{self.anno_counter}"
+        name = f"{name_prefix}_{self.anno_counter}"
 
         # --- Propagation dialog ---
         propagate_all = False
         if total_frames > 1:
             reply = QMessageBox.question(
                 self.window,
-                "Propagate Vein?",
+                f"Propagate {name_prefix}?",
                 f"Add '{name}' to all {total_frames} frames?\n\n"
                 "Recommended workflow:\n"
                 "  1. Click Yes so the annotation exists on every frame.\n"
-                "  2. Paint the vein mask on the current frame.\n"
+                f"  2. Paint the {class_type} mask on the current frame.\n"
                 "  3. Press Ctrl+P (or 'Propagate Mask') to copy those pixels\n"
                 "     to all other frames at once.\n"
                 "  4. Navigate frame-by-frame to fine-tune where needed.\n\n"
@@ -877,7 +912,7 @@ class ToolController:
                 frame_idx=fi,
                 instance_id=instance_id,
                 color=color,
-                class_type='vein',
+                class_type=class_type,
             )
             anno.sig_clicked.connect(self.select_annotation)
             anno.sig_updated.connect(self._on_anno_updated)
@@ -888,14 +923,13 @@ class ToolController:
         self._undo_stack.push(AddAnnotationBatchCmd(self, created))
         self._show_frame_annotations(frame_idx)
 
-        # Select the annotation on the current frame
-        current_vein = next(
+        current = next(
             (a for a in created if a.frame_idx == frame_idx), None)
-        if current_vein:
-            self.select_annotation(current_vein)
+        if current:
+            self.select_annotation(current)
 
-        # Auto-switch to paint mode
         self._set_seg_mode('paint')
+        self.state.annotations_changed.emit()
 
     def _get_visible_center(self):
         vb = self.window.view_frame.getView()
@@ -1200,7 +1234,7 @@ class ToolController:
         w, h = anno.roi.size()
         cls = anno.class_type.capitalize()
         iid = anno.instance_id or '—'
-        if anno.class_type == 'vein':
+        if anno.is_paint_only:
             self.window.lbl_coords.setText(
                 f"{cls}  ID: {iid}  Locked: {anno.is_locked}\n"
                 f"(paint-only — no bbox)")
@@ -1377,7 +1411,7 @@ class ToolController:
             elif anno.is_locked:
                 item.setForeground(QColor('#2ecc71'))
                 font.setBold(False)
-            elif anno.class_type == 'vein':
+            elif anno.is_paint_only:
                 item.setForeground(QColor('#9370db'))
                 font.setBold(False)
             else:
@@ -1956,8 +1990,12 @@ class ToolController:
 
         rows = []
         for anno in self.annotations:
-            if class_filter and anno.class_type != class_filter:
-                continue
+            if class_filter is not None:
+                if class_filter == 'non_cell':
+                    if not anno.is_paint_only:
+                        continue
+                elif anno.class_type != class_filter:
+                    continue
 
             x, y = anno.roi.pos()
             w, h = anno.roi.size()
@@ -2037,7 +2075,7 @@ class ToolController:
         vein_instance_ids = {
             a.instance_id
             for a in self.annotations
-            if a.class_type == 'vein' and a.instance_id is not None
+            if a.is_paint_only and a.instance_id is not None
                and a.frame_idx == frame_idx
         }
         if not vein_instance_ids:
@@ -2105,16 +2143,18 @@ class ToolController:
         print(f"Cells exported → {path}  ({len(rows)} rows)")
 
     def export_veins(self):
-        if not any(a.class_type == 'vein' for a in self.annotations):
-            QMessageBox.information(self.window, "Export Veins",
-                                    "No vein annotations to export.")
+        # Exports all non-cell (paint-only) annotations: vessels + capillaries.
+        # Method name kept for backwards-compat with internal call sites.
+        if not any(a.is_paint_only for a in self.annotations):
+            QMessageBox.information(self.window, "Export Vessels",
+                                    "No vessel / capillary annotations to export.")
             return
-        path = self._export_dialog("Export Veins", "veins")
+        path = self._export_dialog("Export Vessels & Capillaries", "vessels")
         if not path:
             return
-        rows = self._get_anno_rows(class_filter='vein')
+        rows = self._get_anno_rows(class_filter='non_cell')
         self._write_rows(path, rows)
-        print(f"Veins exported → {path}  ({len(rows)} rows)")
+        print(f"Vessels/capillaries exported → {path}  ({len(rows)} rows)")
 
     def export_all(self):
         if not self.annotations:
@@ -2193,6 +2233,7 @@ class ToolController:
                     'height': float(row.get('height', 40)),
                     'locked': int(float(row.get('locked', 0))),
                     'shape_mode': row.get('shape_mode', ''),
+                    'class_type': ToolController._normalize_class_type(row.get('class_type', 'cell')),
                 })
         return records
 
@@ -2209,8 +2250,22 @@ class ToolController:
                 'height': float(a.get('height', 40)),
                 'locked': int(a.get('locked', 0)),
                 'shape_mode': a.get('shape_mode', ''),
+                'class_type': ToolController._normalize_class_type(a.get('class_type', 'cell')),
             })
         return records
+
+    @staticmethod
+    def _normalize_class_type(raw):
+        """Coerce serialized class_type values into the current schema.
+
+        Older exports used 'vein' for what is now called 'vessel'.
+        Unknown values fall back to 'cell'.
+        """
+        if raw == 'vein':
+            return 'vessel'
+        if raw in ('cell', 'vessel', 'capillary'):
+            return raw
+        return 'cell'
 
     def _create_annotation_from_record(self, rec):
         name = rec['name']
@@ -2232,12 +2287,15 @@ class ToolController:
         if shape not in ('rect', 'ellipse'):
             shape = self.current_shape_mode
 
+        class_type = rec.get('class_type', 'cell')
+
         anno = Annotation2D(
             name, self.window.view_frame, self,
             start_pos=(x0, y0),
             start_size=(w, h),
             shape_mode=shape,
             frame_idx=int(rec.get('frame', self.window._current_frame_idx)),
+            class_type=class_type,
         )
         if rec.get('locked', 0):
             anno.set_locked(True)
