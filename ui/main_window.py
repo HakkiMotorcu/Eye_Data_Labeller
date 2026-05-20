@@ -3,11 +3,101 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QFileDialog, QMessageBox, QSlider, QScrollArea,
                              QSizePolicy, QSpinBox, QButtonGroup, QSplitter,
                              QCheckBox, QFrame)
-from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QColor
 import pyqtgraph as pg
 import numpy as np
 import os
+
+
+class FilterSection(QWidget):
+    """Collapsible section used in the View panel.
+
+    Header has: chevron, title, active-state dot, and a small reset button.
+    Body is hidden when the section is collapsed.
+    """
+
+    reset_requested = pyqtSignal()
+
+    def __init__(self, title, parent=None):
+        super().__init__(parent)
+        self._title = title
+        self._collapsed = False
+        self._active = False
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 6, 0, 0)
+        outer.setSpacing(0)
+
+        self._header = QWidget()
+        self._header.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._header.setStyleSheet(
+            "QWidget{background:transparent;}"
+            "QWidget:hover{background:#2a2a30;}")
+        hlay = QHBoxLayout(self._header)
+        hlay.setContentsMargins(4, 3, 4, 3)
+        hlay.setSpacing(6)
+
+        self._lbl_arrow = QLabel("▾")
+        self._lbl_arrow.setStyleSheet("color:#888;font-size:11px;")
+        self._lbl_arrow.setFixedWidth(12)
+        hlay.addWidget(self._lbl_arrow)
+
+        self._lbl_title = QLabel(title)
+        self._lbl_title.setStyleSheet("color:#cfd0d3;font-size:11px;")
+        hlay.addWidget(self._lbl_title)
+
+        hlay.addStretch(1)
+
+        self._lbl_dot = QLabel("●")
+        self._lbl_dot.setStyleSheet("color:#3a3a40;font-size:11px;")
+        self._lbl_dot.setToolTip("Inactive")
+        hlay.addWidget(self._lbl_dot)
+
+        self.btn_reset = QPushButton()
+        self.btn_reset.setFixedSize(20, 20)
+        self.btn_reset.setToolTip(f"Reset {title} to defaults")
+        self.btn_reset.setFlat(True)
+        try:
+            import qtawesome as qta
+            self.btn_reset.setIcon(qta.icon('fa6s.rotate-left', color='#888'))
+        except Exception:
+            self.btn_reset.setText("↺")
+        self.btn_reset.clicked.connect(self.reset_requested.emit)
+        hlay.addWidget(self.btn_reset)
+
+        outer.addWidget(self._header)
+
+        self._body = QWidget()
+        self._body_layout = QVBoxLayout(self._body)
+        self._body_layout.setContentsMargins(10, 2, 4, 4)
+        self._body_layout.setSpacing(3)
+        outer.addWidget(self._body)
+
+        # Toggle collapse on header click (but not on the reset button).
+        self._header.mousePressEvent = self._on_header_click
+
+    def _on_header_click(self, ev):
+        if ev.button() == Qt.MouseButton.LeftButton:
+            if not self.btn_reset.geometry().contains(ev.pos()):
+                self.set_collapsed(not self._collapsed)
+
+    def set_collapsed(self, collapsed):
+        self._collapsed = bool(collapsed)
+        self._body.setVisible(not self._collapsed)
+        self._lbl_arrow.setText("▸" if self._collapsed else "▾")
+
+    def set_active(self, active):
+        self._active = bool(active)
+        color = "#4cc26a" if self._active else "#3a3a40"
+        self._lbl_dot.setStyleSheet(f"color:{color};font-size:11px;")
+        self._lbl_dot.setToolTip("Active" if self._active else "Inactive")
+
+    def add_layout(self, lay):
+        self._body_layout.addLayout(lay)
+
+    def add_widget(self, w):
+        self._body_layout.addWidget(w)
 
 
 class MainWindow(QMainWindow):
@@ -48,6 +138,12 @@ class MainWindow(QMainWindow):
 
         # Wire every View-panel control to the same re-render path.
         self.btn_reset_view.clicked.connect(self._reset_view_filters)
+        # Per-section reset buttons (the ↺ icon in each section header)
+        self.section_projection.reset_requested.connect(self._reset_projection_section)
+        self.section_bg.reset_requested.connect(self._reset_bg_section)
+        self.section_clahe.reset_requested.connect(self._reset_clahe_section)
+        self.section_frangi.reset_requested.connect(self._reset_frangi_section)
+        self.section_lut.reset_requested.connect(self._reset_lut_section)
         self.combo_projection.currentTextChanged.connect(self._on_projection_changed)
         self.combo_proj_window.currentTextChanged.connect(self._on_proj_window_mode_changed)
         self.slider_proj_sliding.valueChanged.connect(self._on_proj_sliding_changed)
@@ -445,21 +541,27 @@ class MainWindow(QMainWindow):
         # Every control re-renders the current frame through this chain.
         # ==============================================================
 
-        reset_row = QHBoxLayout()
-        reset_row.setSpacing(4)
-        reset_row.addStretch(1)
-        self.btn_reset_view = QPushButton("Reset View")
+        # Top strip: Reset View + live pipeline summary
+        header_row = QHBoxLayout()
+        header_row.setSpacing(6)
+        self.lbl_pipeline = QLabel("Pipeline: identity")
+        self.lbl_pipeline.setStyleSheet(
+            "font-family: monospace; color: #cfd0d3; font-size: 10px;"
+            "background: #1f1f24; padding: 3px 6px; border-radius: 3px;")
+        self.lbl_pipeline.setWordWrap(True)
+        self.lbl_pipeline.setToolTip(
+            "Effective display pipeline (in order): every active filter "
+            "and its key parameter.")
+        header_row.addWidget(self.lbl_pipeline, stretch=1)
+        self.btn_reset_view = QPushButton("Reset")
+        self.btn_reset_view.setFixedWidth(60)
         self.btn_reset_view.setToolTip(
-            "Return every filter to its default state:\n"
-            "  Projection = None, BG sub off, CLAHE off, Vesselness off,\n"
-            "  Gamma = 1.00, Invert off.")
-        reset_row.addWidget(self.btn_reset_view)
-        display_layout.addLayout(reset_row)
+            "Return every filter to its default state.\n"
+            "Individual sections also have their own reset (↺) button.")
+        header_row.addWidget(self.btn_reset_view)
+        display_layout.addLayout(header_row)
 
-        # ---- Projection ------------------------------------------------
-        display_layout.addWidget(self._filter_divider("Projection"))
-
-        # Reduction mode + Window mode share a row
+        # ---- Projection (collapsible) ---------------------------------
         proj_row = QHBoxLayout()
         proj_row.setSpacing(4)
         proj_row.addWidget(QLabel("Mode"))
@@ -470,7 +572,6 @@ class MainWindow(QMainWindow):
             "Std is the headline mode for AOSLO — stationary vessel walls\n"
             "drop out, moving cells pop.")
         proj_row.addWidget(self.combo_projection, stretch=1)
-        display_layout.addLayout(proj_row)
 
         win_mode_row = QHBoxLayout()
         win_mode_row.setSpacing(4)
@@ -483,7 +584,6 @@ class MainWindow(QMainWindow):
             "follows the timeline.\n"
             "Range: project over a fixed [lo..hi] frame range.")
         win_mode_row.addWidget(self.combo_proj_window, stretch=1)
-        display_layout.addLayout(win_mode_row)
 
         # Sliding ±N slider (visible only in 'sliding' mode)
         self.proj_sliding_row = QWidget()
@@ -501,7 +601,6 @@ class MainWindow(QMainWindow):
         self.lbl_proj_sliding.setFixedWidth(28)
         self.lbl_proj_sliding.setStyleSheet("font-family: monospace; color: #aaa;")
         slide_lay.addWidget(self.lbl_proj_sliding)
-        display_layout.addWidget(self.proj_sliding_row)
         self.proj_sliding_row.setVisible(False)
 
         # Range [lo..hi] spinboxes (visible only in 'range' mode)
@@ -519,7 +618,6 @@ class MainWindow(QMainWindow):
         self.spin_proj_range_hi.setPrefix("hi: ")
         rng_lay.addWidget(self.spin_proj_range_hi)
         rng_lay.addStretch(1)
-        display_layout.addWidget(self.proj_range_row)
         self.proj_range_row.setVisible(False)
 
         # Percentile-clip toggle for normalization
@@ -532,10 +630,17 @@ class MainWindow(QMainWindow):
             "washing out the displayed contrast.")
         clip_row.addWidget(self.chk_proj_clip)
         clip_row.addStretch(1)
-        display_layout.addLayout(clip_row)
 
-        # ---- Background subtraction -----------------------------------
-        display_layout.addWidget(self._filter_divider("Background subtraction"))
+        # Build the Projection section
+        self.section_projection = FilterSection("Projection")
+        self.section_projection.add_layout(proj_row)
+        self.section_projection.add_layout(win_mode_row)
+        self.section_projection.add_widget(self.proj_sliding_row)
+        self.section_projection.add_widget(self.proj_range_row)
+        self.section_projection.add_layout(clip_row)
+        display_layout.addWidget(self.section_projection)
+
+        # ---- Background subtraction ----------------------------------
         bg_row = QHBoxLayout()
         bg_row.setSpacing(4)
         self.chk_bg_subtract = QCheckBox("Enabled")
@@ -553,17 +658,17 @@ class MainWindow(QMainWindow):
         self.lbl_bg_window.setFixedWidth(28)
         self.lbl_bg_window.setStyleSheet("font-family: monospace; color: #aaa;")
         bg_row.addWidget(self.lbl_bg_window)
-        display_layout.addLayout(bg_row)
+        self.section_bg = FilterSection("Background subtraction")
+        self.section_bg.add_layout(bg_row)
+        display_layout.addWidget(self.section_bg)
 
-        # ---- CLAHE -----------------------------------------------------
-        display_layout.addWidget(self._filter_divider("CLAHE (contrast)"))
+        # ---- CLAHE ---------------------------------------------------
         clahe_row = QHBoxLayout()
         clahe_row.setSpacing(4)
         self.chk_clahe = QCheckBox("Enabled")
         self.chk_clahe.setToolTip("Contrast-Limited Adaptive Histogram Equalization")
         clahe_row.addWidget(self.chk_clahe)
         clahe_row.addStretch(1)
-        display_layout.addLayout(clahe_row)
 
         clahe_clip_row = QHBoxLayout()
         clahe_clip_row.setSpacing(4)
@@ -578,7 +683,6 @@ class MainWindow(QMainWindow):
         self.lbl_clahe_clip.setFixedWidth(36)
         self.lbl_clahe_clip.setStyleSheet("font-family: monospace; color: #aaa;")
         clahe_clip_row.addWidget(self.lbl_clahe_clip)
-        display_layout.addLayout(clahe_clip_row)
 
         clahe_tile_row = QHBoxLayout()
         clahe_tile_row.setSpacing(4)
@@ -593,10 +697,14 @@ class MainWindow(QMainWindow):
         self.lbl_clahe_tile.setFixedWidth(28)
         self.lbl_clahe_tile.setStyleSheet("font-family: monospace; color: #aaa;")
         clahe_tile_row.addWidget(self.lbl_clahe_tile)
-        display_layout.addLayout(clahe_tile_row)
 
-        # ---- Frangi vesselness ----------------------------------------
-        display_layout.addWidget(self._filter_divider("Vesselness (Frangi)"))
+        self.section_clahe = FilterSection("CLAHE (contrast)")
+        self.section_clahe.add_layout(clahe_row)
+        self.section_clahe.add_layout(clahe_clip_row)
+        self.section_clahe.add_layout(clahe_tile_row)
+        display_layout.addWidget(self.section_clahe)
+
+        # ---- Frangi vesselness ---------------------------------------
         frangi_row = QHBoxLayout()
         frangi_row.setSpacing(4)
         self.chk_frangi = QCheckBox("Enabled")
@@ -610,7 +718,6 @@ class MainWindow(QMainWindow):
         frangi_row.addWidget(self.chk_frangi)
         frangi_row.addWidget(self.chk_frangi_black)
         frangi_row.addStretch(1)
-        display_layout.addLayout(frangi_row)
 
         sigmin_row = QHBoxLayout()
         sigmin_row.setSpacing(4)
@@ -624,7 +731,6 @@ class MainWindow(QMainWindow):
         self.lbl_frangi_smin.setFixedWidth(36)
         self.lbl_frangi_smin.setStyleSheet("font-family: monospace; color: #aaa;")
         sigmin_row.addWidget(self.lbl_frangi_smin)
-        display_layout.addLayout(sigmin_row)
 
         sigmax_row = QHBoxLayout()
         sigmax_row.setSpacing(4)
@@ -638,7 +744,6 @@ class MainWindow(QMainWindow):
         self.lbl_frangi_smax.setFixedWidth(36)
         self.lbl_frangi_smax.setStyleSheet("font-family: monospace; color: #aaa;")
         sigmax_row.addWidget(self.lbl_frangi_smax)
-        display_layout.addLayout(sigmax_row)
 
         nsig_row = QHBoxLayout()
         nsig_row.setSpacing(4)
@@ -654,10 +759,15 @@ class MainWindow(QMainWindow):
         self.lbl_frangi_n.setFixedWidth(28)
         self.lbl_frangi_n.setStyleSheet("font-family: monospace; color: #aaa;")
         nsig_row.addWidget(self.lbl_frangi_n)
-        display_layout.addLayout(nsig_row)
 
-        # ---- Display LUT (gamma + invert) -----------------------------
-        display_layout.addWidget(self._filter_divider("Display LUT"))
+        self.section_frangi = FilterSection("Vesselness (Frangi)")
+        self.section_frangi.add_layout(frangi_row)
+        self.section_frangi.add_layout(sigmin_row)
+        self.section_frangi.add_layout(sigmax_row)
+        self.section_frangi.add_layout(nsig_row)
+        display_layout.addWidget(self.section_frangi)
+
+        # ---- Display LUT (gamma + invert) ----------------------------
         lut_row = QHBoxLayout()
         lut_row.setSpacing(4)
         lut_row.addWidget(QLabel("Gamma"))
@@ -673,7 +783,10 @@ class MainWindow(QMainWindow):
         self.chk_invert = QCheckBox("Invert")
         self.chk_invert.setToolTip("Invert display values (255 - x)")
         lut_row.addWidget(self.chk_invert)
-        display_layout.addLayout(lut_row)
+
+        self.section_lut = FilterSection("Display LUT")
+        self.section_lut.add_layout(lut_row)
+        display_layout.addWidget(self.section_lut)
 
         level_grid = QHBoxLayout()
         level_grid.setSpacing(4)
@@ -903,8 +1016,44 @@ class MainWindow(QMainWindow):
         return self._projection_cache
 
     def _rerender(self):
+        self._refresh_view_status()
         if self.video_data:
             self.display_frame(self._current_frame_idx, auto_range=False)
+
+    def _refresh_view_status(self):
+        """Update each section's active-state dot and the pipeline strip."""
+        proj_active = self._projection_mode != 'none'
+        lut_active = abs(self._gamma - 1.0) > 1e-3 or self._invert
+        self.section_projection.set_active(proj_active)
+        self.section_bg.set_active(self._bg_subtract_on)
+        self.section_clahe.set_active(self._clahe_on)
+        self.section_frangi.set_active(self._frangi_on)
+        self.section_lut.set_active(lut_active)
+
+        parts = []
+        if proj_active:
+            tag = self._projection_mode.upper()
+            if self._proj_window_mode == 'sliding':
+                tag += f"±{self._proj_sliding_n}"
+            elif self._proj_window_mode == 'range':
+                tag += f"[{self._proj_range_lo}..{self._proj_range_hi}]"
+            if self._proj_percentile_clip:
+                tag += " clip"
+            parts.append(tag)
+        if self._bg_subtract_on:
+            parts.append(f"BG±{self._bg_subtract_window}")
+        if self._clahe_on:
+            parts.append(f"CLAHE({self._clahe_clip:.1f})")
+        if self._frangi_on:
+            parts.append(
+                f"FRANGI[{self._frangi_sigma_min:.1f}..{self._frangi_sigma_max:.1f}]"
+                + (" dark" if self._frangi_black_ridges else ""))
+        if abs(self._gamma - 1.0) > 1e-3:
+            parts.append(f"γ={self._gamma:.2f}")
+        if self._invert:
+            parts.append("INV")
+        self.lbl_pipeline.setText(
+            "Pipeline: " + (" · ".join(parts) if parts else "identity"))
 
     def _on_projection_changed(self, text):
         self._projection_mode = (text or 'none').lower()
@@ -1028,6 +1177,99 @@ class MainWindow(QMainWindow):
 
     def _on_invert_toggled(self, checked):
         self._invert = bool(checked)
+        self._rerender()
+
+    # ----- Per-section resets --------------------------------------------
+    def _reset_projection_section(self):
+        for w, v in [(self.combo_projection, 0),
+                     (self.combo_proj_window, 0),
+                     (self.slider_proj_sliding, 3),
+                     (self.spin_proj_range_lo, 0),
+                     (self.spin_proj_range_hi, max(0, (self.video_data.num_frames - 1) if self.video_data else 0)),
+                     (self.chk_proj_clip, False)]:
+            w.blockSignals(True)
+            if isinstance(w, QCheckBox):
+                w.setChecked(bool(v))
+            elif isinstance(w, QComboBox):
+                w.setCurrentIndex(v)
+            else:
+                w.setValue(v)
+            w.blockSignals(False)
+        self._projection_mode = 'none'
+        self._proj_window_mode = 'all'
+        self._proj_sliding_n = 3
+        self._proj_range_lo = 0
+        self._proj_range_hi = max(0, (self.video_data.num_frames - 1) if self.video_data else 0)
+        self._proj_percentile_clip = False
+        self._projection_cache = None
+        self.proj_sliding_row.setVisible(False)
+        self.proj_range_row.setVisible(False)
+        self.lbl_proj_sliding.setText("3")
+        self._rerender()
+
+    def _reset_bg_section(self):
+        for w, v in [(self.chk_bg_subtract, False), (self.slider_bg_window, 2)]:
+            w.blockSignals(True)
+            if isinstance(w, QCheckBox):
+                w.setChecked(False)
+            else:
+                w.setValue(v)
+            w.blockSignals(False)
+        self._bg_subtract_on = False
+        self._bg_subtract_window = 2
+        self.lbl_bg_window.setText("2")
+        self._rerender()
+
+    def _reset_clahe_section(self):
+        for w, v in [(self.chk_clahe, False),
+                     (self.slider_clahe_clip, 20),
+                     (self.slider_clahe_tile, 8)]:
+            w.blockSignals(True)
+            if isinstance(w, QCheckBox):
+                w.setChecked(False)
+            else:
+                w.setValue(v)
+            w.blockSignals(False)
+        self._clahe_on = False
+        self._clahe_clip = 2.0
+        self._clahe_tile = 8
+        self.lbl_clahe_clip.setText("2.0")
+        self.lbl_clahe_tile.setText("8")
+        self._rerender()
+
+    def _reset_frangi_section(self):
+        for w, v in [(self.chk_frangi, False),
+                     (self.chk_frangi_black, False),
+                     (self.slider_frangi_smin, 10),
+                     (self.slider_frangi_smax, 40),
+                     (self.slider_frangi_n, 4)]:
+            w.blockSignals(True)
+            if isinstance(w, QCheckBox):
+                w.setChecked(bool(v))
+            else:
+                w.setValue(v)
+            w.blockSignals(False)
+        self._frangi_on = False
+        self._frangi_black_ridges = False
+        self._frangi_sigma_min = 1.0
+        self._frangi_sigma_max = 4.0
+        self._frangi_n_sigmas = 4
+        self.lbl_frangi_smin.setText("1.0")
+        self.lbl_frangi_smax.setText("4.0")
+        self.lbl_frangi_n.setText("4")
+        self._rerender()
+
+    def _reset_lut_section(self):
+        for w, v in [(self.slider_gamma, 100), (self.chk_invert, False)]:
+            w.blockSignals(True)
+            if isinstance(w, QCheckBox):
+                w.setChecked(False)
+            else:
+                w.setValue(v)
+            w.blockSignals(False)
+        self._gamma = 1.0
+        self._invert = False
+        self.lbl_gamma.setText("1.00")
         self._rerender()
 
     def _reset_view_filters(self):
