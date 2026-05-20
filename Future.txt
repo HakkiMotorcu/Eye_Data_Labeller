@@ -1,0 +1,69 @@
+================================================================================
+TRACKING
+================================================================================
+
+Data model
+----------
+- Add a Track class: track_id (stable int), name (str), class_type, frames dict
+  {frame_idx → Annotation2D}
+- Add self.tracks dict to ToolController alongside existing self.annotations
+- Migrate existing annotations into tracks on load / import
+- Export gains a track_id column so trajectories can be queried with GROUP BY
+
+Phase 1 — Keep everything fully automatic (current behaviour, stabilised)
+--------------------------------------------------------------------------
+- Silent auto-match stays the default: centroid distance + seg-overlap picks
+  the best candidate from the previous frame with no user interaction
+- Threshold tuning: expose _TRACK_MAX_DIST as a UI slider so user can tighten
+  or loosen matching without restarting
+- Auto-match result is still undoable (Ctrl+Z unlinks the new annotation from
+  the track and treats it as a new cell instead)
+
+Phase 2 — Location-based name suggestions (opt-in overlay)
+------------------------------------------------------------
+- A "Suggest mode" toggle in the Tools panel
+- When on: instead of silently stealing the name, show a small floating widget
+  near the new annotation with 2-3 nearest-track candidates (name + distance)
+- User clicks a candidate to confirm the link, or presses Esc / clicks elsewhere
+  to create a new track
+- Keeps Phase 1 speed when the automatic match is obviously right
+
+Phase 3 — Track Manager (name cleanup + merge/split)
+------------------------------------------------------
+- Dedicated dialog / side panel showing a table: one row per track, columns for
+  track_id, name, class_type, frame_count, missing_frames
+- Per-row actions:
+    Rename  — renames all frames of that track at once
+    Merge   — pick two tracks, combine them (frame conflicts flagged for manual
+              resolution)
+    Split   — cut a track at a chosen frame into two independent tracks
+    Delete  — removes all frame entries for this track
+
+Phase 4 — Wrong detections & missing cells
+------------------------------------------
+- Missing-cell detection: highlight frames where a track has no annotation
+  (gap in the timeline strip) so the user can quickly jump to them
+- False-positive review: "Review mode" steps through all unlocked annotations
+  on all frames one by one — user presses Keep / Delete for each
+- Confidence score column in export (initially just 0/1 locked flag, later
+  could be a model score)
+- Merge duplicate tracks: if two tracks overlap spatially on the same frame,
+  flag them as potential duplicates and offer a one-click merge
+
+Phase 5 — Gap filling / interpolation (optional, slow-moving cells only)
+------------------------------------------------------------------------
+- If a track has entries on frame A and frame B but nothing in between, offer
+  an Interpolate button
+- Linearly interpolates bbox; copies + warps seg mask from the nearest painted
+  frame
+- Interpolated frames are marked as "auto" (lighter colour in list) to
+  distinguish them from manually labelled ones
+
+================================================================================
+FEATURE EXTRACTION
+================================================================================
+- Compactness, eccentricity, solidity, mean intensity inside mask
+- Cluster cells by feature vector (k-means or UMAP) to find sub-populations
+- Export feature table alongside annotation CSV
+
+================================================================================

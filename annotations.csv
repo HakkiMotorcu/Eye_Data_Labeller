@@ -1,0 +1,3 @@
+name,shape_mode,x0,y0,z0,x1,y1,z1,width,height,depth,cx_offset,cy_offset,cz_offset,locked
+Droplet 1,ellipse,150,91,10,179,120,36,29,29,26,0.0,0.0,0.0,1
+Droplet 2,ellipse,126,96,22,144,119,42,18,23,20,0.0,0.0,0.0,1

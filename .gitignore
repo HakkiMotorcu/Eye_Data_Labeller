@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# Large vendored micro-sam clone (use the one at /Users/hakkimotorcu/Desktop/micro-sam-master instead)
+micro-sam/
+
+# Model weights and logs (binary, regenerable)
+models/checkpoints/
+models/logs/
+
+# Generated outputs
+test_output/
+
+# Sample data (large binaries — tracked separately if needed)
+Data/
+Support Documents/
+
+# Generated/derived files
+*.npy
