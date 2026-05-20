@@ -483,6 +483,62 @@ class MainWindow(QMainWindow):
         # Pyqtgraph mouse-move signal — drives coords/value readout.
         self.view_frame.scene.sigMouseMoved.connect(self._on_mouse_moved)
 
+        # Decorate buttons with FontAwesome icons (no-op without qtawesome).
+        self._apply_icons()
+
+    def _apply_icons(self):
+        """Attach FontAwesome icons to common-action buttons.
+
+        No-op if qtawesome is not installed — every button still shows its
+        text label, so the UI remains usable.
+        """
+        try:
+            import qtawesome as qta
+        except ImportError:
+            return
+        color = '#cfd0d3'
+        icon_map = {
+            'btn_add':           'fa6s.plus',
+            'btn_add_vessel':    'fa6s.plus',
+            'btn_add_capillary': 'fa6s.plus',
+            'btn_delete':        'fa6s.trash',
+            'btn_rename':        'fa6s.pen-to-square',
+            'btn_fit_bbox':      'fa6s.compress',
+            'btn_lock':          'fa6s.lock',
+            'btn_unlock':        'fa6s.lock-open',
+            'btn_lock_all':      'fa6s.lock',
+            'btn_unlock_all':    'fa6s.lock-open',
+            'btn_hide_locked':   'fa6s.eye-slash',
+            'btn_label_colors':  'fa6s.palette',
+            'btn_mode_select':   'fa6s.arrow-pointer',
+            'btn_mode_paint':    'fa6s.paintbrush',
+            'btn_mode_erase':    'fa6s.eraser',
+            'btn_fill_bbox':     'fa6s.fill-drip',
+            'btn_force_paint':   'fa6s.bolt',
+            'btn_propagate_mask':'fa6s.arrows-left-right',
+            'btn_save_seg':      'fa6s.floppy-disk',
+            'btn_load_seg':      'fa6s.folder-open',
+            'btn_run_sam':       'fa6s.wand-magic-sparkles',
+            'btn_import':        'fa6s.file-import',
+            'btn_export_cells':  'fa6s.file-export',
+            'btn_export_veins':  'fa6s.file-export',
+            'btn_export_all':    'fa6s.file-export',
+            'btn_auto_levels':   'fa6s.gauge-high',
+            'btn_toggle_seg':    'fa6s.eye',
+            'btn_frame_first':   'fa6s.backward-fast',
+            'btn_frame_prev':    'fa6s.backward-step',
+            'btn_frame_next':    'fa6s.forward-step',
+            'btn_frame_last':    'fa6s.forward-fast',
+        }
+        for attr, icon_name in icon_map.items():
+            btn = getattr(self, attr, None)
+            if btn is None:
+                continue
+            try:
+                btn.setIcon(qta.icon(icon_name, color=color))
+            except Exception:
+                pass
+
     def _on_mouse_moved(self, scene_pos):
         if not self.video_data:
             return

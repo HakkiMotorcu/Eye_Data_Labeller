@@ -92,6 +92,14 @@ def pick_video_file(parent=None):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Eye Data Labeller")
+
+    # Dark theme — consistent palette across all widgets.
+    try:
+        import qdarktheme
+        app.setStyleSheet(qdarktheme.load_stylesheet("dark"))
+    except Exception as e:
+        print(f"Dark theme unavailable ({e}); falling back to system theme.")
+
     icon = _make_eye_icon(64)
     app.setWindowIcon(icon)
 
