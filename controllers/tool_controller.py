@@ -113,6 +113,46 @@ class DeleteAnnotationCmd:
         self.ctrl._raw_delete(self.anno)
 
 
+class DeletePaintOnlyIdentityCmd:
+    """Undo/redo deletion of every frame-entry + every painted pixel for a
+    paint-only identity (vessel / capillary).
+
+    Snapshots the (T, H, W) boolean mask of pixels that belonged to this
+    instance_id so undo can restore them exactly.
+    """
+    def __init__(self, controller, annos, instance_id, pixel_mask, color):
+        self.ctrl = controller
+        self.annos = list(annos)
+        self.iid = instance_id
+        self.pixel_mask = pixel_mask  # (T, H, W) bool
+        self.color = color
+
+    def undo(self):
+        seg = self.ctrl.window.seg_data
+        if seg is not None:
+            seg.masks[self.pixel_mask] = self.iid
+            if self.color is not None:
+                seg.register_instance_color(self.iid, self.color)
+        for anno in self.annos:
+            self.ctrl._raw_restore(anno)
+        self.ctrl._show_frame_annotations(self.ctrl.window._current_frame_idx)
+        self.ctrl.window._update_seg_overlay()
+        self.ctrl.state.annotations_changed.emit()
+
+    def redo(self):
+        seg = self.ctrl.window.seg_data
+        if seg is not None:
+            seg.masks[self.pixel_mask] = 0
+            seg.instance_colors.pop(self.iid, None)
+        if self.ctrl.active_annotation in self.annos:
+            self.ctrl.active_annotation = None
+        for anno in self.annos:
+            self.ctrl._raw_delete(anno)
+        self.ctrl._show_frame_annotations(self.ctrl.window._current_frame_idx)
+        self.ctrl.window._update_seg_overlay()
+        self.ctrl.state.annotations_changed.emit()
+
+
 class MoveResizeCmd:
     """Undo/redo a bbox move or resize, optionally also restoring pixel data.
 
@@ -900,11 +940,26 @@ class ToolController:
         self._undo_stack.push(AddAnnotationCmd(self, new_anno))
         self.state.annotations_changed.emit()
 
-    # Default colors for the paint-only retinal-structure classes.
-    _PAINT_ONLY_COLORS = {
-        'vessel':    (120, 80, 200),   # purple — larger retinal vessels
-        'capillary': (235, 130, 200),  # pink — small capillaries
-    }
+    # Per-class palettes for paint-only retinal structures.
+    # Indexed by gap-fill number so the same Vessel_N always gets the same
+    # shade across reopens of the same file.
+    _VESSEL_PALETTE = [
+        (120, 80, 200), (145, 95, 215), (105, 65, 180), (135, 105, 225),
+        (115, 75, 195), (155, 115, 230), (100, 85, 210), (125, 90, 200),
+        (140, 80, 190), (110, 60, 175), (150, 105, 220), (130, 95, 205),
+    ]
+    _CAPILLARY_PALETTE = [
+        (235, 130, 200), (245, 155, 215), (220, 110, 185), (250, 170, 225),
+        (215, 105, 175), (255, 180, 230), (228, 140, 195), (240, 150, 210),
+        (210, 120, 180), (245, 165, 220), (225, 135, 195), (250, 175, 225),
+    ]
+
+    def _shade_for(self, class_type, index):
+        if class_type == 'vessel':
+            return self._VESSEL_PALETTE[(index - 1) % len(self._VESSEL_PALETTE)]
+        if class_type == 'capillary':
+            return self._CAPILLARY_PALETTE[(index - 1) % len(self._CAPILLARY_PALETTE)]
+        return (180, 180, 180)
 
     def spawn_vessel(self):
         """Create a paint-only vessel annotation, optionally propagated across frames."""
@@ -929,7 +984,11 @@ class ToolController:
         # representation. Auto-create one if the user opened a raw video.
         seg = self._ensure_seg_data()
 
-        default_color = self._PAINT_ONLY_COLORS.get(class_type, (180, 180, 180))
+        # Pick the gap-fill name first, then choose a shade keyed by N so
+        # the same Vessel_N color is reproducible across sessions.
+        n, name = self._next_available_name(name_prefix)
+        self.anno_counter = max(self.anno_counter, n)
+        default_color = self._shade_for(class_type, n)
 
         instance_id = None
         color = None
@@ -937,9 +996,6 @@ class ToolController:
             instance_id = seg.next_instance_id()
             color = seg.register_instance_color(instance_id, color=default_color)
             self.anno_counter = max(self.anno_counter, instance_id)
-
-        n, name = self._next_available_name(name_prefix)
-        self.anno_counter = max(self.anno_counter, n)
 
         # --- Propagation dialog ---
         propagate_all = False
@@ -1342,20 +1398,50 @@ class ToolController:
         if self.active_annotation not in self.annotations:
             return
         target = self.active_annotation
-        index = self.annotations.index(target)
 
-        # Erase seg mask pixels for this annotation
-        self._erase_seg_for_anno(target)
+        # Paint-only annotations (vessel / capillary) are multi-frame:
+        # one Annotation2D per frame, all sharing instance_id. Deleting
+        # one frame's entry while the other 11 stay creates ghost masks
+        # and breaks the gap-fill namer. Delete the whole identity.
+        if target.is_paint_only and target.instance_id is not None:
+            self._delete_paint_only_identity(target.instance_id)
+        else:
+            index = self.annotations.index(target)
+            self._erase_seg_for_anno(target)
+            target.delete_ui()
+            self.annotations.remove(target)
+            self.active_annotation = None
+            self._undo_stack.push(DeleteAnnotationCmd(self, target, index))
 
-        target.delete_ui()
-        self.annotations.remove(target)
-        self.active_annotation = None
-
-        # Rebuild list and select next annotation on this frame
         self._show_frame_annotations(self.window._current_frame_idx)
         self.window._update_seg_overlay()
-        self._undo_stack.push(DeleteAnnotationCmd(self, target, index))
         self.state.annotations_changed.emit()
+
+    def _delete_paint_only_identity(self, instance_id):
+        """Remove every frame-entry and every painted pixel for the given
+        instance_id (a vessel or capillary). Records an undoable command
+        that can restore both the annotations and the pixels."""
+        seg = self.window.seg_data
+        pixel_mask = None
+        color = None
+        if seg is not None:
+            pixel_mask = (seg.masks == instance_id)
+            color = seg.instance_colors.get(int(instance_id))
+            seg.masks[pixel_mask] = 0
+            seg.instance_colors.pop(int(instance_id), None)
+
+        victims = [a for a in self.annotations if a.instance_id == instance_id]
+        if self.active_annotation in victims:
+            self.active_annotation = None
+        for anno in victims:
+            anno.delete_ui()
+            if anno in self.annotations:
+                self.annotations.remove(anno)
+
+        if pixel_mask is not None and victims:
+            self._undo_stack.push(
+                DeletePaintOnlyIdentityCmd(self, victims, int(instance_id),
+                                            pixel_mask, color))
 
     def toggle_hide_locked(self, checked):
         for anno in self._get_frame_annotations():
