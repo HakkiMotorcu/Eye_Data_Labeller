@@ -488,7 +488,13 @@ class Annotation2D(QObject):
     def set_locked(self, locked):
         self.is_locked = locked
         self.roi.translatable = not locked
-        self.roi.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
+        # Reject mouse buttons entirely when locked so neither the ROI body
+        # nor a stray hit on a handle moves anything. pyqtgraph handles still
+        # receive mouse events when only hidden, so also disable them.
+        self.roi.setAcceptedMouseButtons(
+            Qt.MouseButton.NoButton if locked else Qt.MouseButton.LeftButton)
+        for h in self.roi.getHandles():
+            h.setEnabled(not locked)
         self.update_visuals()
 
     def update_visuals(self):
@@ -555,6 +561,12 @@ class Annotation2D(QObject):
         self.controller._geometry_snapshot = ToolController._snap_geometry(self)
 
     def _on_drag_end(self, *args):
+        if self.is_locked:
+            # Belt-and-braces: set_locked already blocks mouse input, but
+            # if anything sneaks through we refuse to push a MoveResizeCmd
+            # for a locked annotation.
+            self.controller._geometry_snapshot = None
+            return
         old = self.controller._geometry_snapshot
         if old is None:
             return
