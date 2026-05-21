@@ -188,7 +188,8 @@ class SamBoxPromptCmd:
         seg.get_layer(self.class_type)[self.frame_idx][:] = frame_mask
         for a in self.ctrl.annotations:
             if (a.frame_idx == self.frame_idx
-                    and a.instance_id == self.instance_id):
+                    and a.instance_id == self.instance_id
+                    and a.class_type == self.class_type):
                 if geom is not None:
                     a._is_syncing = True
                     a.roi.setPos([geom['x'], geom['y']])
@@ -946,14 +947,20 @@ class ToolController:
             follow = None
             if prev is not None:
                 if prev.instance_id is not None:
+                    # (class_type, instance_id) is the real identity key —
+                    # iid alone collides across classes after the per-class
+                    # namespace fix.
                     follow = next(
                         (a for a in visible_annos
-                         if a.instance_id == prev.instance_id),
+                         if a.instance_id == prev.instance_id
+                         and a.class_type == prev.class_type),
                         None)
                 if follow is None:
                     # Paint-only annos may share a name across frames.
                     follow = next(
-                        (a for a in visible_annos if a.name == prev.name),
+                        (a for a in visible_annos
+                         if a.name == prev.name
+                         and a.class_type == prev.class_type),
                         None)
             self.active_annotation = None
             target = follow or (visible_annos[0] if visible_annos else None)
@@ -1798,7 +1805,8 @@ class ToolController:
         # one frame's entry while the other 11 stay creates ghost masks
         # and breaks the gap-fill namer. Delete the whole identity.
         if target.is_paint_only and target.instance_id is not None:
-            self._delete_paint_only_identity(target.instance_id)
+            self._delete_paint_only_identity(target.instance_id,
+                                              target.class_type)
         else:
             index = self.annotations.index(target)
             self._erase_seg_for_anno(target)
@@ -1811,18 +1819,22 @@ class ToolController:
         self.window._update_seg_overlay()
         self.state.annotations_changed.emit()
 
-    def _delete_paint_only_identity(self, instance_id):
+    def _delete_paint_only_identity(self, instance_id, class_type):
         """Remove every frame-entry and every painted pixel for the given
-        instance_id (a vessel or capillary). Records an undoable command
-        that can restore both the annotations and the pixels."""
+        (class_type, instance_id) identity. Records an undoable command
+        that can restore both the annotations and the pixels.
+
+        class_type is required because instance IDs live in per-class
+        namespaces — a vessel iid=4 and a capillary iid=4 are different
+        annotations and must not be co-deleted.
+        """
         seg = self.window.seg_data
         pixel_mask = None
         color = None
-        class_type = 'vessel'  # fallback; refined below from the first victim
 
-        victims = [a for a in self.annotations if a.instance_id == instance_id]
-        if victims:
-            class_type = victims[0].class_type
+        victims = [a for a in self.annotations
+                   if a.instance_id == instance_id
+                   and a.class_type == class_type]
         if seg is not None:
             layer = seg.get_layer(class_type)
             colors = seg.get_colors(class_type)
@@ -2337,9 +2349,12 @@ class ToolController:
                 "to all other frames.")
             return
 
-        # Collect all frames that have this annotation
+        # Collect all frames that have this annotation. Identity is
+        # (class_type, instance_id) — without the class filter a
+        # vessel and a capillary that share an iid get merged here.
         anno_frames = sorted({a.frame_idx for a in self.annotations
-                              if a.instance_id == anno.instance_id})
+                              if a.instance_id == anno.instance_id
+                              and a.class_type == ct})
         target_frames = [f for f in anno_frames if f != source_frame]
 
         if not target_frames:
@@ -3018,7 +3033,8 @@ class ToolController:
                 continue
             f, o = pair
             anno = next((a for a in self.annotations
-                         if a.frame_idx == f and a.instance_id == o), None)
+                         if a.frame_idx == f and a.instance_id == o
+                         and a.class_type == 'cell'), None)
             if anno is not None:
                 track_to_name[tid] = anno.name
             else:
