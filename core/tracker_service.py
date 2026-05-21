@@ -96,6 +96,14 @@ class TrackastraTracker(TrackerService):
     def setting_specs(self):
         return [
             SettingSpec(
+                'mode', 'Mode', 'choice',
+                default='greedy', choices=['greedy', 'ilp'],
+                tooltip="greedy: per-cell next-edge matching. Fast (seconds).\n"
+                        "ilp:    globally optimal association via integer\n"
+                        "        linear programming. Slower but better for\n"
+                        "        crowded scenes and fast-moving cells.\n"
+                        "        Use if greedy is splitting/swapping tracks."),
+            SettingSpec(
                 'gap_closing', 'Gap closing (frames)', 'int',
                 default=3, min=0, max=20, step=1,
                 tooltip="Max frames a cell can disappear and still count as "
@@ -109,7 +117,13 @@ class TrackastraTracker(TrackerService):
         ]
 
     def run(self, timeseries, segmentation, *, on_progress=None):
-        from micro_sam.multi_dimensional_segmentation import track_across_frames
+        # Bypass micro_sam.track_across_frames (which hardcodes
+        # mode='greedy') so we can expose mode as a setting. Use the
+        # underlying _tracking_impl directly + _preprocess_closing for
+        # gap-closing pre-processing.
+        from micro_sam.multi_dimensional_segmentation import (
+            _tracking_impl, _preprocess_closing,
+        )
 
         log('tracker.trackastra', 'starting',
             T=int(timeseries.shape[0]),
@@ -117,23 +131,36 @@ class TrackastraTracker(TrackerService):
             n_instances=int(np.unique(segmentation).size - 1),
             settings=dict(self.settings))
 
-        # Trackastra interprets gap_closing=0 as 'no closing' -> pass None.
         gap = int(self.settings.get('gap_closing', 0))
-        gap_arg = None if gap <= 0 else gap
+        mode = str(self.settings.get('mode', 'greedy'))
 
-        # NOTE: micro-sam's track_across_frames raises NotImplementedError
-        # when min_time_extent > 0 (it's a TODO in their code). We always
-        # pass None and apply the min-track-length filter ourselves below.
+        seg_for_track = segmentation
+        if gap > 0:
+            # _preprocess_closing wants a progress-update callable.
+            def _noop_pbar(*_a, **_kw):
+                pass
+            try:
+                seg_for_track = _preprocess_closing(
+                    segmentation, gap, _noop_pbar)
+            except Exception as e:
+                log_error('tracker.trackastra',
+                          '_preprocess_closing failed', exc=e)
+                raise
+
+        # NOTE: micro-sam's _tracking_impl raises NotImplementedError on
+        # min_time_extent > 0 (TODO in their code). We always pass None
+        # and apply the min-track-length filter ourselves below.
         try:
-            tracked, lineage = track_across_frames(
-                timeseries=timeseries,
-                segmentation=segmentation,
-                gap_closing=gap_arg,
+            tracked, lineage = _tracking_impl(
+                timeseries=np.asarray(timeseries),
+                segmentation=seg_for_track,
+                mode=mode,
                 min_time_extent=None,
-                verbose=False,
+                output_folder=None,
             )
         except Exception as e:
-            log_error('tracker.trackastra', 'track_across_frames raised', exc=e)
+            log_error('tracker.trackastra', '_tracking_impl raised',
+                      exc=e, mode=mode, gap_closing=gap)
             raise
 
         # Build remap: for each (frame, original_id), look up the track_id
