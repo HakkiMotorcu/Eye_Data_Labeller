@@ -661,8 +661,10 @@ class ToolController:
         # Application-modal "SAM model running" dialog. Created on demand
         # by _show_embed_dialog and torn down on finish / error / cancel.
         self._embed_dialog = None
-        # Annotation list filter: 'all' | 'cell' | 'vessel' | 'capillary'.
-        self._list_filter = 'all'
+        # Annotation list filter: set of class keys currently shown.
+        # Defaults to "everything"; users can toggle classes independently
+        # from the filter button row (B). "All" is a master shortcut.
+        self._list_filter = {'cell', 'vessel', 'capillary'}
 
         # --- Button connections ---
         self.window.btn_add.clicked.connect(self.spawn_new_annotation)
@@ -683,8 +685,11 @@ class ToolController:
             self.window.btn_filter_vessel:    'vessel',
             self.window.btn_filter_capillary: 'capillary',
         }
-        for btn in self._filter_btn_map:
-            btn.clicked.connect(self._on_filter_button_clicked)
+        for btn, key in self._filter_btn_map.items():
+            # ToolController is not a QObject, so self.sender() isn't
+            # available — bind the key explicitly via a default arg.
+            btn.clicked.connect(
+                lambda _checked=False, k=key: self._on_filter_button_clicked(k))
         # Apply the initial visual state (All → every button lit).
         self._apply_filter_visual()
         self.window.btn_lock.clicked.connect(self.lock_active)
@@ -858,7 +863,7 @@ class ToolController:
         visible_annos = []
         class_labels = {'cell': 'Cell', 'vessel': 'Vessel',
                         'capillary': 'Capillary'}
-        flt = self._list_filter
+        flt = self._list_filter  # set of class keys currently shown
         for anno in self.annotations:
             if anno.frame_idx == frame_idx:
                 # Hidden / class-filtered annotations still get their ROI
@@ -868,8 +873,8 @@ class ToolController:
                     anno.roi.setVisible(False)
                 else:
                     anno.roi.setVisible(True)
-                # Skip rows that don't match the current class filter.
-                if flt != 'all' and anno.class_type != flt:
+                # Skip rows whose class isn't in the active filter set.
+                if anno.class_type not in flt:
                     continue
                 visible_annos.append(anno)
                 cls = class_labels.get(anno.class_type, anno.class_type)
@@ -1560,27 +1565,50 @@ class ToolController:
         # Repaint the row glyphs + recompute stats.
         self._show_frame_annotations(cur)
 
-    def _on_filter_button_clicked(self, *_):
-        """Class-filter button (B) clicked; rebuild list."""
-        btn = self.sender()
-        key = self._filter_btn_map.get(btn)
-        if key is None:
+    _ALL_CLASS_KEYS = {'cell', 'vessel', 'capillary'}
+
+    def _on_filter_button_clicked(self, key):
+        """Class-filter button (B) clicked; rebuild list.
+
+        Behavior:
+          - "All": master shortcut. If everything is currently in the
+            filter set, clear it. Otherwise restore the full set.
+          - "Cell/Vessel/Capillary": independent toggle on that class.
+        """
+        if key not in ('all',) and key not in self._ALL_CLASS_KEYS:
             return
-        log('controller.list_filter', 'filter clicked', key=key)
-        if key != self._list_filter:
-            self._list_filter = key
-            self._show_frame_annotations(self.window._current_frame_idx)
-        # Always re-apply visuals so the "All lights everything" rule holds
-        # even when the same button is clicked twice.
+        log('controller.list_filter',
+            'filter clicked', key=key,
+            before=sorted(self._list_filter))
+        if key == 'all':
+            if self._list_filter == self._ALL_CLASS_KEYS:
+                self._list_filter = set()
+            else:
+                self._list_filter = set(self._ALL_CLASS_KEYS)
+        else:
+            new = set(self._list_filter)
+            if key in new:
+                new.remove(key)
+            else:
+                new.add(key)
+            self._list_filter = new
+        log('controller.list_filter',
+            'filter updated', after=sorted(self._list_filter))
         self._apply_filter_visual()
+        self._show_frame_annotations(self.window._current_frame_idx)
 
     def _apply_filter_visual(self):
-        """Light up the active filter button. When the filter is 'all',
-        all four buttons appear checked (signaling 'nothing is hidden').
+        """Sync filter-button checked states to the underlying set.
+
+        - "All" is lit when every class is in the filter.
+        - Each class button is lit when its class is in the filter.
         """
         flt = self._list_filter
         for btn, key in self._filter_btn_map.items():
-            checked = (flt == 'all') or (key == flt)
+            if key == 'all':
+                checked = (flt == self._ALL_CLASS_KEYS)
+            else:
+                checked = (key in flt)
             btn.blockSignals(True)
             btn.setChecked(checked)
             btn.blockSignals(False)
@@ -3217,27 +3245,62 @@ class ToolController:
         log('controller.sam', 'scope', n_frames=len(frame_indices),
             all_frames=all_frames)
 
-        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtWidgets import QApplication, QProgressDialog
+        n_total = len(frame_indices)
+        scope_lbl = ("the current frame" if not all_frames
+                     else f"all {n_total} frames")
+        dlg = QProgressDialog(
+            f"Running SAM auto-segmentation on {scope_lbl}…\n"
+            "The rest of the UI is paused until this finishes.",
+            "Cancel", 0, max(1, n_total), self.window)
+        dlg.setWindowTitle("SAM model running")
+        dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)
+        dlg.setAutoReset(False)
+        dlg.setAutoClose(False)
+        dlg.show()
+        QApplication.processEvents()
+
         total_created = 0
-        for i, fi in enumerate(frame_indices, start=1):
-            try:
-                n_created = self._run_sam_on_frame(fi)
-            except Exception as e:
-                log_error('controller.sam', f'frame {fi} failed', exc=e)
-                QMessageBox.critical(
-                    self.window, "Error",
-                    f"Segmentation failed on frame {fi}:\n\n"
-                    f"{type(e).__name__}: {e}\n\n"
-                    f"Created {total_created} cells before the failure.\n"
-                    f"Run with --debug for a full traceback.")
-                self._refresh_sam_status()
-                return
-            total_created += n_created
-            if all_frames:
+        cancelled = False
+        try:
+            for i, fi in enumerate(frame_indices, start=1):
+                if dlg.wasCanceled():
+                    cancelled = True
+                    break
+                try:
+                    n_created = self._run_sam_on_frame(fi)
+                except Exception as e:
+                    log_error('controller.sam', f'frame {fi} failed', exc=e)
+                    dlg.close()
+                    QMessageBox.critical(
+                        self.window, "Error",
+                        f"Segmentation failed on frame {fi}:\n\n"
+                        f"{type(e).__name__}: {e}\n\n"
+                        f"Created {total_created} cells before the failure.\n"
+                        f"Run with --debug for a full traceback.")
+                    self._refresh_sam_status()
+                    return
+                total_created += n_created
+                dlg.setValue(i)
+                dlg.setLabelText(
+                    f"Frame {i}/{n_total}\n"
+                    f"{total_created} cells found so far\n"
+                    "The rest of the UI is paused until this finishes.")
                 self.window.lbl_sam_status.setText(
-                    f"SAM: frame {i}/{len(frame_indices)} done · "
+                    f"SAM: frame {i}/{n_total} done · "
                     f"{total_created} cells so far")
                 QApplication.processEvents()
+        finally:
+            dlg.close()
+
+        if cancelled:
+            self._refresh_sam_status()
+            QMessageBox.information(
+                self.window, "Cancelled",
+                f"Auto-segmentation cancelled after {total_created} cells.")
+            return
 
         # If All-frames + Auto-link toggle are both on, run the active
         # tracker so cells across frames collapse into single identities.
