@@ -335,6 +335,54 @@ class BrushStrokeCmd:
             self.ctrl.window._update_seg_overlay()
 
 
+class PropagateWithSpawnCmd:
+    """Undo/redo a propagate operation that also created the per-frame
+    paint-only annotations (when the user invoked Propagate Mask on a
+    vessel/capillary that only existed on the current frame).
+
+    Single undoable step:
+      undo  → revert propagated pixels, then remove the spawned annos.
+      redo  → re-add the spawned annos, then re-apply pixels.
+    """
+    def __init__(self, controller, annos, old_masks, new_masks, class_type):
+        self.ctrl = controller
+        self.annos = list(annos)
+        self.old_masks = old_masks
+        self.new_masks = new_masks
+        self.class_type = class_type
+
+    def _apply_masks(self, masks_dict):
+        seg = self.ctrl.window.seg_data
+        if seg is None:
+            return
+        layer = seg.get_layer(self.class_type)
+        for fi, mask in masks_dict.items():
+            layer[fi] = mask.copy()
+
+    def undo(self):
+        self._apply_masks(self.old_masks)
+        for anno in self.annos:
+            if anno in self.ctrl.annotations:
+                anno.delete_ui()
+                self.ctrl.annotations.remove(anno)
+                if self.ctrl.active_annotation == anno:
+                    self.ctrl.active_annotation = None
+        self.ctrl._show_frame_annotations(
+            self.ctrl.window._current_frame_idx)
+        self.ctrl.window._update_seg_overlay()
+
+    def redo(self):
+        for anno in self.annos:
+            if anno not in self.ctrl.annotations:
+                self.ctrl.annotations.append(anno)
+                self.ctrl.window.view_frame.addItem(anno.roi)
+                anno.update_visuals()
+        self._apply_masks(self.new_masks)
+        self.ctrl._show_frame_annotations(
+            self.ctrl.window._current_frame_idx)
+        self.ctrl.window._update_seg_overlay()
+
+
 class PropagateMaskCmd:
     """Undo/redo a mask-propagation operation across multiple frames."""
     def __init__(self, controller, old_masks, new_masks, class_type='cell'):
@@ -2355,14 +2403,38 @@ class ToolController:
         anno_frames = sorted({a.frame_idx for a in self.annotations
                               if a.instance_id == anno.instance_id
                               and a.class_type == ct})
+        total_frames = self.window.video_data.num_frames
+
+        # If the annotation only exists on the current frame, auto-expand
+        # it to every other frame before propagating. This matches the
+        # user expectation that "Propagate Mask" really does the whole
+        # job from one click. The newly spawned annotations and the
+        # propagated pixels go into one undo step.
+        spawned = []
+        if anno_frames == [source_frame]:
+            for fi in range(total_frames):
+                if fi == source_frame:
+                    continue
+                new_anno = Annotation2D(
+                    anno.name, self.window.view_frame, self,
+                    start_pos=(0, 0),
+                    start_size=(1, 1),
+                    shape_mode='rect',
+                    frame_idx=fi,
+                    instance_id=anno.instance_id,
+                    color=anno.color,
+                    class_type=anno.class_type,
+                )
+                new_anno.sig_clicked.connect(self.select_annotation)
+                new_anno.sig_updated.connect(self._on_anno_updated)
+                self.annotations.append(new_anno)
+                new_anno.roi.setVisible(False)
+                spawned.append(new_anno)
+            anno_frames = sorted(anno_frames + [a.frame_idx for a in spawned])
         target_frames = [f for f in anno_frames if f != source_frame]
 
         if not target_frames:
-            QMessageBox.information(
-                self.window, "Propagate Mask",
-                "This annotation only exists on the current frame.\n\n"
-                "When adding a vein, choose 'Yes' in the propagation dialog to "
-                "create the annotation on all frames first.")
+            # Nothing to do — single-frame stack.
             return
 
         # Determine which targets already have pixels
@@ -2397,8 +2469,22 @@ class ToolController:
         new_masks = {fi: layer[fi].copy() for fi in effective_targets}
 
         if n_updated > 0:
-            self._undo_stack.push(
-                PropagateMaskCmd(self, old_masks, new_masks, class_type=ct))
+            if spawned:
+                # Group spawn + propagate into one undo step.
+                self._undo_stack.push(
+                    PropagateWithSpawnCmd(
+                        self, spawned, old_masks, new_masks, class_type=ct))
+            else:
+                self._undo_stack.push(
+                    PropagateMaskCmd(self, old_masks, new_masks, class_type=ct))
+        elif spawned:
+            # No pixels propagated but we still spawned annos — keep them
+            # undoable as a batch.
+            self._undo_stack.push(AddAnnotationBatchCmd(self, spawned))
+
+        # Make sure the new annotations show up in the list immediately.
+        if spawned:
+            self._show_frame_annotations(self.window._current_frame_idx)
 
         self.window._update_seg_overlay()
         # Brief status feedback without a blocking dialog
