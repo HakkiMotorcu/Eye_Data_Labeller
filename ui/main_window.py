@@ -379,10 +379,17 @@ class MainWindow(QMainWindow):
         action_row.setSpacing(3)
         self.btn_fill_bbox = QPushButton("Fill BBox [F]")
         self.btn_fill_bbox.setToolTip("Fill selected annotation's bbox as seg instance (F)")
+        self.btn_sam_box = QPushButton("SAM Box [B]")
+        self.btn_sam_box.setToolTip(
+            "Run SAM with the active cell's bbox as a prompt and absorb\n"
+            "the predicted mask into that cell's instance_id.\n"
+            "Shortcut: B. Settings: SAM section -> 'Box prompt'.")
+        self.btn_sam_box.setStyleSheet("color: #4cc9f0; font-weight: bold;")
         self.btn_save_seg = QPushButton("Save Seg")
         self.btn_save_seg.setToolTip("Export modified segmentation masks as AVI")
         self.btn_save_seg.setStyleSheet("color: #2a9d8f; font-weight: bold;")
         action_row.addWidget(self.btn_fill_bbox)
+        action_row.addWidget(self.btn_sam_box)
         action_row.addWidget(self.btn_save_seg)
         tools_layout.addLayout(action_row)
 
@@ -502,6 +509,30 @@ class MainWindow(QMainWindow):
         self.btn_run_sam.setStyleSheet("color: #4cc9f0; font-weight: bold;")
         run_row.addWidget(self.btn_run_sam)
         sam_layout.addLayout(run_row)
+
+        # Box-prompt settings — drives the "SAM Box [B]" button in Tools.
+        from PyQt6.QtWidgets import QFrame as _F
+        _bp_div = _F()
+        _bp_div.setFrameShape(_F.Shape.HLine)
+        _bp_div.setStyleSheet("color:#444")
+        sam_layout.addWidget(_bp_div)
+        _bp_label = QLabel("Box prompt")
+        _bp_label.setStyleSheet("color:#888; font-size:10px;")
+        sam_layout.addWidget(_bp_label)
+
+        bp_row = QHBoxLayout()
+        bp_row.setSpacing(4)
+        self.chk_sam_box_multimask = QCheckBox("Multi-mask (use best)")
+        self.chk_sam_box_multimask.setChecked(False)
+        self.chk_sam_box_multimask.setToolTip(
+            "Off (default): SAM returns one mask from the primary prediction\n"
+            "head — fastest.\n"
+            "On: SAM evaluates 3 candidates and returns the one with the\n"
+            "highest predicted IoU. Slightly slower; often better on\n"
+            "ambiguous or partially-overlapping bboxes.")
+        bp_row.addWidget(self.chk_sam_box_multimask)
+        bp_row.addStretch(1)
+        sam_layout.addLayout(bp_row)
 
         # Auto-link tracks after all-frames SAM. The toggle is only
         # enabled when 'All frames' is checked — single-frame SAM has

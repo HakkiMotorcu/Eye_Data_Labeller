@@ -138,6 +138,70 @@ class SamService:
             arr = np.stack([arr, arr, arr], axis=-1)
         return arr
 
+    # ---- Inference: prompt-based ------------------------------------
+
+    def segment_from_box(self, frame, box, *, multimask_output=False):
+        """Run SAM with a single bbox prompt.
+
+        Args:
+          frame: (H, W) or (H, W, 3) uint8 — same SAM rule as auto_segment.
+          box: (x0, y0, x1, y1) XYXY in image coordinates.
+          multimask_output: when True, SAM evaluates 3 candidate masks
+            internally and returns the best-IoU one (still (H, W)).
+            Often improves quality on ambiguous bboxes at the cost of a
+            small extra inference pass. When False, returns a single
+            mask from the primary prediction head.
+
+        Returns:
+          (H, W) bool mask.
+        """
+        from micro_sam.prompt_based_segmentation import segment_from_box as _sfb
+
+        self.load()
+        frame_rgb = self.to_rgb_uint8(frame)
+        box_arr = np.asarray(box, dtype=np.float32).reshape(4)
+        log('sam_service', 'segment_from_box: starting',
+            frame_shape=frame_rgb.shape, box=box_arr.tolist(),
+            multimask=multimask_output)
+
+        # micro_sam.segment_from_box reads the predictor's currently-set
+        # image. We have to seed it before calling.
+        try:
+            self._predictor.set_image(frame_rgb)
+            if multimask_output:
+                # Ask for all 3 candidates + their predicted IoU scores
+                # so we can pick the highest-scoring one ourselves.
+                mask, scores, _logits = _sfb(
+                    predictor=self._predictor,
+                    box=box_arr,
+                    multimask_output=True,
+                    return_all=True,
+                )
+                mask = np.asarray(mask)              # shape (3, H, W)
+                scores = np.asarray(scores).ravel()  # shape (3,)
+                best = int(np.argmax(scores))
+                log('sam_service', 'segment_from_box: picked best of 3',
+                    scores=[round(float(s), 3) for s in scores], best_idx=best)
+                mask = mask[best]
+            else:
+                mask = _sfb(
+                    predictor=self._predictor,
+                    box=box_arr,
+                    multimask_output=False,
+                    return_all=False,
+                )
+        except Exception as e:
+            log_error('sam_service', 'segment_from_box raised',
+                      exc=e, box=box_arr.tolist())
+            raise
+        # SAM returns (1, H, W) when not multimask; squeeze to (H, W).
+        mask = np.asarray(mask, dtype=bool)
+        if mask.ndim == 3 and mask.shape[0] == 1:
+            mask = mask[0]
+        log('sam_service', 'segment_from_box: done',
+            result_shape=tuple(mask.shape), n_true=int(mask.sum()))
+        return mask
+
     # ---- Inference: auto ---------------------------------------------
 
     def auto_segment(self, frame, verbose=False, **kwargs):

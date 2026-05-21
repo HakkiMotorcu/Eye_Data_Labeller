@@ -159,6 +159,42 @@ class TrackingCmd:
         self.ctrl.state.annotations_changed.emit()
 
 
+class SamBoxPromptCmd:
+    """Undo/redo for a single SAM-box-prompt paint into one cell.
+
+    Snapshots the affected frame's full mask before and after. Small
+    memory cost (one (H, W) int32 per command). Restoring touches only
+    that frame.
+    """
+    def __init__(self, controller, frame_idx, instance_id,
+                 before_frame, after_frame):
+        self.ctrl = controller
+        self.frame_idx = int(frame_idx)
+        self.instance_id = int(instance_id)
+        self.before_frame = before_frame  # (H, W) int32 copy
+        self.after_frame = after_frame
+
+    def _restore(self, frame_mask):
+        seg = self.ctrl.window.seg_data
+        if seg is None:
+            return
+        seg.masks[self.frame_idx][:] = frame_mask
+        # Refresh the affected annotation's bbox color/seg-aware visuals
+        for a in self.ctrl.annotations:
+            if a.frame_idx == self.frame_idx and a.instance_id == self.instance_id:
+                a.update_visuals()
+                break
+        if self.frame_idx == self.ctrl.window._current_frame_idx:
+            self.ctrl.window._update_seg_overlay()
+        self.ctrl.state.annotations_changed.emit()
+
+    def undo(self):
+        self._restore(self.before_frame)
+
+    def redo(self):
+        self._restore(self.after_frame)
+
+
 class DeletePaintOnlyIdentityCmd:
     """Undo/redo deletion of every frame-entry + every painted pixel for a
     paint-only identity (vessel / capillary).
@@ -646,6 +682,7 @@ class ToolController:
         self.window._seg_mode_group.idClicked.connect(self._on_seg_mode_changed)
         self.window.slider_brush_size.valueChanged.connect(self._on_brush_size_changed)
         self.window.btn_fill_bbox.clicked.connect(self.fill_bbox_cmd)
+        self.window.btn_sam_box.clicked.connect(self.run_sam_box_prompt)
         self.window.btn_save_seg.clicked.connect(self.save_seg_map)
         self.window.btn_propagate_mask.clicked.connect(self.propagate_vein_mask)
 
@@ -698,6 +735,7 @@ class ToolController:
             QShortcut(QKeySequence("E"),          self.window, lambda: self._set_seg_mode('erase')),
             QShortcut(QKeySequence("Escape"),     self.window, lambda: self._set_seg_mode('select')),
             QShortcut(QKeySequence("F"),          self.window, self.fill_bbox_cmd),
+            QShortcut(QKeySequence("B"),          self.window, self.run_sam_box_prompt),
             QShortcut(QKeySequence("V"),          self.window, self.spawn_vessel),
             QShortcut(QKeySequence("C"),          self.window, self.spawn_capillary),
             QShortcut(QKeySequence("X"),          self.window, self._shortcut_toggle_force_paint),
@@ -2420,6 +2458,166 @@ class ToolController:
             badge = "ready" if ckpt_ok else "checkpoint missing"
             text = f"model: {self.sam_service.model_type} · {ckpt} · {badge}"
         self.window.lbl_sam_status.setText(text)
+
+    def run_sam_box_prompt(self):
+        """Run SAM with the selected cell's bbox as a prompt.
+
+        Behavior is safe by construction:
+          * Only paints pixels where the current seg is 0 or already
+            belongs to this cell's instance_id.
+          * Never overwrites another annotation's pixels.
+          * Refuses on locked cells, paint-only classes (no bbox),
+            off-image bboxes, etc.
+          * Undoable via Cmd+Z.
+        """
+        log('controller.sam', 'run_sam_box_prompt: entered')
+
+        # ---- Hard guards (clear errors, no mask changes) --------------
+        if not SamService.available():
+            QMessageBox.critical(self.window, "Error",
+                                 "MicroSAM is not installed.")
+            return
+        if self.window.video_data is None:
+            QMessageBox.information(self.window, "SAM Box",
+                                    "Load an image first.")
+            return
+        anno = self.active_annotation
+        if anno is None or anno not in self.annotations:
+            QMessageBox.information(
+                self.window, "SAM Box",
+                "Select a cell first (click one in the viewer or the list).\n"
+                "SAM Box uses the selected cell's bbox as the prompt.")
+            return
+        if anno.is_paint_only:
+            QMessageBox.information(
+                self.window, "SAM Box",
+                f"'{anno.name}' is a {anno.class_type}, which has no bbox.\n"
+                f"SAM Box only works on cells.")
+            return
+        if anno.instance_id is None:
+            QMessageBox.information(
+                self.window, "SAM Box",
+                "Selected cell has no segmentation instance — add a fresh "
+                "cell with A.")
+            return
+        if anno.is_locked:
+            QMessageBox.information(
+                self.window, "SAM Box",
+                f"'{anno.name}' is locked. Unlock it (U) before running SAM "
+                f"on it.")
+            return
+
+        # If selected cell is on another frame, jump to it so the user
+        # sees the result land.
+        if anno.frame_idx != self.window._current_frame_idx:
+            self.window.slider_timeline.setValue(anno.frame_idx)
+
+        # ---- Build bbox in image coords (XYXY), clamp to image bounds --
+        H = self.window.video_data.height
+        W = self.window.video_data.width
+        x, y = anno.roi.pos()
+        rw, rh = anno.roi.size()
+        x0 = max(0.0, float(x))
+        y0 = max(0.0, float(y))
+        x1 = min(float(W), float(x) + float(rw))
+        y1 = min(float(H), float(y) + float(rh))
+        if x1 - x0 < 2 or y1 - y0 < 2:
+            QMessageBox.information(
+                self.window, "SAM Box",
+                "The selected cell's bbox is empty or off-image.")
+            return
+        box = (x0, y0, x1, y1)
+
+        # ---- Lazy model load (reuses sam_service caches) --------------
+        try:
+            self.sam_service.load()
+        except FileNotFoundError as e:
+            log_error('controller.sam', 'box prompt: checkpoint missing', exc=e)
+            QMessageBox.critical(
+                self.window, "Error",
+                f"{e}\n\nPlace the fine-tuned weights at "
+                f"models/checkpoints/sam_hela/best.pt or switch the SAM "
+                f"model in the SAM panel.")
+            return
+        except OSError as e:
+            if getattr(e, 'errno', None) == 28:
+                cache = os.path.expanduser('~/Library/Caches/micro_sam/models')
+                log_error('controller.sam', 'box prompt: disk full', exc=e)
+                QMessageBox.critical(
+                    self.window, "Disk Full",
+                    f"Out of disk space while downloading the SAM model.\n\n"
+                    f"Free some space, or pick a smaller model in the SAM "
+                    f"section.\n\nCache: {cache}")
+                return
+            log_error('controller.sam', 'box prompt: OSError', exc=e)
+            QMessageBox.critical(self.window, "Error",
+                                 f"OSError loading SAM model:\n\n{e}")
+            return
+        except Exception as e:
+            log_error('controller.sam', 'box prompt: load failed', exc=e)
+            QMessageBox.critical(
+                self.window, "Error",
+                f"Failed to load SAM model:\n\n{type(e).__name__}: {e}\n\n"
+                f"Run with --debug for a full traceback.")
+            return
+
+        # ---- Run SAM with the bbox prompt -----------------------------
+        frame = self.window.video_data.get_frame(anno.frame_idx)
+        multimask = self.window.chk_sam_box_multimask.isChecked()
+        log('controller.sam', 'box prompt: running',
+            anno=anno.name, instance_id=anno.instance_id, box=box,
+            multimask=multimask)
+        try:
+            mask = self.sam_service.segment_from_box(
+                frame, box, multimask_output=multimask)
+        except Exception as e:
+            log_error('controller.sam', 'box prompt: segment_from_box raised', exc=e)
+            QMessageBox.critical(
+                self.window, "Error",
+                f"SAM box prompt failed:\n\n{type(e).__name__}: {e}\n\n"
+                f"Run with --debug for a full traceback.")
+            return
+        if mask is None or not bool(mask.any()):
+            self.window.lbl_sam_status.setText(
+                "SAM Box returned an empty mask — nothing to paint.")
+            return
+
+        # ---- Apply safely: only background or own-cell pixels --------
+        seg = self._ensure_seg_data()
+        if seg is None:
+            return
+        fi = anno.frame_idx
+        target_id = int(anno.instance_id)
+        before_frame = seg.masks[fi].copy()
+
+        current = seg.masks[fi]
+        own_or_bg = (current == 0) | (current == target_id)
+        paint = mask & own_or_bg
+        n_painted = int(paint.sum())
+        n_total_sam = int(mask.sum())
+        n_blocked = n_total_sam - n_painted
+
+        if n_painted == 0:
+            self.window.lbl_sam_status.setText(
+                "SAM Box: every predicted pixel was already taken by "
+                "another annotation — nothing painted.")
+            return
+
+        current[paint] = target_id
+        after_frame = seg.masks[fi].copy()
+        self._undo_stack.push(
+            SamBoxPromptCmd(self, fi, target_id, before_frame, after_frame))
+
+        anno.update_visuals()
+        self._show_frame_annotations(self.window._current_frame_idx)
+        self.window._update_seg_overlay()
+        self.state.annotations_changed.emit()
+        self.window.lbl_sam_status.setText(
+            f"SAM Box -> {anno.name}: painted {n_painted} px"
+            + (f" ({n_blocked} blocked by other cells)" if n_blocked else "")
+            + " · Cmd+Z to undo")
+        log('controller.sam', 'box prompt: done',
+            anno=anno.name, painted=n_painted, blocked_by_other=n_blocked)
 
     def run_sam_segmentation(self):
         """Top-level Auto-segment handler.
