@@ -140,9 +140,17 @@ class TrackingCmd:
         seg.masks[:] = state['masks']
         seg.instance_colors.clear()
         seg.instance_colors.update(state['colors'])
-        for anno, iid, name in state['annos']:
-            anno.instance_id = iid
-            anno.name = name
+        for record in state['annos']:
+            # Backwards-compat: old snapshots had 3-tuples without color.
+            if len(record) == 4:
+                anno, iid, name, color = record
+                anno.instance_id = iid
+                anno.name = name
+                anno.color = color
+            else:
+                anno, iid, name = record
+                anno.instance_id = iid
+                anno.name = name
         # Refresh visuals + list
         for anno in self.ctrl.annotations:
             anno.update_visuals()
@@ -2325,7 +2333,7 @@ class ToolController:
         before = {
             'masks': seg.masks.copy(),
             'colors': dict(seg.instance_colors),
-            'annos': [(a, a.instance_id, a.name) for a in self.annotations],
+            'annos': [(a, a.instance_id, a.name, a.color) for a in self.annotations],
         }
 
         # ---- Allocate a fresh instance_id per track --------------------
@@ -2359,28 +2367,31 @@ class ToolController:
             new_iid = track_to_new_iid[tid]
             seg.masks[f][seg.masks[f] == oid] = new_iid
 
-        # ---- Rewrite annotation instance_id + name ---------------------
+        # ---- Rewrite annotation instance_id + name + color -------------
+        # Index by (frame, orig_id) for O(N) total rather than O(N*remap).
+        remap_by_pair = remap  # alias; same shape
         n_changed = 0
         for anno in self.annotations:
             if anno.instance_id is None:
                 continue
             pair = (anno.frame_idx, int(anno.instance_id))
-            # The original instance_id might already have been rewritten
-            # in seg.masks above, but Annotation2D.instance_id is still
-            # the pre-rewrite value — use that to look up the remap.
-            # (We iterated by 'orig_id' above, so the keys are pre-rewrite.)
-            for (f, oid), tid in remap.items():
-                if anno.frame_idx == f and anno.instance_id == oid:
-                    anno.instance_id = track_to_new_iid[tid]
-                    anno.name = track_to_name[tid]
-                    n_changed += 1
-                    break
+            tid = remap_by_pair.get(pair)
+            if tid is None:
+                continue
+            new_iid = track_to_new_iid[tid]
+            anno.instance_id = new_iid
+            anno.name = track_to_name[tid]
+            # Sync bbox / list color to the new track's registered color so
+            # the rendered rectangle matches the seg overlay shade for the
+            # cell across frames.
+            anno.color = seg.instance_colors.get(new_iid, anno.color)
+            n_changed += 1
 
         # ---- Snapshot AFTER for redo + push undoable cmd ---------------
         after = {
             'masks': seg.masks.copy(),
             'colors': dict(seg.instance_colors),
-            'annos': [(a, a.instance_id, a.name) for a in self.annotations],
+            'annos': [(a, a.instance_id, a.name, a.color) for a in self.annotations],
         }
         self._undo_stack.push(TrackingCmd(self, before, after))
 
