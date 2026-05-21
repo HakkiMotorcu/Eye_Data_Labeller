@@ -145,7 +145,12 @@ class SamService:
 
         Args:
           frame: (H, W) or (H, W, 3) uint8 — same SAM rule as auto_segment.
-          box: (x0, y0, x1, y1) XYXY in image coordinates.
+          box: (x0, y0, x1, y1) XYXY in image coordinates — what the rest
+            of the app uses. This wrapper internally re-orders to the
+            (y0, x0, y1, x1) layout micro_sam._process_box actually
+            consumes (verify by reading
+            micro_sam.prompt_based_segmentation._process_box: it indexes
+            box[1] for x_min, box[0] for y_min, etc.).
           multimask_output: when True, SAM evaluates 3 candidate masks
             internally and returns the best-IoU one (still (H, W)).
             Often improves quality on ambiguous bboxes at the cost of a
@@ -159,9 +164,13 @@ class SamService:
 
         self.load()
         frame_rgb = self.to_rgb_uint8(frame)
-        box_arr = np.asarray(box, dtype=np.float32).reshape(4)
+        x0, y0, x1, y1 = (float(v) for v in box)
+        # Re-pack to (y0, x0, y1, x1) for micro_sam.
+        box_arr = np.array([y0, x0, y1, x1], dtype=np.float32)
         log('sam_service', 'segment_from_box: starting',
-            frame_shape=frame_rgb.shape, box=box_arr.tolist(),
+            frame_shape=frame_rgb.shape,
+            box_xyxy=[x0, y0, x1, y1],
+            box_passed_to_sam_yxyx=box_arr.tolist(),
             multimask=multimask_output)
 
         # micro_sam.segment_from_box reads the predictor's currently-set
