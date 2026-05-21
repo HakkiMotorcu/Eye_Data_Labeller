@@ -954,6 +954,7 @@ class ToolController:
         class_labels = {'cell': 'Cell', 'vessel': 'Vessel',
                         'capillary': 'Capillary'}
         flt = self._list_filter  # set of class keys currently shown
+        seg = self.window.seg_data
         for anno in self.annotations:
             if anno.frame_idx == frame_idx:
                 # Hidden / class-filtered annotations still get their ROI
@@ -966,6 +967,16 @@ class ToolController:
                 # Skip rows whose class isn't in the active filter set.
                 if anno.class_type not in flt:
                     continue
+                # For paint-only classes (vessel / capillary) the seg
+                # pixels ARE the annotation — an entry with zero painted
+                # pixels on this frame is a phantom (e.g. from spawning
+                # with "all frames" but only painting one). Hide it so
+                # the list reflects what's actually drawn.
+                if (anno.is_paint_only and seg is not None
+                        and anno.instance_id is not None):
+                    layer = seg.get_layer(anno.class_type)
+                    if not np.any(layer[frame_idx] == anno.instance_id):
+                        continue
                 visible_annos.append(anno)
                 cls = class_labels.get(anno.class_type, anno.class_type)
                 vis_glyph  = " " if hidden else "●"
@@ -2079,10 +2090,23 @@ class ToolController:
             self.window.lbl_stats.setText("No annotations")
             return
         cur = self.window._current_frame_idx
+        seg = self.window.seg_data
         frame_annos = [a for a in self.annotations if a.frame_idx == cur]
+        # For paint-only classes count only entries that actually have
+        # pixels on this frame — a phantom entry without painted pixels
+        # is invisible and shouldn't inflate the panel count.
+        def _has_pixels(a):
+            if not a.is_paint_only:
+                return True
+            if seg is None or a.instance_id is None:
+                return False
+            return bool(np.any(
+                seg.get_layer(a.class_type)[cur] == a.instance_id))
         n_cell  = sum(1 for a in frame_annos if a.class_type == 'cell')
-        n_vess  = sum(1 for a in frame_annos if a.class_type == 'vessel')
-        n_cap   = sum(1 for a in frame_annos if a.class_type == 'capillary')
+        n_vess  = sum(1 for a in frame_annos
+                       if a.class_type == 'vessel' and _has_pixels(a))
+        n_cap   = sum(1 for a in frame_annos
+                       if a.class_type == 'capillary' and _has_pixels(a))
         # Hide zero-count classes so the line stays terse.
         parts = []
         if n_cell:
