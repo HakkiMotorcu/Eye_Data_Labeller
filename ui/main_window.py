@@ -2,7 +2,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QLabel, QComboBox, QGroupBox, QListWidget,
                              QFileDialog, QMessageBox, QSlider, QScrollArea,
                              QSizePolicy, QSpinBox, QButtonGroup, QSplitter,
-                             QCheckBox, QFrame)
+                             QCheckBox, QFrame, QFormLayout, QDoubleSpinBox)
 from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QColor
 import pyqtgraph as pg
@@ -503,9 +503,73 @@ class MainWindow(QMainWindow):
         run_row.addWidget(self.btn_run_sam)
         sam_layout.addLayout(run_row)
 
+        # Auto-link tracks after all-frames SAM. The toggle is only
+        # enabled when 'All frames' is checked — single-frame SAM has
+        # no temporal info to track over.
+        autolink_row = QHBoxLayout()
+        autolink_row.setSpacing(4)
+        self.chk_sam_auto_link = QCheckBox("Auto-link tracks (after all-frames)")
+        self.chk_sam_auto_link.setChecked(True)
+        self.chk_sam_auto_link.setEnabled(False)
+        self.chk_sam_auto_link.setToolTip(
+            "When 'All frames' is on, run the selected tracker (see Tracking\n"
+            "section) immediately after the multi-frame SAM pass — cells\n"
+            "across frames that match get the same instance_id, name, and\n"
+            "color. Cmd+Z reverts.")
+        autolink_row.addWidget(self.chk_sam_auto_link)
+        sam_layout.addLayout(autolink_row)
+
         sam_group.setLayout(sam_layout)
 
-        # 4. File I/O
+        # 4. Tracking (link cells across frames into single identities) ----
+        tracking_group = self._make_collapsible_group("Tracking", _COMPACT_SS)
+        tracking_layout = QVBoxLayout()
+        tracking_layout.setContentsMargins(4, 2, 4, 4)
+        tracking_layout.setSpacing(3)
+
+        # Tracker selector
+        tracker_row = QHBoxLayout()
+        tracker_row.setSpacing(4)
+        tracker_row.addWidget(QLabel("Tracker"))
+        self.combo_tracker = QComboBox()
+        self.combo_tracker.setToolTip(
+            "Which tracker to use for the 'Run Tracker' button and the\n"
+            "SAM auto-link toggle. Each tracker exposes its own settings\n"
+            "below — the panel rebuilds when you switch.")
+        tracker_row.addWidget(self.combo_tracker, stretch=1)
+        tracking_layout.addLayout(tracker_row)
+
+        # Dynamic settings panel — populated by the controller from the
+        # currently-selected tracker's setting_specs().
+        self.tracker_settings_widget = QWidget()
+        self.tracker_settings_layout = QFormLayout(self.tracker_settings_widget)
+        self.tracker_settings_layout.setContentsMargins(0, 0, 0, 0)
+        self.tracker_settings_layout.setSpacing(3)
+        tracking_layout.addWidget(self.tracker_settings_widget)
+
+        # Manual invocation
+        run_track_row = QHBoxLayout()
+        run_track_row.setSpacing(4)
+        self.btn_run_tracker = QPushButton("Run Tracker")
+        self.btn_run_tracker.setToolTip(
+            "Run the selected tracker over the current segmentation.\n"
+            "Cells with the same track id across frames get coalesced\n"
+            "into a single identity (shared instance_id, name, color).\n"
+            "Undoable via Cmd+Z.")
+        self.btn_run_tracker.setStyleSheet("color: #ffd166; font-weight: bold;")
+        run_track_row.addWidget(self.btn_run_tracker)
+        tracking_layout.addLayout(run_track_row)
+
+        # Status line
+        self.lbl_tracker_status = QLabel("")
+        self.lbl_tracker_status.setStyleSheet(
+            "font-family: monospace; color: #888; font-size: 10px;")
+        self.lbl_tracker_status.setWordWrap(True)
+        tracking_layout.addWidget(self.lbl_tracker_status)
+
+        tracking_group.setLayout(tracking_layout)
+
+        # 5. File I/O
         io_group = self._make_collapsible_group("Import / Export", _COMPACT_SS)
         io_layout = QVBoxLayout()
         io_layout.setContentsMargins(4, 2, 4, 4)
@@ -912,6 +976,7 @@ class MainWindow(QMainWindow):
         right_panel.addWidget(list_group)       # Annotations
         right_panel.addWidget(tools_group)      # Tools (incl. seg editing)
         right_panel.addWidget(sam_group)        # SAM (model + auto + future prompts)
+        right_panel.addWidget(tracking_group)   # Tracking (link cells across frames)
         right_panel.addWidget(display_group)    # View
         right_panel.addWidget(io_group)         # I/O (Phase 2 will rework)
         right_panel.addStretch(1)

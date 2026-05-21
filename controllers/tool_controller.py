@@ -10,6 +10,9 @@ from PyQt6.QtGui import QColor, QFont, QShortcut, QKeySequence
 from core.app_state import AppState
 
 from core.sam_service import SamService, SAM_AVAILABLE, default_sam_hela_path
+from core.tracker_service import (
+    TRACKERS, make_tracker, get_default_tracker_name, SettingSpec,
+)
 from core.debug import log, log_error
 
 
@@ -106,6 +109,46 @@ class DeleteAnnotationCmd:
 
     def redo(self):
         self.ctrl._raw_delete(self.anno)
+
+
+class TrackingCmd:
+    """Undo/redo a tracker pass.
+
+    Snapshots the seg masks, the instance_colors dict, and each
+    annotation's (instance_id, name) before and after the tracker
+    applied its remap. Undo restores the 'before' snapshot; redo
+    restores 'after'.
+
+    Memory: 2 * seg.masks.nbytes plus small dicts. For typical
+    10-frame 500x500 stacks that's ~10 MB — fine.
+    """
+    def __init__(self, controller, before, after):
+        self.ctrl = controller
+        self.before = before  # {'masks': np.ndarray, 'colors': dict, 'annos': [(anno, iid, name), ...]}
+        self.after = after
+
+    def undo(self):
+        self._restore(self.before)
+
+    def redo(self):
+        self._restore(self.after)
+
+    def _restore(self, state):
+        seg = self.ctrl.window.seg_data
+        if seg is None:
+            return
+        seg.masks[:] = state['masks']
+        seg.instance_colors.clear()
+        seg.instance_colors.update(state['colors'])
+        for anno, iid, name in state['annos']:
+            anno.instance_id = iid
+            anno.name = name
+        # Refresh visuals + list
+        for anno in self.ctrl.annotations:
+            anno.update_visuals()
+        self.ctrl._show_frame_annotations(self.ctrl.window._current_frame_idx)
+        self.ctrl.window._update_seg_overlay()
+        self.ctrl.state.annotations_changed.emit()
 
 
 class DeletePaintOnlyIdentityCmd:
@@ -550,6 +593,8 @@ class ToolController:
         # the SAM section in the View panel.
         self.sam_service = SamService(
             model_type='vit_b', checkpoint_path=default_sam_hela_path())
+        # Tracker service — default Trackastra via micro-sam.
+        self.tracker_service = make_tracker(get_default_tracker_name())
 
         # --- Button connections ---
         self.window.btn_add.clicked.connect(self.spawn_new_annotation)
@@ -574,6 +619,19 @@ class ToolController:
         self.window.btn_run_sam.clicked.connect(self.run_sam_segmentation)
         self.window.combo_sam_model.currentIndexChanged.connect(self._on_sam_model_changed)
         self._refresh_sam_status()
+
+        # SAM auto-link enable mirrors the All-frames toggle (single-
+        # frame SAM has no temporal info to track over).
+        self.window.chk_sam_all_frames.toggled.connect(
+            self.window.chk_sam_auto_link.setEnabled)
+
+        # Tracking section wiring.
+        for tname in TRACKERS:
+            self.window.combo_tracker.addItem(tname)
+        self.window.combo_tracker.setCurrentText(self.tracker_service.name)
+        self.window.combo_tracker.currentTextChanged.connect(self._on_tracker_changed)
+        self.window.btn_run_tracker.clicked.connect(self.run_tracking_now)
+        self._rebuild_tracker_settings()
         self.window.slider_seg_opacity.valueChanged.connect(self._on_seg_opacity_changed)
         self.window.btn_toggle_seg.clicked.connect(self._on_toggle_seg)
         # Seg editing connections
@@ -2120,6 +2178,221 @@ class ToolController:
         self.sam_service = SamService(model_type=model_type, checkpoint_path=ckpt)
         self._refresh_sam_status()
 
+    # ------------------------------------------------------------------
+    # Tracking panel helpers
+    # ------------------------------------------------------------------
+    def _on_tracker_changed(self, name):
+        """Combobox selection -> rebuild service and settings widgets."""
+        try:
+            self.tracker_service = make_tracker(name)
+        except Exception as e:
+            log_error('controller.tracking', 'tracker swap failed', exc=e)
+            return
+        self._rebuild_tracker_settings()
+        log('controller.tracking', 'tracker selected', name=name,
+            settings=dict(self.tracker_service.settings))
+
+    def _rebuild_tracker_settings(self):
+        """Repopulate the dynamic settings panel for the active tracker."""
+        from PyQt6.QtWidgets import (QSpinBox, QDoubleSpinBox, QCheckBox,
+                                     QComboBox, QLabel)
+        layout = self.window.tracker_settings_layout
+        # Clear existing widgets.
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        # Build new ones.
+        for spec in self.tracker_service.setting_specs():
+            widget = self._make_setting_widget(spec)
+            label = QLabel(spec.label)
+            label.setToolTip(spec.tooltip)
+            layout.addRow(label, widget)
+
+    def _make_setting_widget(self, spec):
+        """Map a SettingSpec to a Qt widget bound to tracker_service.settings."""
+        from PyQt6.QtWidgets import QSpinBox, QDoubleSpinBox, QCheckBox, QComboBox, QLabel
+        cur = self.tracker_service.settings.get(spec.key, spec.default)
+        if spec.kind == 'int':
+            w = QSpinBox()
+            if spec.min is not None:
+                w.setMinimum(int(spec.min))
+            if spec.max is not None:
+                w.setMaximum(int(spec.max))
+            w.setValue(int(cur))
+            w.setToolTip(spec.tooltip)
+            w.valueChanged.connect(
+                lambda v, k=spec.key: self.tracker_service.update_setting(k, int(v)))
+            return w
+        if spec.kind == 'float':
+            w = QDoubleSpinBox()
+            if spec.min is not None:
+                w.setMinimum(float(spec.min))
+            if spec.max is not None:
+                w.setMaximum(float(spec.max))
+            if spec.step:
+                w.setSingleStep(float(spec.step))
+            w.setValue(float(cur))
+            w.setToolTip(spec.tooltip)
+            w.valueChanged.connect(
+                lambda v, k=spec.key: self.tracker_service.update_setting(k, float(v)))
+            return w
+        if spec.kind == 'bool':
+            w = QCheckBox()
+            w.setChecked(bool(cur))
+            w.setToolTip(spec.tooltip)
+            w.toggled.connect(
+                lambda v, k=spec.key: self.tracker_service.update_setting(k, bool(v)))
+            return w
+        if spec.kind == 'choice':
+            w = QComboBox()
+            for c in (spec.choices or []):
+                w.addItem(c)
+            w.setCurrentText(str(cur))
+            w.setToolTip(spec.tooltip)
+            w.currentTextChanged.connect(
+                lambda v, k=spec.key: self.tracker_service.update_setting(k, v))
+            return w
+        return QLabel(f"(unsupported: {spec.kind})")
+
+    def run_tracking_now(self):
+        """Invoke the active tracker on the current segmentation."""
+        if self.window.seg_data is None or not np.any(self.window.seg_data.masks):
+            QMessageBox.information(
+                self.window, "Run Tracker",
+                "No segmentation to track. Run SAM (or load masks) first.")
+            return
+        timeseries = self._get_full_timeseries()
+        if timeseries is None:
+            QMessageBox.information(
+                self.window, "Run Tracker", "No image data loaded.")
+            return
+        self._run_tracker_and_apply(timeseries,
+                                     self.window.seg_data.masks.astype(np.int32))
+
+    def _get_full_timeseries(self):
+        """Return the full (T, H, W) uint8 stack from the current source."""
+        vd = self.window.video_data
+        if vd is None:
+            return None
+        frames = getattr(vd, 'frames', None)
+        if frames is not None:
+            return np.asarray(frames)
+        return np.stack([vd.get_frame(i) for i in range(vd.num_frames)])
+
+    def _run_tracker_and_apply(self, timeseries, masks):
+        """Run the active tracker, push undoable remap onto the stack."""
+        from PyQt6.QtWidgets import QApplication
+        self.window.lbl_tracker_status.setText(
+            f"Running {self.tracker_service.name}…")
+        QApplication.processEvents()
+        try:
+            remap = self.tracker_service.run(timeseries, masks)
+        except Exception as e:
+            log_error('controller.tracking', 'tracker raised', exc=e)
+            QMessageBox.critical(
+                self.window, "Tracker Error",
+                f"Tracking failed:\n\n{type(e).__name__}: {e}\n\n"
+                f"Run with --debug for a full traceback.")
+            self.window.lbl_tracker_status.setText("")
+            return
+        if not remap:
+            self.window.lbl_tracker_status.setText("Tracker returned no links.")
+            return
+        n_tracks, n_changed = self._apply_track_remap(remap)
+        T = self.window.video_data.num_frames if self.window.video_data else 0
+        self.window.lbl_tracker_status.setText(
+            f"{self.tracker_service.name} · {n_tracks} tracks across {T} frames "
+            f"· {n_changed} annotations rewritten · Cmd+Z to undo")
+
+    def _apply_track_remap(self, remap):
+        """Apply {(frame, orig_id): track_id} remap to seg + annotations.
+
+        Each unique track_id is allocated a fresh instance_id from the seg
+        allocator. Annotations matching (frame, orig_id) pairs in the
+        remap get the new instance_id AND the representative name picked
+        from the first annotation in each track — so the same cell across
+        frames now shares name + color.
+
+        Returns (n_unique_tracks, n_annotations_rewritten).
+        """
+        seg = self.window.seg_data
+        if seg is None or not remap:
+            return 0, 0
+
+        # ---- Snapshot BEFORE for undo ----------------------------------
+        before = {
+            'masks': seg.masks.copy(),
+            'colors': dict(seg.instance_colors),
+            'annos': [(a, a.instance_id, a.name) for a in self.annotations],
+        }
+
+        # ---- Allocate a fresh instance_id per track --------------------
+        unique_tracks = sorted({tid for tid in remap.values()})
+        track_to_new_iid = {}
+        for tid in unique_tracks:
+            new_iid = seg.next_instance_id()
+            seg.register_instance_color(new_iid)
+            track_to_new_iid[tid] = new_iid
+
+        # ---- Pick the representative name for each track ---------------
+        # First (frame, orig_id) pair for a given track determines its name.
+        track_to_name = {}
+        for tid in unique_tracks:
+            pair = next(((t, o) for (t, o), v in remap.items() if v == tid), None)
+            if pair is None:
+                continue
+            f, o = pair
+            anno = next((a for a in self.annotations
+                         if a.frame_idx == f and a.instance_id == o), None)
+            if anno is not None:
+                track_to_name[tid] = anno.name
+            else:
+                _, name = self._next_available_name('Cell')
+                track_to_name[tid] = name
+
+        # ---- Rewrite seg.masks -----------------------------------------
+        # Process per frame so we don't accidentally double-rewrite when
+        # multiple (frame, oid) pairs on the same frame share a track.
+        for (f, oid), tid in remap.items():
+            new_iid = track_to_new_iid[tid]
+            seg.masks[f][seg.masks[f] == oid] = new_iid
+
+        # ---- Rewrite annotation instance_id + name ---------------------
+        n_changed = 0
+        for anno in self.annotations:
+            if anno.instance_id is None:
+                continue
+            pair = (anno.frame_idx, int(anno.instance_id))
+            # The original instance_id might already have been rewritten
+            # in seg.masks above, but Annotation2D.instance_id is still
+            # the pre-rewrite value — use that to look up the remap.
+            # (We iterated by 'orig_id' above, so the keys are pre-rewrite.)
+            for (f, oid), tid in remap.items():
+                if anno.frame_idx == f and anno.instance_id == oid:
+                    anno.instance_id = track_to_new_iid[tid]
+                    anno.name = track_to_name[tid]
+                    n_changed += 1
+                    break
+
+        # ---- Snapshot AFTER for redo + push undoable cmd ---------------
+        after = {
+            'masks': seg.masks.copy(),
+            'colors': dict(seg.instance_colors),
+            'annos': [(a, a.instance_id, a.name) for a in self.annotations],
+        }
+        self._undo_stack.push(TrackingCmd(self, before, after))
+
+        # Refresh UI.
+        for anno in self.annotations:
+            anno.update_visuals()
+        self._show_frame_annotations(self.window._current_frame_idx)
+        self.window._update_seg_overlay()
+        self.state.annotations_changed.emit()
+        return len(unique_tracks), n_changed
+
+    # ------------------------------------------------------------------
     def _refresh_sam_status(self):
         """Update the status line under the SAM model selector."""
         if not SamService.available():
@@ -2229,13 +2502,30 @@ class ToolController:
                     f"{total_created} cells so far")
                 QApplication.processEvents()
 
+        # If All-frames + Auto-link toggle are both on, run the active
+        # tracker so cells across frames collapse into single identities.
+        autolink_msg = ""
+        if (all_frames and self.window.chk_sam_auto_link.isChecked()
+                and total_created > 0):
+            timeseries = self._get_full_timeseries()
+            if timeseries is not None:
+                pre = len({a.instance_id for a in self.annotations
+                           if a.instance_id is not None})
+                self._run_tracker_and_apply(
+                    timeseries,
+                    self.window.seg_data.masks.astype(np.int32))
+                post = len({a.instance_id for a in self.annotations
+                            if a.instance_id is not None})
+                autolink_msg = (f"\n\nAuto-linked: {pre} per-frame instances "
+                                f"-> {post} tracks across frames. Cmd+Z to undo.")
+
         self._refresh_sam_status()
         scope_text = (f"all {len(frame_indices)} frames"
                       if all_frames else
                       f"frame {frame_indices[0]}")
         QMessageBox.information(
             self.window, "SAM Auto-segment Complete",
-            f"Created {total_created} annotation(s) across {scope_text}.")
+            f"Created {total_created} annotation(s) across {scope_text}.{autolink_msg}")
 
     # ---- Duplicate-prevention helpers (used by SAM auto-segment) ----
     _DUPLICATE_IOU_THRESHOLD = 0.30
