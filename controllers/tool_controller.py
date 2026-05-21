@@ -3031,8 +3031,13 @@ class ToolController:
         return QLabel(f"(unsupported: {spec.kind})")
 
     def run_tracking_now(self):
-        """Invoke the active tracker on the current segmentation."""
-        if self.window.seg_data is None or not np.any(self.window.seg_data.masks):
+        """Invoke the active tracker on the current segmentation.
+
+        Tracking is cells-only by design — vessels and capillaries don't
+        move across frames and aren't a meaningful track target — so the
+        gate here intentionally only checks the cell layer."""
+        seg = self.window.seg_data
+        if seg is None or not np.any(seg.get_layer('cell')):
             QMessageBox.information(
                 self.window, "Run Tracker",
                 "No segmentation to track. Run SAM (or load masks) first.")
@@ -3396,6 +3401,10 @@ class ToolController:
             return
         fi = anno.frame_idx
         target_id = int(anno.instance_id)
+        # SAM Box is a cell-only path (vessels and capillaries have no
+        # bbox to prompt with) — `seg.masks` is the cell-layer alias,
+        # which is what we want here. Don't generalize this loop to
+        # `seg.get_layer(...)` without first reworking the prompt UI.
         before_frame = seg.masks[fi].copy()
         before_geom = ToolController._snap_geometry(anno)
 
@@ -4041,7 +4050,10 @@ class ToolController:
         from core import coco_export, sidecar
 
         seg = self.window.seg_data
-        if seg is None or not np.any(seg.masks):
+        # Refuse only when every class layer is empty — a vessel-only or
+        # capillary-only session is a legitimate thing to export.
+        if seg is None or not any(
+                np.any(seg.get_layer(ct)) for ct in seg.CLASS_TYPES):
             QMessageBox.information(
                 self.window, "Export COCO",
                 "No segmentation data to export. Paint or load a mask first.")
