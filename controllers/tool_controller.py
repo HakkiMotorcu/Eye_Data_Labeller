@@ -381,6 +381,7 @@ class Annotation2D(QObject):
         self._is_syncing = False
         self.is_selected = False
         self.is_locked = False
+        self.is_hidden = False  # per-row visibility toggle (D)
 
         x, y = start_pos
         w, h = start_size
@@ -653,6 +654,12 @@ class ToolController:
         # Embedding precompute worker (only one alive at a time — SAM
         # predictor isn't thread-safe).
         self._embed_worker = None
+        # Frame queued by _on_frame_changed_embed while a worker is busy.
+        # Picked up in _on_embed_finished_ok so we never block the UI
+        # thread waiting for an in-flight compute.
+        self._embed_pending_frame = None
+        # Annotation list filter: 'all' | 'cell' | 'vessel' | 'capillary'.
+        self._list_filter = 'all'
 
         # --- Button connections ---
         self.window.btn_add.clicked.connect(self.spawn_new_annotation)
@@ -662,6 +669,11 @@ class ToolController:
         self.window.btn_rename.clicked.connect(self._start_rename)
         self.window.btn_fit_bbox.clicked.connect(self._manual_fit_bbox)
         self.window.list_annotations.itemChanged.connect(self._on_list_item_edited)
+        self.window.list_annotations.itemClicked.connect(self._on_list_item_clicked)
+        # Class filter buttons (B): All / Cells / Vessels / Capillaries.
+        for btn in (self.window.btn_filter_all, self.window.btn_filter_cell,
+                    self.window.btn_filter_vessel, self.window.btn_filter_capillary):
+            btn.toggled.connect(self._on_filter_button_toggled)
         self.window.btn_lock.clicked.connect(self.lock_active)
         self.window.btn_unlock.clicked.connect(self.unlock_active)
         self.window.btn_lock_all.clicked.connect(self.lock_all)
@@ -833,18 +845,31 @@ class ToolController:
         visible_annos = []
         class_labels = {'cell': 'Cell', 'vessel': 'Vessel',
                         'capillary': 'Capillary'}
+        flt = self._list_filter
         for anno in self.annotations:
             if anno.frame_idx == frame_idx:
-                if anno.is_paint_only:
-                    anno.roi.setVisible(False)  # veins never show ROI
+                # Hidden / class-filtered annotations still get their ROI
+                # state updated so they vanish from the viewer.
+                hidden = getattr(anno, 'is_hidden', False)
+                if anno.is_paint_only or hidden:
+                    anno.roi.setVisible(False)
                 else:
                     anno.roi.setVisible(True)
+                # Skip rows that don't match the current class filter.
+                if flt != 'all' and anno.class_type != flt:
+                    continue
                 visible_annos.append(anno)
                 cls = class_labels.get(anno.class_type, anno.class_type)
-                item = QTreeWidgetItem(["", anno.name, cls])
+                vis_glyph  = " " if hidden else "●"
+                lock_glyph = "🔒" if anno.is_locked else ""
+                item = QTreeWidgetItem(
+                    ["", anno.name, cls, vis_glyph, lock_glyph])
                 item.setIcon(0, make_swatch_icon(anno.color))
-                # Only the name column is editable.
+                # Only the name column should be editable (not the
+                # swatch / glyph columns).
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+                item.setTextAlignment(3, Qt.AlignmentFlag.AlignCenter)
+                item.setTextAlignment(4, Qt.AlignmentFlag.AlignCenter)
                 self.window.list_annotations.addTopLevelItem(item)
             else:
                 anno.roi.setVisible(False)
@@ -1482,6 +1507,40 @@ class ToolController:
                     self.select_annotation(anno)
                     break
 
+    def _on_list_item_clicked(self, item, column):
+        """Per-row eye/lock glyph clicks toggle anno state (D)."""
+        if column not in (3, 4):
+            return
+        name = item.text(1)
+        cur = self.window._current_frame_idx
+        anno = next((a for a in self.annotations
+                     if a.name == name and a.frame_idx == cur), None)
+        if anno is None:
+            return
+        if column == 3:
+            anno.is_hidden = not getattr(anno, 'is_hidden', False)
+            # Bbox ROI follows hidden state immediately; seg overlay
+            # rebuild also needs to drop hidden instances.
+            anno.roi.setVisible(
+                (not anno.is_paint_only) and (not anno.is_hidden))
+            self.window._update_seg_overlay()
+        else:  # column == 4 → lock toggle
+            anno.set_locked(not anno.is_locked)
+            anno.update_visuals()
+        # Repaint the row glyphs + recompute stats.
+        self._show_frame_annotations(cur)
+
+    def _on_filter_button_toggled(self, checked):
+        """Class-filter button (B) toggled; rebuild list."""
+        if not checked:
+            return  # we only react to the new selection in the group
+        btn = self.sender()
+        key = btn.property('filter_key') or 'all'
+        if key == self._list_filter:
+            return
+        self._list_filter = key
+        self._show_frame_annotations(self.window._current_frame_idx)
+
     def _on_list_item_edited(self, item, column=1):
         """Called when a list item is renamed via inline editing."""
         # Only the Name column (1) carries rename data.
@@ -1707,11 +1766,22 @@ class ToolController:
             self.window.lbl_stats.setText("No annotations")
             return
         cur = self.window._current_frame_idx
-        on_frame = sum(1 for a in self.annotations if a.frame_idx == cur)
-        locked = sum(1 for a in self.annotations
-                     if a.frame_idx == cur and a.is_locked)
+        frame_annos = [a for a in self.annotations if a.frame_idx == cur]
+        n_cell  = sum(1 for a in frame_annos if a.class_type == 'cell')
+        n_vess  = sum(1 for a in frame_annos if a.class_type == 'vessel')
+        n_cap   = sum(1 for a in frame_annos if a.class_type == 'capillary')
+        # Hide zero-count classes so the line stays terse.
+        parts = []
+        if n_cell:
+            parts.append(f"{n_cell} cell" + ("s" if n_cell != 1 else ""))
+        if n_vess:
+            parts.append(f"{n_vess} vessel" + ("s" if n_vess != 1 else ""))
+        if n_cap:
+            parts.append(f"{n_cap} capillar" + ("ies" if n_cap != 1 else "y"))
+        head = " · ".join(parts) if parts else "0 on frame"
+        locked = sum(1 for a in frame_annos if a.is_locked)
         self.window.lbl_stats.setText(
-            f"Frame: {on_frame}  |  Locked: {locked}  |  All frames: {total}")
+            f"{head}   |   Locked: {locked}   |   All frames: {total}")
 
     def _refresh_list_colors(self):
         from ui.main_window import make_swatch_icon
@@ -2381,12 +2451,29 @@ class ToolController:
         log_error('controller.sam', f'embed worker error: {msg}')
         self.window.lbl_sam_status.setText(f"Embedding error: {msg}")
         self.window.btn_sam_precompute.setEnabled(True)
+        self._drain_pending_embed()
 
     def _on_embed_finished_ok(self):
         self.window.lbl_sam_status.setText(
             f"Embeddings ready · {self._embed_total} frame(s) cached.")
         self.window.btn_sam_precompute.setEnabled(True)
         self._refresh_sam_status_brief()
+        self._drain_pending_embed()
+
+    def _drain_pending_embed(self):
+        """If a frame was requested while the worker was busy, start it now."""
+        fi = self._embed_pending_frame
+        self._embed_pending_frame = None
+        if fi is None:
+            return
+        # Skip if the user has navigated past it and it's already cached
+        # (typical for stair-step scrubbing).
+        if self.window._current_file is None:
+            return
+        if self.sam_service.has_cached_embedding(
+                self.window._current_file, fi):
+            return
+        self._start_embed_worker([fi], label=f"frame {fi}")
 
     def _refresh_sam_status_brief(self):
         """Restore the standard 'model: …' status after a short delay so
@@ -2407,14 +2494,27 @@ class ToolController:
 
     def _on_frame_changed_embed(self, frame_idx):
         """Hook on state.frame_changed — precompute the new frame in the
-        background (skipped if already cached)."""
+        background (skipped if already cached).
+
+        Never blocks: if a worker is already busy, the frame is queued and
+        picked up the moment that worker finishes. This avoids freezing the
+        UI when the user scrubs through frames faster than embeddings
+        compute (~3s on cold MPS)."""
         if not SamService.available() or self.window.video_data is None:
             return
         if self.window._current_file is None:
             return
         if self.sam_service.has_cached_embedding(
                 self.window._current_file, frame_idx):
+            self._embed_pending_frame = None
             return
+        # If a worker is already running, just remember the most recent
+        # frame request and return immediately.
+        w = self._embed_worker
+        if w is not None and w.isRunning():
+            self._embed_pending_frame = int(frame_idx)
+            return
+        self._embed_pending_frame = None
         self._start_embed_worker([frame_idx], label=f"frame {frame_idx}")
 
     def precompute_all_frames(self):

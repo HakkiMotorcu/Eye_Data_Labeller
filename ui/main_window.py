@@ -282,23 +282,55 @@ class MainWindow(QMainWindow):
         self.lbl_stats.setWordWrap(True)
         list_layout.addWidget(self.lbl_stats)
 
+        # Class filter row — toggles between All / Cells / Vessels / Capillaries.
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(2)
+        filter_row.setContentsMargins(0, 0, 0, 0)
+        self._anno_filter_group = QButtonGroup(self)
+        self._anno_filter_group.setExclusive(True)
+        self.btn_filter_all       = QPushButton("All")
+        self.btn_filter_cell      = QPushButton("Cells")
+        self.btn_filter_vessel    = QPushButton("Vessels")
+        self.btn_filter_capillary = QPushButton("Capillaries")
+        _filter_btns = [
+            (self.btn_filter_all,       'all'),
+            (self.btn_filter_cell,      'cell'),
+            (self.btn_filter_vessel,    'vessel'),
+            (self.btn_filter_capillary, 'capillary'),
+        ]
+        for i, (btn, key) in enumerate(_filter_btns):
+            btn.setCheckable(True)
+            btn.setProperty('filter_key', key)
+            btn.setStyleSheet(
+                "QPushButton{padding:2px 6px;font-size:11px;}"
+                "QPushButton:checked{background:#3a5a8a;color:#fff;}")
+            self._anno_filter_group.addButton(btn, i)
+            filter_row.addWidget(btn)
+        self.btn_filter_all.setChecked(True)
+        list_layout.addLayout(filter_row)
+
+        # Per-row eye/lock glyphs (column 3/4); see ToolController for click
+        # handling.
         self.list_annotations = QTreeWidget()
-        self.list_annotations.setColumnCount(3)
-        self.list_annotations.setHeaderLabels(["", "Name", "Class"])
+        self.list_annotations.setColumnCount(5)
+        self.list_annotations.setHeaderLabels(
+            ["", "Name", "Class", "👁", "🔒"])
         self.list_annotations.setRootIsDecorated(False)
         self.list_annotations.setUniformRowHeights(True)
         self.list_annotations.setMinimumHeight(60)
         self.list_annotations.setMaximumHeight(180)
         self.list_annotations.setEditTriggers(
             QTreeWidget.EditTrigger.DoubleClicked)
-        # Header: tight swatch column, name flexes, class fits content.
         hdr = self.list_annotations.header()
         hdr.setStretchLastSection(False)
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
         self.list_annotations.setColumnWidth(0, 22)
-        # Keep header bar — column labels help once we add filter tabs.
+        self.list_annotations.setColumnWidth(3, 26)
+        self.list_annotations.setColumnWidth(4, 26)
         list_layout.addWidget(self.list_annotations)
 
         # Row 1: create — Cell / Vessel / Capillary
@@ -1877,6 +1909,18 @@ class MainWindow(QMainWindow):
         # Check if status-color mode is active via the controller
         ctrl = getattr(self, '_controller', None)
         status_mode = ctrl is not None and ctrl._label_color_mode
+
+        # Per-row hide (D): drop instance IDs whose annotation has
+        # is_hidden=True so the overlay disappears for those cells.
+        if ctrl is not None:
+            hidden_ids = {
+                int(a.instance_id) for a in ctrl.annotations
+                if a.frame_idx == idx and a.instance_id is not None
+                and getattr(a, 'is_hidden', False)
+            }
+            if hidden_ids:
+                ids = np.array([i for i in ids if int(i) not in hidden_ids],
+                               dtype=ids.dtype)
 
         if status_mode and ctrl is not None:
             # Build lookup: instance_id → annotation state for this frame
