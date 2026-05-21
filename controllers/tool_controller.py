@@ -658,6 +658,9 @@ class ToolController:
         # Picked up in _on_embed_finished_ok so we never block the UI
         # thread waiting for an in-flight compute.
         self._embed_pending_frame = None
+        # Application-modal "SAM model running" dialog. Created on demand
+        # by _show_embed_dialog and torn down on finish / error / cancel.
+        self._embed_dialog = None
         # Annotation list filter: 'all' | 'cell' | 'vessel' | 'capillary'.
         self._list_filter = 'all'
 
@@ -671,9 +674,19 @@ class ToolController:
         self.window.list_annotations.itemChanged.connect(self._on_list_item_edited)
         self.window.list_annotations.itemClicked.connect(self._on_list_item_clicked)
         # Class filter buttons (B): All / Cells / Vessels / Capillaries.
-        for btn in (self.window.btn_filter_all, self.window.btn_filter_cell,
-                    self.window.btn_filter_vessel, self.window.btn_filter_capillary):
-            btn.toggled.connect(self._on_filter_button_toggled)
+        # Map button → filter key; the handler reads from this dict so we
+        # don't rely on Qt dynamic properties (which were not propagating
+        # in PyQt6 on macOS).
+        self._filter_btn_map = {
+            self.window.btn_filter_all:       'all',
+            self.window.btn_filter_cell:      'cell',
+            self.window.btn_filter_vessel:    'vessel',
+            self.window.btn_filter_capillary: 'capillary',
+        }
+        for btn in self._filter_btn_map:
+            btn.clicked.connect(self._on_filter_button_clicked)
+        # Apply the initial visual state (All → every button lit).
+        self._apply_filter_visual()
         self.window.btn_lock.clicked.connect(self.lock_active)
         self.window.btn_unlock.clicked.connect(self.unlock_active)
         self.window.btn_lock_all.clicked.connect(self.lock_all)
@@ -881,13 +894,30 @@ class ToolController:
             if items:
                 self.window.list_annotations.setCurrentItem(items[0])
         else:
+            # Try to follow the same instance to this frame so a tracked
+            # cell stays selected as the user scrubs. Fall back to the
+            # first visible annotation when no match exists.
+            prev = self.active_annotation
+            follow = None
+            if prev is not None:
+                if prev.instance_id is not None:
+                    follow = next(
+                        (a for a in visible_annos
+                         if a.instance_id == prev.instance_id),
+                        None)
+                if follow is None:
+                    # Paint-only annos may share a name across frames.
+                    follow = next(
+                        (a for a in visible_annos if a.name == prev.name),
+                        None)
             self.active_annotation = None
-            if visible_annos:
-                self.active_annotation = visible_annos[0]
+            target = follow or (visible_annos[0] if visible_annos else None)
+            if target is not None:
+                self.active_annotation = target
                 self.active_annotation.is_selected = True
                 self.active_annotation.update_visuals()
                 items = self.window.list_annotations.findItems(
-                    visible_annos[0].name, Qt.MatchFlag.MatchExactly, 1)
+                    target.name, Qt.MatchFlag.MatchExactly, 1)
                 if items:
                     self.window.list_annotations.setCurrentItem(items[0])
 
@@ -1530,16 +1560,30 @@ class ToolController:
         # Repaint the row glyphs + recompute stats.
         self._show_frame_annotations(cur)
 
-    def _on_filter_button_toggled(self, checked):
-        """Class-filter button (B) toggled; rebuild list."""
-        if not checked:
-            return  # we only react to the new selection in the group
+    def _on_filter_button_clicked(self, *_):
+        """Class-filter button (B) clicked; rebuild list."""
         btn = self.sender()
-        key = btn.property('filter_key') or 'all'
-        if key == self._list_filter:
+        key = self._filter_btn_map.get(btn)
+        if key is None:
             return
-        self._list_filter = key
-        self._show_frame_annotations(self.window._current_frame_idx)
+        log('controller.list_filter', 'filter clicked', key=key)
+        if key != self._list_filter:
+            self._list_filter = key
+            self._show_frame_annotations(self.window._current_frame_idx)
+        # Always re-apply visuals so the "All lights everything" rule holds
+        # even when the same button is clicked twice.
+        self._apply_filter_visual()
+
+    def _apply_filter_visual(self):
+        """Light up the active filter button. When the filter is 'all',
+        all four buttons appear checked (signaling 'nothing is hidden').
+        """
+        flt = self._list_filter
+        for btn, key in self._filter_btn_map.items():
+            checked = (flt == 'all') or (key == flt)
+            btn.blockSignals(True)
+            btn.setChecked(checked)
+            btn.blockSignals(False)
 
     def _on_list_item_edited(self, item, column=1):
         """Called when a list item is renamed via inline editing."""
@@ -1977,7 +2021,10 @@ class ToolController:
         r = self._get_brush_radius_in_seg()
         frame = self.window._current_frame_idx
 
-        force = self.window.btn_force_paint.isChecked()
+        # Vessel/capillary paint always claims pixels — these structures
+        # legitimately overlap cells (a vessel runs *through* the cell
+        # field), so the brush should not be blocked by existing cell IDs.
+        force = self.window.btn_force_paint.isChecked() or anno.is_paint_only
         if self._seg_edit_mode == 'paint':
             seg.paint_circle(frame, anno.instance_id, cx, cy, r, force=force)
             anno._seg_dirty = True
@@ -2415,7 +2462,18 @@ class ToolController:
                 out.append((int(fi), self.window.video_data.get_frame(int(fi))))
         return out
 
-    def _start_embed_worker(self, frame_indices, *, label=""):
+    def _start_embed_worker(self, frame_indices, *, label="", interactive=True):
+        """Kick off embedding precompute in the background.
+
+        interactive=True (default) → show a modal progress dialog that
+        blocks the rest of the UI while the model runs. Use this for
+        explicit user triggers (Precompute All, model swap, the first
+        embedding after open).
+
+        interactive=False → no dialog, just the status-bar text. Used by
+        the silent auto-precompute on frame change so casual scrubbing
+        doesn't get interrupted by modal pop-ups.
+        """
         if not SamService.available():
             return
         if self.window.video_data is None or self.window._current_file is None:
@@ -2436,13 +2494,66 @@ class ToolController:
         self.window.lbl_sam_status.setText(
             f"Precomputing {self._embed_label} (0/{self._embed_total})…")
         self.window.btn_sam_precompute.setEnabled(False)
+        if interactive:
+            self._show_embed_dialog(self._embed_total, self._embed_label)
         self._embed_worker.start()
         log('controller.sam', 'embed worker started',
-            n_frames=len(frames), label=self._embed_label)
+            n_frames=len(frames), label=self._embed_label,
+            interactive=interactive)
+
+    # --- Modal progress dialog --------------------------------------------
+    def _show_embed_dialog(self, total, label):
+        """Open an application-modal progress dialog for the active embed
+        run. Closes itself in _on_embed_finished_ok / _on_embed_error."""
+        from PyQt6.QtWidgets import QProgressDialog
+        if self._embed_dialog is not None:
+            try:
+                self._embed_dialog.close()
+            except RuntimeError:
+                pass
+            self._embed_dialog = None
+        dlg = QProgressDialog(
+            f"Computing SAM embeddings for {label}…\n"
+            "The rest of the UI is paused until this finishes.",
+            "Cancel", 0, max(1, total), self.window)
+        dlg.setWindowTitle("SAM model running")
+        dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dlg.setMinimumDuration(0)   # show immediately, no auto-hide grace
+        dlg.setValue(0)
+        dlg.setAutoReset(False)
+        dlg.setAutoClose(False)
+        dlg.canceled.connect(self._on_embed_dialog_cancel)
+        self._embed_dialog = dlg
+        dlg.show()
+
+    def _close_embed_dialog(self):
+        dlg = self._embed_dialog
+        self._embed_dialog = None
+        if dlg is None:
+            return
+        try:
+            dlg.close()
+        except RuntimeError:
+            pass
+
+    def _on_embed_dialog_cancel(self):
+        """Cancel button → ask the worker to stop between frames."""
+        w = self._embed_worker
+        if w is not None and w.isRunning():
+            w.request_stop()
+        self._close_embed_dialog()
 
     def _on_embed_progress(self, done, total):
         self.window.lbl_sam_status.setText(
             f"Precomputing {self._embed_label} ({done}/{total})…")
+        dlg = self._embed_dialog
+        if dlg is not None:
+            dlg.setMaximum(max(1, total))
+            dlg.setValue(done)
+            dlg.setLabelText(
+                f"Computing SAM embedding {done}/{total}\n"
+                f"({self._embed_label})\n"
+                "The rest of the UI is paused until this finishes.")
 
     def _on_embed_frame_done(self, frame_idx):
         log('controller.sam', 'frame embedding cached', frame_idx=frame_idx)
@@ -2451,12 +2562,14 @@ class ToolController:
         log_error('controller.sam', f'embed worker error: {msg}')
         self.window.lbl_sam_status.setText(f"Embedding error: {msg}")
         self.window.btn_sam_precompute.setEnabled(True)
+        self._close_embed_dialog()
         self._drain_pending_embed()
 
     def _on_embed_finished_ok(self):
         self.window.lbl_sam_status.setText(
             f"Embeddings ready · {self._embed_total} frame(s) cached.")
         self.window.btn_sam_precompute.setEnabled(True)
+        self._close_embed_dialog()
         self._refresh_sam_status_brief()
         self._drain_pending_embed()
 
@@ -2473,7 +2586,9 @@ class ToolController:
         if self.sam_service.has_cached_embedding(
                 self.window._current_file, fi):
             return
-        self._start_embed_worker([fi], label=f"frame {fi}")
+        # Frame-change drain remains silent — same UX as the original request.
+        self._start_embed_worker(
+            [fi], label=f"frame {fi}", interactive=False)
 
     def _refresh_sam_status_brief(self):
         """Restore the standard 'model: …' status after a short delay so
@@ -2515,7 +2630,10 @@ class ToolController:
             self._embed_pending_frame = int(frame_idx)
             return
         self._embed_pending_frame = None
-        self._start_embed_worker([frame_idx], label=f"frame {frame_idx}")
+        # Auto-precompute on frame change runs silently — scrubbing must
+        # not pop modals on every step.
+        self._start_embed_worker(
+            [frame_idx], label=f"frame {frame_idx}", interactive=False)
 
     def precompute_all_frames(self):
         """Triggered by the 'Precompute embeddings' button.

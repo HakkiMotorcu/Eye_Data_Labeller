@@ -282,12 +282,11 @@ class MainWindow(QMainWindow):
         self.lbl_stats.setWordWrap(True)
         list_layout.addWidget(self.lbl_stats)
 
-        # Class filter row — toggles between All / Cells / Vessels / Capillaries.
+        # Class filter row — All / Cells / Vessels / Capillaries.
+        # Exclusivity is managed in the controller via clicked.
         filter_row = QHBoxLayout()
         filter_row.setSpacing(2)
         filter_row.setContentsMargins(0, 0, 0, 0)
-        self._anno_filter_group = QButtonGroup(self)
-        self._anno_filter_group.setExclusive(True)
         self.btn_filter_all       = QPushButton("All")
         self.btn_filter_cell      = QPushButton("Cells")
         self.btn_filter_vessel    = QPushButton("Vessels")
@@ -298,13 +297,12 @@ class MainWindow(QMainWindow):
             (self.btn_filter_vessel,    'vessel'),
             (self.btn_filter_capillary, 'capillary'),
         ]
-        for i, (btn, key) in enumerate(_filter_btns):
+        for btn, key in _filter_btns:
             btn.setCheckable(True)
             btn.setProperty('filter_key', key)
             btn.setStyleSheet(
                 "QPushButton{padding:2px 6px;font-size:11px;}"
                 "QPushButton:checked{background:#3a5a8a;color:#fff;}")
-            self._anno_filter_group.addButton(btn, i)
             filter_row.addWidget(btn)
         self.btn_filter_all.setChecked(True)
         list_layout.addLayout(filter_row)
