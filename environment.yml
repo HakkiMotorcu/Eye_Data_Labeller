@@ -1,0 +1,65 @@
+# Eye Data Labeller — conda environment.
+#
+# Bundles:
+#   1. micro-sam runtime deps (from micro-sam-master/environment.yaml,
+#      minus napari + its pyqt5 transitive — we use PyQt6 directly)
+#   2. our app deps (PyQt6, pyqtgraph, qtawesome, pyqtdarktheme,
+#      scikit-image, tifffile, pycocotools, opencv)
+#
+# Create or update:
+#   conda env create -f environment.yml          # first time
+#   conda env update -f environment.yml --prune  # later, after edits
+#
+# Activate:
+#   conda activate eye-labeller
+#
+# Run:
+#   python main.py
+
+name: eye-labeller
+channels:
+  - conda-forge
+dependencies:
+  - python >=3.10,<3.13
+
+  # ---- micro-sam runtime (mirrors micro-sam/environment.yaml) ----
+  # Pytorch from conda-forge is generally the most optimized build for
+  # your OS + CUDA. To force CPU-only: replace with `pytorch=*=cpu*`.
+  - pytorch >=2.5
+  - torchvision
+  - segment-anything
+  - torch_em >=0.8
+  - timm
+  - tqdm
+  - pooch
+  - python-elf >=0.7.1
+  - python-xxhash
+  - zarr
+  - xarray
+  - nifty >=1.2.3
+  - imagecodecs
+  - natsort
+  - magicgui          # used by some micro_sam utilities (Qt-agnostic)
+  # NOTE: napari and `pyqt` (= PyQt5) intentionally omitted — the labeller
+  # is PyQt6-native. trackastra omitted — deferred to Phase 5 (tracking).
+
+  # ---- Eye Data Labeller core deps ----
+  - tifffile
+  - imageio
+  - scikit-image
+  - opencv
+  - pycocotools
+
+  - pip
+  - pip:
+      # micro_sam is installed editable from your local clone so any
+      # tweaks in micro-sam-master apply without reinstalling. To use
+      # the upstream release instead, swap for: micro_sam
+      - -e /Users/hakkimotorcu/Desktop/micro-sam-master
+      # PyQt6 stack — installed via pip because conda-forge ships only PyQt5
+      - PyQt6
+      - pyqtgraph
+      - qtawesome
+      - pyqtdarktheme
+      # MobileSAM (vit_t support) — same as upstream micro-sam env
+      - git+https://github.com/ChaoningZhang/MobileSAM.git
