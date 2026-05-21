@@ -149,7 +149,7 @@ class MainWindow(QMainWindow):
         # ----- View state (display-only enhancement pipeline) -----
         # These never mutate the underlying frame data. They only affect
         # what is composed into the pyqtgraph ImageItem.
-        self._projection_mode = 'none'      # 'none' | 'std' | 'max' | 'mean' | 'sum' | 'min'
+        self._projection_mode = 'none'      # 'none' | 'std' | 'std_sum' | 'max' | 'mean' | 'sum' | 'min'
         self._projection_cache = None       # (H, W) uint8
         self._projection_cache_key = None   # tuple — invalidates cache when changed
         self._proj_window_mode = 'all'      # 'all' | 'sliding' | 'range'
@@ -157,6 +157,7 @@ class MainWindow(QMainWindow):
         self._proj_range_lo = 0
         self._proj_range_hi = 0
         self._proj_percentile_clip = False
+        self._proj_std_sum_chunk = 6        # chunk size for the std_sum mode
         self._bg_subtract_on = False
         self._bg_subtract_window = 2
         self._clahe_on = False
@@ -186,6 +187,7 @@ class MainWindow(QMainWindow):
         self.slider_proj_sliding.valueChanged.connect(self._on_proj_sliding_changed)
         self.spin_proj_range_lo.valueChanged.connect(self._on_proj_range_lo_changed)
         self.spin_proj_range_hi.valueChanged.connect(self._on_proj_range_hi_changed)
+        self.spin_proj_std_sum.valueChanged.connect(self._on_proj_std_sum_changed)
         self.chk_proj_clip.toggled.connect(self._on_proj_clip_toggled)
         self.chk_bg_subtract.toggled.connect(self._on_bg_subtract_toggled)
         self.slider_bg_window.valueChanged.connect(self._on_bg_window_changed)
@@ -853,11 +855,15 @@ class MainWindow(QMainWindow):
         proj_row.setSpacing(4)
         proj_row.addWidget(QLabel("Mode"))
         self.combo_projection = QComboBox()
-        self.combo_projection.addItems(["None", "Std", "Max", "Mean", "Sum", "Min"])
+        self.combo_projection.addItems(
+            ["None", "Std", "Std-sum", "Max", "Mean", "Sum", "Min"])
         self.combo_projection.setToolTip(
             "Reduction across the selected frame window.\n"
             "Std is the headline mode for AOSLO — stationary vessel walls\n"
-            "drop out, moving cells pop.")
+            "drop out, moving cells pop.\n"
+            "Std-sum: split into non-overlapping N-frame chunks, take stddev\n"
+            "of each, then sum the maps — highlights brief motion that plain\n"
+            "Std averages out.")
         proj_row.addWidget(self.combo_projection, stretch=1)
 
         win_mode_row = QHBoxLayout()
@@ -907,6 +913,23 @@ class MainWindow(QMainWindow):
         rng_lay.addStretch(1)
         self.proj_range_row.setVisible(False)
 
+        # Chunk size for Std-sum (visible only when that mode is picked)
+        self.proj_std_sum_row = QWidget()
+        ssum_lay = QHBoxLayout(self.proj_std_sum_row)
+        ssum_lay.setContentsMargins(0, 0, 0, 0)
+        ssum_lay.setSpacing(4)
+        ssum_lay.addWidget(QLabel("Chunk N"))
+        self.spin_proj_std_sum = QSpinBox()
+        self.spin_proj_std_sum.setRange(2, 60)
+        self.spin_proj_std_sum.setValue(6)
+        self.spin_proj_std_sum.setToolTip(
+            "Frames per non-overlapping stddev window. 6 is a good default; "
+            "the collaborator noted 6 and 22 give similar results, so the "
+            "method is fairly robust.")
+        ssum_lay.addWidget(self.spin_proj_std_sum)
+        ssum_lay.addStretch(1)
+        self.proj_std_sum_row.setVisible(False)
+
         # Percentile-clip toggle for normalization
         clip_row = QHBoxLayout()
         clip_row.setSpacing(4)
@@ -924,6 +947,7 @@ class MainWindow(QMainWindow):
         self.section_projection.add_layout(win_mode_row)
         self.section_projection.add_widget(self.proj_sliding_row)
         self.section_projection.add_widget(self.proj_range_row)
+        self.section_projection.add_widget(self.proj_std_sum_row)
         self.section_projection.add_layout(clip_row)
         display_layout.addWidget(self.section_projection)
 
@@ -1307,7 +1331,8 @@ class MainWindow(QMainWindow):
         ctr = self._current_frame_idx if self._proj_window_mode == 'sliding' else None
         return (self._projection_mode, self._proj_window_mode, self._proj_sliding_n,
                 self._proj_range_lo, self._proj_range_hi,
-                self._proj_percentile_clip, ctr)
+                self._proj_percentile_clip, ctr,
+                self._proj_std_sum_chunk)
 
     def _get_projection(self):
         if not self.video_data:
@@ -1329,6 +1354,7 @@ class MainWindow(QMainWindow):
             range_lo=self._proj_range_lo,
             range_hi=self._proj_range_hi,
             percentile_clip=self._proj_percentile_clip,
+            std_sum_chunk=self._proj_std_sum_chunk,
         )
         self._projection_cache_key = key
         return self._projection_cache
@@ -1351,7 +1377,9 @@ class MainWindow(QMainWindow):
         parts = []
         if proj_active:
             tag = self._projection_mode.upper()
-            if self._proj_window_mode == 'sliding':
+            if self._projection_mode == 'std_sum':
+                tag += f"[N={self._proj_std_sum_chunk}]"
+            elif self._proj_window_mode == 'sliding':
                 tag += f"±{self._proj_sliding_n}"
             elif self._proj_window_mode == 'range':
                 tag += f"[{self._proj_range_lo}..{self._proj_range_hi}]"
@@ -1374,9 +1402,27 @@ class MainWindow(QMainWindow):
             "Pipeline: " + (" · ".join(parts) if parts else "identity"))
 
     def _on_projection_changed(self, text):
-        self._projection_mode = (text or 'none').lower()
+        # "Std-sum" in the combo maps to the internal mode key 'std_sum'.
+        mode_map = {
+            'none':     'none',
+            'std':      'std',
+            'std-sum':  'std_sum',
+            'max':      'max',
+            'mean':     'mean',
+            'sum':      'sum',
+            'min':      'min',
+        }
+        self._projection_mode = mode_map.get((text or 'none').lower(), 'none')
+        # Chunk spinner is only meaningful for std_sum.
+        self.proj_std_sum_row.setVisible(self._projection_mode == 'std_sum')
         self._projection_cache = None
         self._rerender()
+
+    def _on_proj_std_sum_changed(self, value):
+        self._proj_std_sum_chunk = int(value)
+        if self._projection_mode == 'std_sum':
+            self._projection_cache = None
+            self._rerender()
 
     def _on_proj_window_mode_changed(self, text):
         mode_map = {"All frames": 'all', "Sliding ±N": 'sliding', "Range": 'range'}

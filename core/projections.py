@@ -11,7 +11,7 @@ Projections are display-only: the raw frame stack is never mutated.
 import numpy as np
 
 
-_MODES = ('none', 'std', 'max', 'mean', 'sum', 'min')
+_MODES = ('none', 'std', 'std_sum', 'max', 'mean', 'sum', 'min')
 
 
 def available_modes():
@@ -37,10 +37,32 @@ def _select_frames(frames, window_mode, center, window, range_lo, range_hi):
     return frames
 
 
+def _std_sum_projection(f, chunk):
+    """Sum-of-chunked-stddev: split the (T, H, W) array into non-
+    overlapping windows of ``chunk`` frames, take the temporal stddev of
+    each window, and sum the resulting maps.
+
+    Highlights pixels that move *within short stretches* of the video —
+    so a cell that briefly traverses a region contributes once, instead
+    of being averaged out across the whole stack as plain std does.
+
+    Falls back to plain std when there are fewer than ``chunk`` frames.
+    """
+    T = f.shape[0]
+    chunk = max(2, int(chunk))
+    if T < chunk:
+        return f.std(axis=0)
+    out = np.zeros(f.shape[1:], dtype=np.float32)
+    for i in range(0, T - chunk + 1, chunk):  # non-overlapping windows
+        out += f[i:i + chunk].std(axis=0)
+    return out
+
+
 def project_stack(frames, mode, *,
                   window_mode='all', window=None, center=None,
                   range_lo=None, range_hi=None,
-                  percentile_clip=False, clip_lo=1.0, clip_hi=99.0):
+                  percentile_clip=False, clip_lo=1.0, clip_hi=99.0,
+                  std_sum_chunk=6):
     """Reduce a ``(T, H, W)`` stack to one ``(H, W)`` projection.
 
     ``mode``: one of available_modes(). ``'none'`` is a no-op pass-through.
@@ -56,6 +78,9 @@ def project_stack(frames, mode, *,
     percentiles of the projection instead of its raw min/max. Stops a
     single hot pixel from washing out the displayed contrast.
 
+    ``std_sum_chunk``: chunk size used by the ``'std_sum'`` mode. Ignored
+    by all other modes.
+
     Output is a uint8 image.
     """
     if mode == 'none' or mode is None:
@@ -68,6 +93,8 @@ def project_stack(frames, mode, *,
     f = selected.astype(np.float32, copy=False)
     if mode == 'std':
         out = f.std(axis=0)
+    elif mode == 'std_sum':
+        out = _std_sum_projection(f, std_sum_chunk)
     elif mode == 'max':
         out = f.max(axis=0)
     elif mode == 'mean':
