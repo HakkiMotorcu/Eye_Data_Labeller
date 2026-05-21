@@ -685,6 +685,11 @@ class ToolController:
         self.window.btn_run_tracker.clicked.connect(self.run_tracking_now)
         self._rebuild_tracker_settings()
         self.window.slider_seg_opacity.valueChanged.connect(self._on_seg_opacity_changed)
+        # Mirror seg-opacity between the View-panel slider and the Tools
+        # mirror. Each updates the other with signals blocked to avoid
+        # ping-pong.
+        self.window.slider_seg_opacity_tools.valueChanged.connect(
+            self._on_seg_opacity_tools_changed)
         self.window.btn_toggle_seg.clicked.connect(self._on_toggle_seg)
         # Seg editing connections
         self.window._seg_mode_group.idClicked.connect(self._on_seg_mode_changed)
@@ -3056,7 +3061,22 @@ class ToolController:
             n_absorbed=n_absorbed, n_dropped=n_dropped)
         return n_created
 
-    def _on_seg_opacity_changed(self, _value):
+    def _on_seg_opacity_tools_changed(self, value):
+        """Tools-panel mirror -> drive the canonical View-panel slider."""
+        if self.window.slider_seg_opacity.value() == value:
+            return
+        self.window.slider_seg_opacity.blockSignals(True)
+        self.window.slider_seg_opacity.setValue(int(value))
+        self.window.slider_seg_opacity.blockSignals(False)
+        self._on_seg_opacity_changed(value)
+
+    def _on_seg_opacity_changed(self, value):
+        # Keep the Tools mirror in sync without re-triggering its handler.
+        tools = self.window.slider_seg_opacity_tools
+        if tools.value() != value:
+            tools.blockSignals(True)
+            tools.setValue(int(value))
+            tools.blockSignals(False)
         self.window._update_seg_overlay()
 
     def _on_toggle_seg(self):

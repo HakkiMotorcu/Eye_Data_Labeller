@@ -374,6 +374,21 @@ class MainWindow(QMainWindow):
         brush_row.addWidget(self.lbl_brush_size)
         tools_layout.addLayout(brush_row)
 
+        # Seg-overlay opacity mirror — same slider that lives in the View
+        # panel, duplicated here so it's at hand while painting. The two
+        # are kept in sync (see ToolController._mirror_seg_opacity).
+        seg_op_tools_row = QHBoxLayout()
+        seg_op_tools_row.setSpacing(4)
+        seg_op_tools_row.addWidget(QLabel("Opacity"))
+        self.slider_seg_opacity_tools = QSlider(Qt.Orientation.Horizontal)
+        self.slider_seg_opacity_tools.setRange(0, 100)
+        self.slider_seg_opacity_tools.setValue(40)
+        self.slider_seg_opacity_tools.setToolTip(
+            "Segmentation overlay opacity (0–100). Mirror of the slider in "
+            "the View panel — moving either updates both.")
+        seg_op_tools_row.addWidget(self.slider_seg_opacity_tools, stretch=1)
+        tools_layout.addLayout(seg_op_tools_row)
+
         # Action buttons
         action_row = QHBoxLayout()
         action_row.setSpacing(3)
@@ -966,6 +981,13 @@ class MainWindow(QMainWindow):
         self.section_lut = FilterSection("Display LUT")
         self.section_lut.add_layout(lut_row)
         display_layout.addWidget(self.section_lut)
+
+        # Start every View filter section collapsed so the panel opens
+        # compact. Users expand whichever filter they want to tweak.
+        for _sec in (self.section_projection, self.section_bg,
+                     self.section_clahe, self.section_frangi,
+                     self.section_lut):
+            _sec.set_collapsed(True)
 
         level_grid = QHBoxLayout()
         level_grid.setSpacing(4)
