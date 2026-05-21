@@ -10,6 +10,7 @@ from PyQt6.QtGui import QColor, QFont, QShortcut, QKeySequence
 from core.app_state import AppState
 
 from core.sam_service import SamService, SAM_AVAILABLE, default_sam_hela_path
+from core.debug import log, log_error
 
 
 # ======================================================================
@@ -2137,6 +2138,7 @@ class ToolController:
         self.window.lbl_sam_status.setText(text)
 
     def run_sam_segmentation(self):
+        log('controller.sam', 'run_sam_segmentation: entered')
         if not SamService.available():
             QMessageBox.critical(self.window, "Error", "MicroSAM is not installed.")
             return
@@ -2147,9 +2149,13 @@ class ToolController:
 
         # Lazy-load the model on first run. Surface a clear error if the
         # checkpoint is missing.
+        log('controller.sam', 'requesting model load',
+            model_type=self.sam_service.model_type,
+            ckpt=self.sam_service.checkpoint_path)
         try:
             self.sam_service.load()
         except FileNotFoundError as e:
+            log_error('controller.sam', 'checkpoint missing', exc=e)
             QMessageBox.critical(
                 self.window, "Error",
                 f"{e}\n\nPlace the fine-tuned weights at "
@@ -2157,7 +2163,12 @@ class ToolController:
                 f"model in the SAM panel.")
             return
         except Exception as e:
-            QMessageBox.critical(self.window, "Error", f"Failed to load SAM model: {str(e)}")
+            log_error('controller.sam', 'model load failed', exc=e)
+            QMessageBox.critical(
+                self.window, "Error",
+                f"Failed to load SAM model:\n\n"
+                f"{type(e).__name__}: {e}\n\n"
+                f"Run with --debug for a full traceback.")
             return
 
         frame_idx = self.window._current_frame_idx
@@ -2165,14 +2176,24 @@ class ToolController:
         if frame is None:
             QMessageBox.critical(self.window, "Error", "No frame data available.")
             return
+        log('controller.sam', 'frame captured',
+            frame_idx=frame_idx, shape=frame.shape, dtype=str(frame.dtype))
 
         # SAM runs on the *raw* frame, not on the enhanced display
         # (per the locked decision for Phase 4).
         try:
             segmentation = self.sam_service.auto_segment(frame)
         except Exception as e:
-            QMessageBox.critical(self.window, "Error", f"Segmentation failed: {str(e)}")
+            log_error('controller.sam', 'auto_segment raised', exc=e)
+            QMessageBox.critical(
+                self.window, "Error",
+                f"Segmentation failed:\n\n"
+                f"{type(e).__name__}: {e}\n\n"
+                f"Run with --debug for a full traceback in the terminal.")
             return
+        log('controller.sam', 'segmentation returned',
+            shape=segmentation.shape, dtype=str(segmentation.dtype),
+            n_ids=int(np.unique(segmentation).size - 1))
 
         # Create SegmentationData from the result
         from core.volume_data import SegmentationData

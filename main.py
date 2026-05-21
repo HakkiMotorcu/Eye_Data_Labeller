@@ -1,10 +1,18 @@
 import sys
 import os
+
+# Honor --debug BEFORE importing anything else, so the debug flag is
+# already live by the time submodules read it.
+if '--debug' in sys.argv:
+    os.environ['EYE_LABELLER_DEBUG'] = '1'
+    sys.argv.remove('--debug')
+
 from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QPainterPath, QColor, QPen
 from PyQt6.QtCore import Qt, QRectF
 from core.volume_data import VideoData
 from core.frame_source import TiffFrameSource
+from core.debug import log, is_debug
 from ui.main_window import MainWindow
 from controllers.tool_controller import ToolController
 
@@ -90,6 +98,8 @@ def pick_video_file(parent=None):
 
 
 def main():
+    if is_debug():
+        log('main', 'launching with debug enabled', argv=sys.argv)
     app = QApplication(sys.argv)
     app.setApplicationName("Eye Data Labeller")
 

@@ -22,6 +22,8 @@ synchronous here — async is a higher-layer concern.
 import os
 import numpy as np
 
+from core.debug import log, log_error
+
 try:
     import micro_sam
     from micro_sam import util
@@ -30,7 +32,8 @@ try:
         automatic_instance_segmentation,
     )
     SAM_AVAILABLE = True
-except ImportError:
+except ImportError as _exc:
+    log_error('sam_service', 'micro_sam import failed', exc=_exc)
     SAM_AVAILABLE = False
 
 
@@ -58,6 +61,8 @@ class SamService:
         self.checkpoint_path = checkpoint_path
         self.device = device
         self._predictor = None  # lazy
+        self._state = None      # decoder_state + image_encoder weights — needed
+                                # by get_predictor_and_segmenter for AIS mode.
 
     # ---- Availability + load -----------------------------------------
 
@@ -80,6 +85,7 @@ class SamService:
                 "micro_sam is not installed. Run `pip install micro_sam` "
                 "into the project venv.")
         if self._predictor is not None:
+            log('sam_service', 'load: already loaded', model_type=self.model_type)
             return self._predictor
         if self.checkpoint_path and not os.path.exists(self.checkpoint_path):
             raise FileNotFoundError(
@@ -91,12 +97,26 @@ class SamService:
         if self.device:
             kwargs['device'] = self.device
 
-        self._predictor = util.get_sam_model(**kwargs)
+        # return_state=True is required so that the automatic instance
+        # segmenter has access to decoder_state (it asserts on `state`
+        # being not None when given a pre-loaded predictor).
+        kwargs['return_state'] = True
+        log('sam_service', 'loading predictor + state', **kwargs)
+        try:
+            self._predictor, self._state = util.get_sam_model(**kwargs)
+        except Exception as e:
+            log_error('sam_service', 'get_sam_model failed', exc=e, **kwargs)
+            raise
+        has_decoder = isinstance(self._state, dict) and 'decoder_state' in self._state
+        log('sam_service', 'predictor loaded',
+            state_keys=list(self._state.keys()) if isinstance(self._state, dict) else type(self._state).__name__,
+            has_decoder=has_decoder)
         return self._predictor
 
     def unload(self):
-        """Drop the predictor so the user can switch models cleanly."""
+        """Drop the predictor + state so the user can switch models cleanly."""
         self._predictor = None
+        self._state = None
 
     # ---- Helpers ------------------------------------------------------
 
@@ -129,14 +149,33 @@ class SamService:
         """
         self.load()
         frame_rgb = self.to_rgb_uint8(frame)
-        predictor, segmenter = get_predictor_and_segmenter(
-            model_type=self.model_type, predictor=self._predictor)
-        seg = automatic_instance_segmentation(
-            predictor=predictor,
-            segmenter=segmenter,
-            input_path=frame_rgb,
-            ndim=2,
-            verbose=verbose,
-            **kwargs,
-        )
+        log('sam_service', 'auto_segment: starting',
+            frame_shape=frame_rgb.shape, dtype=str(frame_rgb.dtype),
+            model_type=self.model_type)
+        try:
+            predictor, segmenter = get_predictor_and_segmenter(
+                model_type=self.model_type,
+                predictor=self._predictor,
+                state=self._state,
+            )
+            log('sam_service', 'auto_segment: got predictor + segmenter',
+                segmenter_type=type(segmenter).__name__)
+            seg = automatic_instance_segmentation(
+                predictor=predictor,
+                segmenter=segmenter,
+                input_path=frame_rgb,
+                ndim=2,
+                verbose=verbose,
+                **kwargs,
+            )
+        except Exception as e:
+            log_error('sam_service', 'auto_segment failed', exc=e,
+                      frame_shape=frame_rgb.shape, model_type=self.model_type)
+            raise
+        try:
+            n_inst = int(np.unique(seg).size - 1)
+        except Exception:
+            n_inst = -1
+        log('sam_service', 'auto_segment: done',
+            result_shape=seg.shape, dtype=str(seg.dtype), n_instances=n_inst)
         return seg
