@@ -103,3 +103,60 @@ def default_mask_path(image_path):
     import os
     base, _ = os.path.splitext(image_path)
     return f"{base}_Masks.tif"
+
+
+# ----- Per-class (3-layer) save/load --------------------------------------
+# Suffix used for each class's mask TIF. Cells keep the legacy
+# ``_Masks.tif`` suffix for backward compatibility so older sidecar files
+# still match the load path.
+CLASS_FILENAME_SUFFIX = {
+    'cell':      '_Cells.tif',
+    'vessel':    '_Vessels.tif',
+    'capillary': '_Capillaries.tif',
+}
+
+
+def class_mask_path(image_path, class_type):
+    """Return the per-class mask TIF path for a given image file."""
+    import os
+    base, _ = os.path.splitext(image_path)
+    return f"{base}{CLASS_FILENAME_SUFFIX[class_type]}"
+
+
+def save_multiclass_masks(seg, image_path):
+    """Save all non-empty class layers as separate TIFs.
+
+    Returns the list of paths actually written. Empty layers are skipped
+    so we don't litter the directory with zero-content files.
+    """
+    written = []
+    for ct, suffix in CLASS_FILENAME_SUFFIX.items():
+        layer = seg.get_layer(ct)
+        if layer is None or not layer.any():
+            continue
+        path = class_mask_path(image_path, ct)
+        save_mask_tif(layer, path)
+        written.append(path)
+    return written
+
+
+def load_multiclass_masks(image_path):
+    """Look for per-class mask TIFs next to *image_path*.
+
+    Returns a dict {class_type: (T, H, W) uint16}. Missing classes are
+    omitted. If only the legacy ``_Masks.tif`` exists, it's returned
+    under the ``cell`` key — older single-layer saves migrate cleanly.
+    """
+    import os
+    found = {}
+    # Modern per-class files
+    for ct in CLASS_FILENAME_SUFFIX:
+        p = class_mask_path(image_path, ct)
+        if os.path.exists(p):
+            found[ct] = load_mask_tif(p)
+    # Legacy single-layer file → treat as cells
+    if 'cell' not in found:
+        legacy = default_mask_path(image_path)
+        if os.path.exists(legacy):
+            found['cell'] = load_mask_tif(legacy)
+    return found

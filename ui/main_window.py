@@ -1888,79 +1888,90 @@ class MainWindow(QMainWindow):
             self._seg_overlay.clear()
             return
 
-        mask = self.seg_data.get_mask(idx)  # (H, W) int32, values = instance IDs
-
-        # Resize mask if it doesn't match the video dimensions
-        if self.video_data and (mask.shape[0] != self.video_data.height or
-                                mask.shape[1] != self.video_data.width):
-            import cv2
-            mask = cv2.resize(mask, (self.video_data.width, self.video_data.height),
-                              interpolation=cv2.INTER_NEAREST)
+        # Composite the three class layers in z-order. Bottom layer is
+        # painted first; later layers overwrite where they have pixels —
+        # so the LAST entry in _seg_layer_order ends up on top.
+        # The order can be reconfigured from the View panel.
+        order = getattr(self, '_seg_layer_order',
+                         ('vessel', 'capillary', 'cell'))
 
         alpha = self.slider_seg_opacity.value() / 100.0
         alpha_byte = int(alpha * 255)
 
-        rgba = np.zeros((*mask.shape, 4), dtype=np.uint8)
-        ids = np.unique(mask)
-        ids = ids[ids != 0]
+        # Decide the working canvas size — match the video where possible.
+        target_h = self.video_data.height if self.video_data else None
+        target_w = self.video_data.width  if self.video_data else None
 
-        # Check if status-color mode is active via the controller
+        # Build a hidden-instance lookup keyed by class layer so per-row
+        # eye-toggle hides apply to each layer independently.
         ctrl = getattr(self, '_controller', None)
         status_mode = ctrl is not None and ctrl._label_color_mode
-
-        # Per-row hide (D): drop instance IDs whose annotation has
-        # is_hidden=True so the overlay disappears for those cells.
+        hidden_by_class = {ct: set() for ct in self.seg_data.CLASS_TYPES}
+        anno_state_by_class = {ct: {} for ct in self.seg_data.CLASS_TYPES}
         if ctrl is not None:
-            hidden_ids = {
-                int(a.instance_id) for a in ctrl.annotations
-                if a.frame_idx == idx and a.instance_id is not None
-                and getattr(a, 'is_hidden', False)
-            }
-            if hidden_ids:
-                ids = np.array([i for i in ids if int(i) not in hidden_ids],
-                               dtype=ids.dtype)
-
-        if status_mode and ctrl is not None:
-            # Build lookup: instance_id → annotation state for this frame
-            anno_state = {}  # instance_id → 'locked' | 'selected' | 'unlocked'
-            for anno in ctrl.annotations:
-                if anno.frame_idx == idx and anno.instance_id is not None:
-                    if anno.is_locked:
+            for a in ctrl.annotations:
+                if a.frame_idx != idx or a.instance_id is None:
+                    continue
+                if getattr(a, 'is_hidden', False):
+                    hidden_by_class[a.class_type].add(int(a.instance_id))
+                if status_mode:
+                    if a.is_locked:
                         state = 'locked'
-                    elif anno.is_selected:
+                    elif a.is_selected:
                         state = 'selected'
                     else:
                         state = 'unlocked'
-                    anno_state[anno.instance_id] = state
+                    anno_state_by_class[a.class_type][int(a.instance_id)] = state
 
-            status_colors = {
-                'locked':   (0, 200, 0),      # green
-                'selected': (255, 255, 0),     # yellow
-                'unlocked': (255, 50, 50),     # red
-            }
+        status_colors = {
+            'locked':   (0, 200, 0),
+            'selected': (255, 255, 0),
+            'unlocked': (255, 50, 50),
+        }
+
+        rgba = None
+        for ct in order:
+            layer = self.seg_data.get_layer(ct)
+            if layer is None:
+                continue
+            if idx >= layer.shape[0]:
+                continue
+            mask = layer[idx]
+            if (target_h is not None and
+                    (mask.shape[0] != target_h or mask.shape[1] != target_w)):
+                import cv2
+                mask = cv2.resize(mask, (target_w, target_h),
+                                  interpolation=cv2.INTER_NEAREST)
+            if rgba is None:
+                rgba = np.zeros((*mask.shape, 4), dtype=np.uint8)
+            ids = np.unique(mask)
+            ids = ids[ids != 0]
+            hidden_ids = hidden_by_class[ct]
+            inst_colors = self.seg_data.get_colors(ct)
+            anno_state = anno_state_by_class[ct]
             for iid in ids:
                 iid_int = int(iid)
-                state = anno_state.get(iid_int, 'unlocked')
-                color = status_colors[state]
-                region = mask == iid
-                rgba[region, 0] = color[0]
-                rgba[region, 1] = color[1]
-                rgba[region, 2] = color[2]
-                rgba[region, 3] = alpha_byte
-        else:
-            # Use original colours from the seg data
-            inst_colors = getattr(self.seg_data, 'instance_colors', {})
-            for iid in ids:
-                iid_int = int(iid)
-                if iid_int in inst_colors:
-                    color = inst_colors[iid_int]
+                if iid_int in hidden_ids:
+                    continue
+                if status_mode and ct == 'cell':
+                    state = anno_state.get(iid_int, 'unlocked')
+                    color = status_colors[state]
                 else:
-                    color = self._SEG_COLORS[(iid_int - 1) % len(self._SEG_COLORS)]
-                region = mask == iid
+                    if iid_int in inst_colors:
+                        color = inst_colors[iid_int]
+                    else:
+                        color = self._SEG_COLORS[(iid_int - 1) % len(self._SEG_COLORS)]
+                region = (mask == iid)
+                # Overwrite — later layers in `order` paint on top of
+                # earlier ones, giving the configured z-order.
                 rgba[region, 0] = color[0]
                 rgba[region, 1] = color[1]
                 rgba[region, 2] = color[2]
                 rgba[region, 3] = alpha_byte
+
+        if rgba is None:
+            self._seg_overlay.clear()
+            return
 
         self._seg_overlay.setImage(rgba)
 

@@ -171,7 +171,7 @@ class SamBoxPromptCmd:
     """
     def __init__(self, controller, frame_idx, instance_id,
                  before_frame, after_frame,
-                 before_geom=None, after_geom=None):
+                 before_geom=None, after_geom=None, class_type='cell'):
         self.ctrl = controller
         self.frame_idx = int(frame_idx)
         self.instance_id = int(instance_id)
@@ -179,12 +179,13 @@ class SamBoxPromptCmd:
         self.after_frame = after_frame
         self.before_geom = before_geom    # {'x','y','w','h'} or None
         self.after_geom = after_geom
+        self.class_type = class_type
 
     def _restore(self, frame_mask, geom):
         seg = self.ctrl.window.seg_data
         if seg is None:
             return
-        seg.masks[self.frame_idx][:] = frame_mask
+        seg.get_layer(self.class_type)[self.frame_idx][:] = frame_mask
         for a in self.ctrl.annotations:
             if (a.frame_idx == self.frame_idx
                     and a.instance_id == self.instance_id):
@@ -213,19 +214,23 @@ class DeletePaintOnlyIdentityCmd:
     Snapshots the (T, H, W) boolean mask of pixels that belonged to this
     instance_id so undo can restore them exactly.
     """
-    def __init__(self, controller, annos, instance_id, pixel_mask, color):
+    def __init__(self, controller, annos, instance_id, pixel_mask, color,
+                 class_type='vessel'):
         self.ctrl = controller
         self.annos = list(annos)
         self.iid = instance_id
-        self.pixel_mask = pixel_mask  # (T, H, W) bool
+        self.pixel_mask = pixel_mask  # (T, H, W) bool, in `class_type` layer
         self.color = color
+        self.class_type = class_type
 
     def undo(self):
         seg = self.ctrl.window.seg_data
         if seg is not None:
-            seg.masks[self.pixel_mask] = self.iid
+            layer = seg.get_layer(self.class_type)
+            layer[self.pixel_mask] = self.iid
             if self.color is not None:
-                seg.register_instance_color(self.iid, self.color)
+                seg.register_instance_color(self.iid, self.color,
+                                             class_type=self.class_type)
         for anno in self.annos:
             self.ctrl._raw_restore(anno)
         self.ctrl._show_frame_annotations(self.ctrl.window._current_frame_idx)
@@ -235,8 +240,9 @@ class DeletePaintOnlyIdentityCmd:
     def redo(self):
         seg = self.ctrl.window.seg_data
         if seg is not None:
-            seg.masks[self.pixel_mask] = 0
-            seg.instance_colors.pop(self.iid, None)
+            layer = seg.get_layer(self.class_type)
+            layer[self.pixel_mask] = 0
+            seg.get_colors(self.class_type).pop(self.iid, None)
         if self.ctrl.active_annotation in self.annos:
             self.ctrl.active_annotation = None
         for anno in self.annos:
@@ -253,7 +259,8 @@ class MoveResizeCmd:
     Provided only when pixels were actually modified (translate or crop).
     """
     def __init__(self, anno, old_state, new_state,
-                 ctrl=None, frame_idx=None, old_mask=None, new_mask=None):
+                 ctrl=None, frame_idx=None, old_mask=None, new_mask=None,
+                 class_type='cell'):
         self.anno = anno
         self.old = old_state
         self.new = new_state
@@ -261,6 +268,7 @@ class MoveResizeCmd:
         self.frame_idx = frame_idx
         self.old_mask = old_mask
         self.new_mask = new_mask
+        self.class_type = class_type
 
     def undo(self):
         self._apply_box(self.old)
@@ -284,7 +292,7 @@ class MoveResizeCmd:
         seg = self.ctrl.window.seg_data
         if seg is None:
             return
-        seg.masks[self.frame_idx] = mask.copy()
+        seg.get_layer(self.class_type)[self.frame_idx] = mask.copy()
         self.ctrl.window._update_seg_overlay()
 
 
@@ -305,39 +313,43 @@ class LockCmd:
 
 class BrushStrokeCmd:
     """Undo/redo a single brush stroke (press → drag → release)."""
-    def __init__(self, controller, frame_idx, old_mask, new_mask):
+    def __init__(self, controller, frame_idx, old_mask, new_mask,
+                 class_type='cell'):
         self.ctrl = controller
         self.frame_idx = frame_idx
         self.old_mask = old_mask
         self.new_mask = new_mask
+        self.class_type = class_type
 
     def undo(self):
         seg = self.ctrl.window.seg_data
         if seg is not None:
-            seg.masks[self.frame_idx] = self.old_mask.copy()
+            seg.get_layer(self.class_type)[self.frame_idx] = self.old_mask.copy()
             self.ctrl.window._update_seg_overlay()
 
     def redo(self):
         seg = self.ctrl.window.seg_data
         if seg is not None:
-            seg.masks[self.frame_idx] = self.new_mask.copy()
+            seg.get_layer(self.class_type)[self.frame_idx] = self.new_mask.copy()
             self.ctrl.window._update_seg_overlay()
 
 
 class PropagateMaskCmd:
     """Undo/redo a mask-propagation operation across multiple frames."""
-    def __init__(self, controller, old_masks, new_masks):
+    def __init__(self, controller, old_masks, new_masks, class_type='cell'):
         # old_masks / new_masks: dict {frame_idx: np.ndarray copy}
         self.ctrl = controller
         self.old_masks = old_masks   # {fi: mask before propagation}
         self.new_masks = new_masks   # {fi: mask after  propagation}
+        self.class_type = class_type
 
     def _apply(self, masks_dict):
         seg = self.ctrl.window.seg_data
         if seg is None:
             return
+        layer = seg.get_layer(self.class_type)
         for fi, mask in masks_dict.items():
-            seg.masks[fi] = mask.copy()
+            layer[fi] = mask.copy()
         self.ctrl.window._update_seg_overlay()
 
     def undo(self):
@@ -567,21 +579,24 @@ class Annotation2D(QObject):
 
         old_mask = new_mask = None
 
+        ct = self.class_type
+        layer = seg.get_layer(ct) if seg is not None else None
         if not size_changed:
             # ── TRANSLATE: move pixels with the box ───────────────────────
             if has_seg:
                 scale = ctrl._seg_scale()
                 if scale is not None:
                     sx, sy = scale
-                    old_mask = seg.masks[frame].copy()
+                    old_mask = layer[frame].copy()
                     seg.move_instance_pixels(
                         frame, self.instance_id,
                         (old['x'] * sx, old['y'] * sy,
                          old['w'] * sx, old['h'] * sy),
                         (new['x'] * sx, new['y'] * sy,
                          new['w'] * sx, new['h'] * sy),
+                        class_type=ct,
                     )
-                    new_mask = seg.masks[frame].copy()
+                    new_mask = layer[frame].copy()
                     ctrl.window._update_seg_overlay()
         else:
             # ── RESIZE ────────────────────────────────────────────────────
@@ -591,13 +606,14 @@ class Annotation2D(QObject):
                 scale = ctrl._seg_scale()
                 if scale is not None:
                     sx, sy = scale
-                    old_mask = seg.masks[frame].copy()
+                    old_mask = layer[frame].copy()
                     seg.crop_instance_to_bbox(
                         frame, self.instance_id,
                         new['x'] * sx, new['y'] * sy,
                         new['w'] * sx, new['h'] * sy,
+                        class_type=ct,
                     )
-                    new_mask = seg.masks[frame].copy()
+                    new_mask = layer[frame].copy()
                     ctrl.window._update_seg_overlay()
             # Bigger box → pixels unchanged, no mask snapshot needed
 
@@ -607,6 +623,7 @@ class Annotation2D(QObject):
             frame_idx=frame,
             old_mask=old_mask,
             new_mask=new_mask,
+            class_type=ct,
         ))
 
     def delete_ui(self):
@@ -644,6 +661,7 @@ class ToolController:
         self._is_painting = False       # True while mouse is pressed in paint/erase mode
         self._brush_cursor = None       # circle item showing brush on view
         self._brush_mask_snapshot = None # mask copy before current brush stroke
+        self._brush_snapshot_class = None # class layer that snapshot came from
         # SAM service — lazy-loaded on first use. Default model is the
         # collaborators' fine-tuned ViT-B (sam_hela). User can swap via
         # the SAM section in the View panel.
@@ -960,7 +978,8 @@ class ToolController:
         seg = self.window.seg_data
         if seg is None:
             return
-        bbox = seg.get_instance_bbox(anno.frame_idx, anno.instance_id)
+        bbox = seg.get_instance_bbox(anno.frame_idx, anno.instance_id,
+                                       class_type=anno.class_type)
         if bbox is None:
             return  # no pixels — keep current bbox
         sx0, sy0, sw, sh = bbox
@@ -996,7 +1015,8 @@ class ToolController:
         w, h = anno.roi.size()
         # Convert video coords → seg coords
         seg.erase_bbox(anno.frame_idx, anno.instance_id,
-                       x * sx, y * sy, w * sx, h * sy)
+                       x * sx, y * sy, w * sx, h * sy,
+                       class_type=anno.class_type)
 
     def _move_seg_pixels(self, anno, old_geom, new_geom):
         """Move seg mask pixels when a bbox is dragged or resized."""
@@ -1018,10 +1038,12 @@ class ToolController:
 
         if resized:
             seg.resize_instance_pixels(anno.frame_idx, anno.instance_id,
-                                       old_bbox, new_bbox)
+                                       old_bbox, new_bbox,
+                                       class_type=anno.class_type)
         elif moved:
             seg.move_instance_pixels(anno.frame_idx, anno.instance_id,
-                                     old_bbox, new_bbox)
+                                     old_bbox, new_bbox,
+                                     class_type=anno.class_type)
         self.window._update_seg_overlay()
 
     # ------------------------------------------------------------------
@@ -1189,8 +1211,13 @@ class ToolController:
         instance_id = None
         color = None
         if seg is not None:
-            instance_id = seg.next_instance_id()
-            color = seg.register_instance_color(instance_id, color=default_color)
+            # Pull the instance_id from the class's own layer namespace and
+            # register the color in that class's color table — otherwise
+            # vessel/capillary IDs collide with cells and the overlay
+            # falls back to the generic palette (looks wrong).
+            instance_id = seg.next_instance_id(class_type=class_type)
+            color = seg.register_instance_color(
+                instance_id, color=default_color, class_type=class_type)
             self.anno_counter = max(self.anno_counter, instance_id)
 
         # --- Propagation dialog ---
@@ -1733,13 +1760,19 @@ class ToolController:
         seg = self.window.seg_data
         pixel_mask = None
         color = None
-        if seg is not None:
-            pixel_mask = (seg.masks == instance_id)
-            color = seg.instance_colors.get(int(instance_id))
-            seg.masks[pixel_mask] = 0
-            seg.instance_colors.pop(int(instance_id), None)
+        class_type = 'vessel'  # fallback; refined below from the first victim
 
         victims = [a for a in self.annotations if a.instance_id == instance_id]
+        if victims:
+            class_type = victims[0].class_type
+        if seg is not None:
+            layer = seg.get_layer(class_type)
+            colors = seg.get_colors(class_type)
+            pixel_mask = (layer == instance_id)
+            color = colors.get(int(instance_id))
+            layer[pixel_mask] = 0
+            colors.pop(int(instance_id), None)
+
         if self.active_annotation in victims:
             self.active_annotation = None
         for anno in victims:
@@ -1750,7 +1783,8 @@ class ToolController:
         if pixel_mask is not None and victims:
             self._undo_stack.push(
                 DeletePaintOnlyIdentityCmd(self, victims, int(instance_id),
-                                            pixel_mask, color))
+                                            pixel_mask, color,
+                                            class_type=class_type))
 
     def toggle_hide_locked(self, checked):
         for anno in self._get_frame_annotations():
@@ -1819,15 +1853,25 @@ class ToolController:
         if cx < 0 or cy < 0 or cx >= seg.width or cy >= seg.height:
             return
 
-        instance_id = int(seg.masks[frame, cy, cx])
-        if instance_id == 0:
-            return  # clicked on background
-
-        # Find the annotation that owns this pixel on the current frame
-        for anno in self.annotations:
-            if anno.frame_idx == frame and anno.instance_id == instance_id:
-                self.select_annotation(anno)
-                return
+        # Walk class layers top-down (cell wins over capillary over vessel
+        # by default) so the click goes to whatever the user actually sees
+        # on top in the overlay.
+        order = getattr(self.window, '_seg_layer_order',
+                        ('vessel', 'capillary', 'cell'))
+        for ct in reversed(order):  # top to bottom
+            layer = seg.get_layer(ct)
+            if layer is None:
+                continue
+            iid = int(layer[frame, cy, cx])
+            if iid == 0:
+                continue
+            for anno in self.annotations:
+                if (anno.frame_idx == frame
+                        and anno.instance_id == iid
+                        and anno.class_type == ct):
+                    self.select_annotation(anno)
+                    return
+            # No annotation owns these pixels — keep looking down.
 
     # ------------------------------------------------------------------
     # STATISTICS
@@ -1893,6 +1937,11 @@ class ToolController:
             item.setForeground(2, class_color.get(anno.class_type, fg))
             # Keep the swatch in sync — tracking can recolor annotations.
             item.setIcon(0, make_swatch_icon(anno.color))
+            # Keep eye/lock glyph columns in sync after Lock All / per-row
+            # toggles. _show_frame_annotations sets these on rebuild, but
+            # path-aware refreshes go through here.
+            item.setText(3, " " if getattr(anno, 'is_hidden', False) else "●")
+            item.setText(4, "🔒" if anno.is_locked else "")
         self.window.list_annotations.blockSignals(False)
 
     # ------------------------------------------------------------------
@@ -1979,11 +2028,16 @@ class ToolController:
                 etype = event.type()
                 if etype == QEvent.Type.GraphicsSceneMousePress:
                     if event.button() == Qt.MouseButton.LeftButton:
-                        # Snapshot mask before stroke begins
+                        # Snapshot the active anno's class layer before the
+                        # stroke begins so undo/redo restores the right layer.
                         seg = self.ctrl.window.seg_data
-                        if seg is not None:
+                        anno = self.ctrl.active_annotation
+                        if seg is not None and anno is not None:
                             fi = self.ctrl.window._current_frame_idx
-                            self.ctrl._brush_mask_snapshot = seg.masks[fi].copy()
+                            ct = anno.class_type
+                            self.ctrl._brush_mask_snapshot = \
+                                seg.get_layer(ct)[fi].copy()
+                            self.ctrl._brush_snapshot_class = ct
                         self.ctrl._is_painting = True
                         vb = self.ctrl.window.view_frame.getView()
                         pos = vb.mapSceneToView(event.scenePos())
@@ -1993,16 +2047,18 @@ class ToolController:
                 elif etype == QEvent.Type.GraphicsSceneMouseRelease:
                     if event.button() == Qt.MouseButton.LeftButton:
                         self.ctrl._is_painting = False
-                        # Push undo command for this stroke
                         seg = self.ctrl.window.seg_data
                         snap = self.ctrl._brush_mask_snapshot
+                        ct = getattr(self.ctrl, '_brush_snapshot_class', 'cell')
                         if seg is not None and snap is not None:
                             fi = self.ctrl.window._current_frame_idx
-                            new_mask = seg.masks[fi].copy()
+                            new_mask = seg.get_layer(ct)[fi].copy()
                             if not np.array_equal(snap, new_mask):
                                 self.ctrl._undo_stack.push(
-                                    BrushStrokeCmd(self.ctrl, fi, snap, new_mask))
+                                    BrushStrokeCmd(self.ctrl, fi, snap, new_mask,
+                                                   class_type=ct))
                             self.ctrl._brush_mask_snapshot = None
+                            self.ctrl._brush_snapshot_class = None
                         return True
                 return False
 
@@ -2049,15 +2105,17 @@ class ToolController:
         r = self._get_brush_radius_in_seg()
         frame = self.window._current_frame_idx
 
-        # Vessel/capillary paint always claims pixels — these structures
-        # legitimately overlap cells (a vessel runs *through* the cell
-        # field), so the brush should not be blocked by existing cell IDs.
-        force = self.window.btn_force_paint.isChecked() or anno.is_paint_only
+        # Each class has its own (T, H, W) layer — cells, vessels, and
+        # capillaries are stored independently and can occupy the same
+        # pixel. Force only affects within-class overwrite.
+        force = self.window.btn_force_paint.isChecked()
         if self._seg_edit_mode == 'paint':
-            seg.paint_circle(frame, anno.instance_id, cx, cy, r, force=force)
+            seg.paint_circle(frame, anno.instance_id, cx, cy, r,
+                              force=force, class_type=anno.class_type)
             anno._seg_dirty = True
         elif self._seg_edit_mode == 'erase':
-            seg.erase_circle(frame, anno.instance_id, cx, cy, r)
+            seg.erase_circle(frame, anno.instance_id, cx, cy, r,
+                              class_type=anno.class_type)
             anno._seg_dirty = True
 
         self.window._update_seg_overlay()
@@ -2109,11 +2167,12 @@ class ToolController:
             return
         sx, sy = scale
 
-        # Assign an instance ID if the annotation doesn't have one
+        # Assign an instance ID if the annotation doesn't have one — pulled
+        # from the annotation's own class layer namespace.
         if anno.instance_id is None:
-            new_id = seg.next_instance_id()
+            new_id = seg.next_instance_id(class_type=anno.class_type)
             anno.instance_id = new_id
-            color = seg.register_instance_color(new_id)
+            color = seg.register_instance_color(new_id, class_type=anno.class_type)
             anno.color = color
             anno.update_visuals()
 
@@ -2121,19 +2180,21 @@ class ToolController:
         w, h = anno.roi.size()
         force = self.window.btn_force_paint.isChecked()
         seg.fill_bbox(anno.frame_idx, anno.instance_id,
-                      x * sx, y * sy, w * sx, h * sy, force=force)
+                      x * sx, y * sy, w * sx, h * sy,
+                      force=force, class_type=anno.class_type)
         anno._seg_dirty = True
         self.window._update_seg_overlay()
 
     def save_seg_map(self):
-        """Save the segmentation masks.
+        """Save the segmentation masks as 3 per-class TIFs.
 
-        Default format is a multi-page uint16 instance-mask TIF named
-        ``{video}_Masks.tif`` — the collaborator's pipeline format. The
-        legacy AVI export path is kept selectable for backwards-compat
-        with older saved files.
+        Cells, vessels, and capillaries are independent semantic layers
+        and each goes to its own ``{video}_Cells.tif`` / ``_Vessels.tif``
+        / ``_Capillaries.tif`` file. Empty classes are skipped so we
+        don't litter the directory.
         """
         from core import mask_io
+        from core import sidecar
 
         seg = self.window.seg_data
         if seg is None:
@@ -2141,51 +2202,38 @@ class ToolController:
                                 "No segmentation data loaded.")
             return
 
-        # Default filename: derive from the input image when seg has no
-        # filepath of its own (i.e. it was auto-created on open).
         source = seg.filepath or self.window._current_file
-        if source:
-            default_dir = os.path.dirname(source)
-            default_name = os.path.basename(mask_io.default_mask_path(source))
-        else:
-            default_dir = os.getcwd()
-            default_name = "Masks.tif"
-
-        path, selected_filter = QFileDialog.getSaveFileName(
-            self.window, "Save Segmentation Masks",
-            os.path.join(default_dir, default_name),
-            "Instance mask TIF (*.tif *.tiff);;AVI Video (*.avi);;All Files (*)")
-        if not path:
+        if not source:
+            QMessageBox.warning(self.window, "Save Seg",
+                                "Open an image/video first so we know where "
+                                "to save the masks.")
             return
 
-        from core import sidecar
-
-        ext = os.path.splitext(path)[1].lower()
         try:
-            if ext in ('.tif', '.tiff'):
-                mask_io.save_mask_tif(seg.masks, path)
-                meta_extra = ""
-                if source:
-                    meta_path = sidecar.meta_path_for(path)
-                    meta = sidecar.collect_meta_from_annotations(self.annotations)
-                    sidecar.save_meta(meta, meta_path)
-                    meta_extra = f"\nmeta: {os.path.basename(meta_path)}"
-            elif ext == '.avi':
-                seg.save_masks(path)
-                meta_extra = ""
-            else:
-                # No extension given — default to TIF so the file is
-                # readable by the collaborator pipeline.
-                path = path + '.tif'
-                mask_io.save_mask_tif(seg.masks, path)
-                meta_path = sidecar.meta_path_for(path)
-                meta = sidecar.collect_meta_from_annotations(self.annotations)
-                sidecar.save_meta(meta, meta_path)
-                meta_extra = f"\nmeta: {os.path.basename(meta_path)}"
-            QMessageBox.information(self.window, "Save Seg",
-                                    f"Saved {seg.num_frames} frames to:\n{path}{meta_extra}")
+            written = mask_io.save_multiclass_masks(seg, source)
+            # Meta sidecar matches the cell mask path (or the image when
+            # there are no cells yet — vessels still benefit from meta).
+            meta_anchor = (mask_io.class_mask_path(source, 'cell')
+                            if 'cell' in {'cell'}  # always anchor to cells path
+                            else written[0] if written else source)
+            meta_path = sidecar.meta_path_for(meta_anchor)
+            meta = sidecar.collect_meta_from_annotations(self.annotations)
+            sidecar.save_meta(meta, meta_path)
         except Exception as e:
             QMessageBox.critical(self.window, "Error", str(e))
+            return
+
+        if not written:
+            QMessageBox.information(
+                self.window, "Save Seg",
+                "Nothing to save — every class layer is empty.")
+            return
+
+        lines = "\n".join(f"  {os.path.basename(p)}" for p in written)
+        QMessageBox.information(
+            self.window, "Save Seg",
+            f"Saved {seg.num_frames} frames as 3-class masks:\n{lines}\n"
+            f"meta: {os.path.basename(meta_path)}")
 
     def propagate_vein_mask(self):
         """Copy the current frame's painted mask pixels for the active annotation
@@ -2221,7 +2269,9 @@ class ToolController:
             return
 
         source_frame = self.window._current_frame_idx
-        if not np.any(seg.masks[source_frame] == anno.instance_id):
+        ct = anno.class_type
+        layer = seg.get_layer(ct)
+        if not np.any(layer[source_frame] == anno.instance_id):
             QMessageBox.information(
                 self.window, "Propagate Mask",
                 "No painted pixels for this annotation on the current frame.\n\n"
@@ -2244,7 +2294,7 @@ class ToolController:
 
         # Determine which targets already have pixels
         already_painted = [f for f in target_frames
-                           if np.any(seg.masks[f] == anno.instance_id)]
+                           if np.any(layer[f] == anno.instance_id)]
         empty_targets   = [f for f in target_frames if f not in already_painted]
 
         overwrite = False
@@ -2267,13 +2317,15 @@ class ToolController:
             return
 
         # Snapshot for undo
-        old_masks = {fi: seg.masks[fi].copy() for fi in effective_targets}
+        old_masks = {fi: layer[fi].copy() for fi in effective_targets}
         n_updated = seg.propagate_instance_mask(
-            anno.instance_id, source_frame, effective_targets, overwrite=overwrite)
-        new_masks = {fi: seg.masks[fi].copy() for fi in effective_targets}
+            anno.instance_id, source_frame, effective_targets,
+            overwrite=overwrite, class_type=ct)
+        new_masks = {fi: layer[fi].copy() for fi in effective_targets}
 
         if n_updated > 0:
-            self._undo_stack.push(PropagateMaskCmd(self, old_masks, new_masks))
+            self._undo_stack.push(
+                PropagateMaskCmd(self, old_masks, new_masks, class_type=ct))
 
         self.window._update_seg_overlay()
         # Brief status feedback without a blocking dialog
@@ -2310,27 +2362,50 @@ class ToolController:
         ext = os.path.splitext(path)[1].lower()
         try:
             if ext in ('.tif', '.tiff'):
-                masks = mask_io.load_mask_tif(path)
-                # Pad / crop to match the open image's frame count if it
-                # was loaded; otherwise trust the TIF.
+                # The user might have picked any of the 3 per-class TIFs
+                # (or a legacy _Masks.tif). Derive the image stem from
+                # the filename suffix and try to load all sibling layers.
+                anchor = path
+                for ct, suffix in mask_io.CLASS_FILENAME_SUFFIX.items():
+                    if path.endswith(suffix):
+                        anchor = path[:-len(suffix)] + os.path.splitext(path)[1]
+                        # Reconstruct an image-like path so siblings are
+                        # discovered relative to the same stem.
+                        anchor = path[:-len(suffix)] + '.x'
+                        break
+                if path.endswith('_Masks.tif'):
+                    anchor = path[:-len('_Masks.tif')] + '.x'
+
+                layers = mask_io.load_multiclass_masks(anchor)
+                if not layers:
+                    # Fall back: treat the picked file alone as the cells layer
+                    layers = {'cell': mask_io.load_mask_tif(path)}
+
+                # All layers must share shape; cells (or whichever is
+                # present) defines the canvas.
+                first_layer = next(iter(layers.values()))
+                T, H, W = first_layer.shape
+
                 vd = self.window.video_data
-                if vd is not None:
-                    if masks.shape[1:] != (vd.height, vd.width):
-                        QMessageBox.warning(
-                            self.window, "Load Seg",
-                            f"Mask size {masks.shape[1:]} does not match image "
-                            f"{(vd.height, vd.width)}. Loading anyway — overlay "
-                            f"will be resized at display time.")
-                seg = SegmentationData.empty(
-                    masks.shape[2], masks.shape[1], masks.shape[0])
+                if vd is not None and (H, W) != (vd.height, vd.width):
+                    QMessageBox.warning(
+                        self.window, "Load Seg",
+                        f"Mask size {(H, W)} does not match image "
+                        f"{(vd.height, vd.width)}. Loading anyway — overlay "
+                        f"will be resized at display time.")
+
+                seg = SegmentationData.empty(W, H, T)
                 seg.filepath = path
-                seg.masks = masks.astype(np.int32)
-                # Pre-register colors for every ID present so the overlay
-                # palette is stable.
-                for iid in np.unique(masks):
-                    if iid == 0:
-                        continue
-                    seg.register_instance_color(int(iid))
+                for ct, arr in layers.items():
+                    if arr.shape != (T, H, W):
+                        raise ValueError(
+                            f"{ct} layer shape {arr.shape} does not match "
+                            f"cell shape {(T, H, W)}")
+                    seg.set_layer(ct, arr.astype(np.int32))
+                    for iid in np.unique(arr):
+                        if iid == 0:
+                            continue
+                        seg.register_instance_color(int(iid), class_type=ct)
             else:
                 seg = SegmentationData(path)
         except Exception as e:
@@ -2390,6 +2465,37 @@ class ToolController:
                 anno_count += 1
 
         self.anno_counter = max_stair
+
+        # Build paint-only annotations from the vessel and capillary
+        # layers — one entry per (instance_id, frame_idx).
+        for ct in ('vessel', 'capillary'):
+            layer = seg.get_layer(ct)
+            colors = seg.get_colors(ct)
+            if layer is None:
+                continue
+            for fi in range(seg.num_frames):
+                frame_ids = np.unique(layer[fi])
+                for iid in frame_ids:
+                    if iid == 0:
+                        continue
+                    iid = int(iid)
+                    color = colors.get(iid, (147, 112, 219))
+                    label = 'Vessel' if ct == 'vessel' else 'Capillary'
+                    name = f"{label}_{iid}"
+                    anno = Annotation2D(
+                        name, self.window.view_frame, self,
+                        start_pos=(0, 0),
+                        start_size=(1, 1),
+                        shape_mode='rect',
+                        frame_idx=fi,
+                        instance_id=iid,
+                        color=color,
+                        class_type=ct,
+                    )
+                    anno.sig_clicked.connect(self.select_annotation)
+                    anno.sig_updated.connect(self._on_anno_updated)
+                    self.annotations.append(anno)
+                    anno_count += 1
 
         # Apply per-instance metadata from the meta sidecar (if present)
         # so names, class_type, and locked state survive a save/load cycle.
@@ -2956,10 +3062,12 @@ class ToolController:
             # Navigate to the cell's frame so the result is visible.
             self.window.slider_timeline.setValue(fi)
 
-        before_frame = seg.masks[fi].copy()
+        ct = anno.class_type
+        layer = seg.get_layer(ct)
+        before_frame = layer[fi].copy()
         before_geom = ToolController._snap_geometry(anno)
 
-        match = (seg.masks[fi] == anno.instance_id)
+        match = (layer[fi] == anno.instance_id)
         n_cleared = int(match.sum())
         if n_cleared == 0:
             self.window.lbl_sam_status.setText(
@@ -2967,13 +3075,14 @@ class ToolController:
                 f"nothing to clear.")
             return
 
-        seg.masks[fi][match] = 0
-        after_frame = seg.masks[fi].copy()
+        layer[fi][match] = 0
+        after_frame = layer[fi].copy()
         self._undo_stack.push(
             SamBoxPromptCmd(self, fi, int(anno.instance_id),
                             before_frame, after_frame,
                             before_geom=before_geom,
-                            after_geom=before_geom))  # bbox unchanged
+                            after_geom=before_geom,
+                            class_type=ct))  # bbox unchanged
 
         anno.update_visuals()
         if fi == self.window._current_frame_idx:
