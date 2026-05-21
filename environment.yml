@@ -41,7 +41,9 @@ dependencies:
   - natsort
   - magicgui          # used by some micro_sam utilities (Qt-agnostic)
   # NOTE: napari and `pyqt` (= PyQt5) intentionally omitted — the labeller
-  # is PyQt6-native. trackastra omitted — deferred to Phase 5 (tracking).
+  # is PyQt6-native. Trackastra powers the default tracker; add it back
+  # here once Phase 4-tracking lands.
+  - trackastra >=0.5.3
 
   # ---- Eye Data Labeller core deps ----
   - tifffile
