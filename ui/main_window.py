@@ -467,16 +467,28 @@ class MainWindow(QMainWindow):
         emb_row.addWidget(self.btn_sam_precompute)
         sam_layout.addLayout(emb_row)
 
-        # Run SAM — automatic instance segmentation on current frame
-        # (Existing handler. Kept the attribute name btn_run_sam so the
-        # controller binding doesn't need to change.)
+        # Scope selector — current frame vs whole stack
+        scope_row = QHBoxLayout()
+        scope_row.setSpacing(4)
+        self.chk_sam_all_frames = QCheckBox("All frames")
+        self.chk_sam_all_frames.setToolTip(
+            "Off (default): Auto-segment runs on the current frame only.\n"
+            "On: loop over every frame in the stack — the status line shows\n"
+            "progress; UI may freeze briefly between frames (no async yet).")
+        scope_row.addWidget(self.chk_sam_all_frames)
+        scope_row.addStretch(1)
+        sam_layout.addLayout(scope_row)
+
+        # Run SAM — automatic instance segmentation.
+        # ADDITIVE: existing annotations + seg pixels are preserved; new
+        # cells get fresh instance_ids and gap-filled names.
         run_row = QHBoxLayout()
         run_row.setSpacing(4)
-        self.btn_run_sam = QPushButton("Auto-segment current frame")
+        self.btn_run_sam = QPushButton("Auto-segment")
         self.btn_run_sam.setToolTip(
-            "Run automatic instance segmentation on the current raw frame.\n"
-            "WARNING (current behavior): replaces any existing annotations.\n"
-            "Phase 4.6 will make this additive.")
+            "Run automatic instance segmentation on the raw frame data.\n"
+            "Additive — does NOT delete existing annotations.\n"
+            "SAM-found cells get fresh IDs and Cell_N names (gap-filled).")
         self.btn_run_sam.setStyleSheet("color: #4cc9f0; font-weight: bold;")
         run_row.addWidget(self.btn_run_sam)
         sam_layout.addLayout(run_row)
@@ -504,7 +516,6 @@ class MainWindow(QMainWindow):
         io_layout.addLayout(fmt_row)
 
         # Export options checkboxes
-        from PyQt6.QtWidgets import QCheckBox
         opts_row = QHBoxLayout()
         opts_row.setSpacing(6)
         self.chk_export_bbox = QCheckBox("BBoxes")

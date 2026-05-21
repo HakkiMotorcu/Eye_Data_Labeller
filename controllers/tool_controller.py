@@ -2138,17 +2138,27 @@ class ToolController:
         self.window.lbl_sam_status.setText(text)
 
     def run_sam_segmentation(self):
+        """Top-level Auto-segment handler.
+
+        Additive: existing annotations and seg pixels are preserved. New
+        SAM-found instances get fresh instance_ids that don't collide with
+        anything already in the seg layer, and Cell_N names via the same
+        gap-fill helper used for manual cells.
+
+        Scope: just the current frame (default) OR every frame in the
+        stack when the 'All frames' checkbox is on. Multi-frame mode
+        updates the status line between frames; the UI may briefly hitch
+        because inference is still synchronous (async lands in Phase 4.2).
+        """
         log('controller.sam', 'run_sam_segmentation: entered')
         if not SamService.available():
             QMessageBox.critical(self.window, "Error", "MicroSAM is not installed.")
             return
-
         if self.window.video_data is None:
             QMessageBox.critical(self.window, "Error", "Load a video before running SAM.")
             return
 
-        # Lazy-load the model on first run. Surface a clear error if the
-        # checkpoint is missing.
+        # Lazy model load with friendly error surfaces.
         log('controller.sam', 'requesting model load',
             model_type=self.sam_service.model_type,
             ckpt=self.sam_service.checkpoint_path)
@@ -2162,6 +2172,24 @@ class ToolController:
                 f"models/checkpoints/sam_hela/best.pt or switch the SAM "
                 f"model in the SAM panel.")
             return
+        except OSError as e:
+            if getattr(e, 'errno', None) == 28:  # ENOSPC
+                cache = os.path.expanduser('~/Library/Caches/micro_sam/models')
+                log_error('controller.sam', 'disk full during model fetch', exc=e)
+                QMessageBox.critical(
+                    self.window, "Disk Full",
+                    f"Out of disk space while downloading the SAM model.\n\n"
+                    f"Free some space and try again. Any partial download "
+                    f"is in:\n{cache}\n\n"
+                    f"Tip: vit_l is 1.25 GB. The default sam_hela is already "
+                    f"on disk; vit_b_lm is ~375 MB.")
+                return
+            log_error('controller.sam', 'OSError during model load', exc=e)
+            QMessageBox.critical(
+                self.window, "Error",
+                f"OSError loading SAM model:\n\n{e}\n\n"
+                f"Run with --debug for a full traceback.")
+            return
         except Exception as e:
             log_error('controller.sam', 'model load failed', exc=e)
             QMessageBox.critical(
@@ -2171,60 +2199,106 @@ class ToolController:
                 f"Run with --debug for a full traceback.")
             return
 
-        frame_idx = self.window._current_frame_idx
+        all_frames = self.window.chk_sam_all_frames.isChecked()
+        if all_frames:
+            frame_indices = list(range(self.window.video_data.num_frames))
+        else:
+            frame_indices = [self.window._current_frame_idx]
+        log('controller.sam', 'scope', n_frames=len(frame_indices),
+            all_frames=all_frames)
+
+        from PyQt6.QtWidgets import QApplication
+        total_created = 0
+        for i, fi in enumerate(frame_indices, start=1):
+            try:
+                n_created = self._run_sam_on_frame(fi)
+            except Exception as e:
+                log_error('controller.sam', f'frame {fi} failed', exc=e)
+                QMessageBox.critical(
+                    self.window, "Error",
+                    f"Segmentation failed on frame {fi}:\n\n"
+                    f"{type(e).__name__}: {e}\n\n"
+                    f"Created {total_created} cells before the failure.\n"
+                    f"Run with --debug for a full traceback.")
+                self._refresh_sam_status()
+                return
+            total_created += n_created
+            if all_frames:
+                self.window.lbl_sam_status.setText(
+                    f"SAM: frame {i}/{len(frame_indices)} done · "
+                    f"{total_created} cells so far")
+                QApplication.processEvents()
+
+        self._refresh_sam_status()
+        scope_text = (f"all {len(frame_indices)} frames"
+                      if all_frames else
+                      f"frame {frame_indices[0]}")
+        QMessageBox.information(
+            self.window, "SAM Auto-segment Complete",
+            f"Created {total_created} annotation(s) across {scope_text}.")
+
+    def _run_sam_on_frame(self, frame_idx):
+        """Run SAM auto-segment on a single frame, additively. Returns the
+        number of new Annotation2D objects created.
+
+        Raises on inference failure — caller decides how to surface it.
+        """
         frame = self.window.video_data.get_frame(frame_idx)
         if frame is None:
-            QMessageBox.critical(self.window, "Error", "No frame data available.")
-            return
+            return 0
         log('controller.sam', 'frame captured',
             frame_idx=frame_idx, shape=frame.shape, dtype=str(frame.dtype))
 
-        # SAM runs on the *raw* frame, not on the enhanced display
-        # (per the locked decision for Phase 4).
-        try:
-            segmentation = self.sam_service.auto_segment(frame)
-        except Exception as e:
-            log_error('controller.sam', 'auto_segment raised', exc=e)
-            QMessageBox.critical(
-                self.window, "Error",
-                f"Segmentation failed:\n\n"
-                f"{type(e).__name__}: {e}\n\n"
-                f"Run with --debug for a full traceback in the terminal.")
-            return
+        # SAM always runs on the raw frame, never the enhanced display.
+        segmentation = self.sam_service.auto_segment(frame)
+        sam_seg = segmentation.astype(np.int32)
+        sam_ids = np.unique(sam_seg)
+        sam_ids = sam_ids[sam_ids != 0]
         log('controller.sam', 'segmentation returned',
-            shape=segmentation.shape, dtype=str(segmentation.dtype),
-            n_ids=int(np.unique(segmentation).size - 1))
+            frame_idx=frame_idx, n_sam_ids=len(sam_ids))
+        if len(sam_ids) == 0:
+            return 0
 
-        # Create SegmentationData from the result
-        from core.volume_data import SegmentationData
-        seg_data = SegmentationData.empty(
-            self.window.video_data.width,
-            self.window.video_data.height,
-            self.window.video_data.num_frames,
-        )
-        seg_data.masks[frame_idx] = segmentation.astype(np.int32)
-        # Assign colors
-        unique_ids = np.unique(segmentation)
-        unique_ids = unique_ids[unique_ids != 0]
-        seg_data._assign_colors(list(unique_ids))
+        # Make sure a seg layer exists (create empty if first-ever run).
+        seg = self._ensure_seg_data()
+        if seg is None:
+            return 0
 
-        self.window.seg_data = seg_data
-        self.window._seg_visible = True
+        # Remap SAM's local IDs to fresh IDs from the seg layer's allocator
+        # so they don't collide with existing instances (manual or SAM).
+        id_map = {}
+        for sid in sam_ids:
+            new_id = seg.next_instance_id()
+            seg.register_instance_color(new_id)
+            id_map[int(sid)] = new_id
 
-        # Clear existing annotations
-        self._clear_all_annotations()
+        # Compose: keep existing non-zero pixels (manual labels survive),
+        # fill SAM masks only on background pixels.
+        existing = seg.masks[frame_idx]
+        new_layer = np.zeros_like(existing)
+        for sid, new_id in id_map.items():
+            new_layer[sam_seg == sid] = new_id
+        background = (existing == 0)
+        seg.masks[frame_idx] = np.where(background, new_layer, existing)
 
-        # Create annotations from the segmentation on the frame we actually segmented.
-        # (Previously hardcoded to frame 0, which silently dropped all results when
-        # SAM was run on any other frame.)
-        bboxes = seg_data.get_all_bboxes(frame_idx)
-        anno_count = 0
-        for (stair_id, blob_idx), (x0, y0, w, h) in bboxes.items():
-            color = seg_data.instance_colors.get(stair_id, (255, 80, 80))
-            if blob_idx == 0:
-                name = f"Cell_{stair_id}"
-            else:
-                name = f"Cell_{stair_id}_{blob_idx}"
+        # Build one Annotation2D per surviving SAM instance.
+        n_created = 0
+        is_current = (frame_idx == self.window._current_frame_idx)
+        for sid, new_id in id_map.items():
+            mask_pixels = (seg.masks[frame_idx] == new_id)
+            if not mask_pixels.any():
+                # The whole instance was overlapped by a manual label —
+                # drop it cleanly (free the reserved color slot).
+                seg.instance_colors.pop(new_id, None)
+                continue
+            ys, xs = np.where(mask_pixels)
+            x0, y0 = int(xs.min()), int(ys.min())
+            x1, y1 = int(xs.max()), int(ys.max())
+            w, h = x1 - x0 + 1, y1 - y0 + 1
+
+            n, name = self._next_available_name('Cell')
+            self.anno_counter = max(self.anno_counter, n)
+            color = seg.instance_colors[new_id]
 
             anno = Annotation2D(
                 name, self.window.view_frame, self,
@@ -2232,22 +2306,22 @@ class ToolController:
                 start_size=(w, h),
                 shape_mode='rect',
                 frame_idx=frame_idx,
-                instance_id=stair_id,
+                instance_id=new_id,
                 color=color,
             )
             anno.sig_clicked.connect(self.select_annotation)
             anno.sig_updated.connect(self._on_anno_updated)
             self.annotations.append(anno)
-            anno.roi.setVisible(True)
-            anno_count += 1
+            anno.roi.setVisible(is_current)
+            n_created += 1
 
-        self._show_frame_annotations(frame_idx)
-        self.window._update_seg_overlay()
-
-        self._refresh_sam_status()
-        QMessageBox.information(
-            self.window, "SAM Segmentation Complete",
-            f"Created {anno_count} annotations from SAM segmentation.")
+        if is_current:
+            self._show_frame_annotations(self.window._current_frame_idx)
+            self.window._update_seg_overlay()
+        self.state.annotations_changed.emit()
+        log('controller.sam', 'frame done',
+            frame_idx=frame_idx, n_created=n_created)
+        return n_created
 
     def _on_seg_opacity_changed(self, _value):
         self.window._update_seg_overlay()
