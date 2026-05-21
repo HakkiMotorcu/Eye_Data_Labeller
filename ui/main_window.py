@@ -392,14 +392,16 @@ class MainWindow(QMainWindow):
             "Wipe the selected cell's painted pixels on the CURRENT frame "
             "only.\nBbox is preserved. Undoable (Cmd+Z).")
         self.btn_clear_seg_mask.setStyleSheet("color: #e76f51;")
-        self.btn_save_seg = QPushButton("Save Seg")
-        self.btn_save_seg.setToolTip("Export modified segmentation masks as AVI")
-        self.btn_save_seg.setStyleSheet("color: #2a9d8f; font-weight: bold;")
         action_row.addWidget(self.btn_fill_bbox)
         action_row.addWidget(self.btn_sam_box)
         action_row.addWidget(self.btn_clear_seg_mask)
-        action_row.addWidget(self.btn_save_seg)
         tools_layout.addLayout(action_row)
+
+        # Save Seg is a whole-stack save action, not a per-cell tool —
+        # it lives in the I/O panel below, next to Load Seg.
+        self.btn_save_seg = QPushButton("Save Seg")
+        self.btn_save_seg.setToolTip("Export modified segmentation masks (mask TIF)")
+        self.btn_save_seg.setStyleSheet("color: #2a9d8f; font-weight: bold;")
 
         # Force paint toggle (bypasses safe-paint mode)
         force_row = QHBoxLayout()
@@ -626,6 +628,7 @@ class MainWindow(QMainWindow):
         fmt_row.addWidget(QLabel("Format:"))
         fmt_row.addWidget(self.combo_export_format, stretch=1)
         fmt_row.addWidget(self.btn_load_seg)
+        fmt_row.addWidget(self.btn_save_seg)
         io_layout.addLayout(fmt_row)
 
         # Export options checkboxes
