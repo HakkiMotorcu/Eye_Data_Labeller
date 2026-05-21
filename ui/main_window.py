@@ -383,13 +383,21 @@ class MainWindow(QMainWindow):
         self.btn_sam_box.setToolTip(
             "Run SAM with the active cell's bbox as a prompt and absorb\n"
             "the predicted mask into that cell's instance_id.\n"
+            "Re-running on the same cell replaces its prior mask.\n"
+            "Bbox auto-fits the resulting mask.\n"
             "Shortcut: B. Settings: SAM section -> 'Box prompt'.")
         self.btn_sam_box.setStyleSheet("color: #4cc9f0; font-weight: bold;")
+        self.btn_clear_seg_mask = QPushButton("Clear Mask [Shift+E]")
+        self.btn_clear_seg_mask.setToolTip(
+            "Wipe the selected cell's painted pixels on the CURRENT frame "
+            "only.\nBbox is preserved. Undoable (Cmd+Z).")
+        self.btn_clear_seg_mask.setStyleSheet("color: #e76f51;")
         self.btn_save_seg = QPushButton("Save Seg")
         self.btn_save_seg.setToolTip("Export modified segmentation masks as AVI")
         self.btn_save_seg.setStyleSheet("color: #2a9d8f; font-weight: bold;")
         action_row.addWidget(self.btn_fill_bbox)
         action_row.addWidget(self.btn_sam_box)
+        action_row.addWidget(self.btn_clear_seg_mask)
         action_row.addWidget(self.btn_save_seg)
         tools_layout.addLayout(action_row)
 

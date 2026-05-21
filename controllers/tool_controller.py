@@ -162,26 +162,34 @@ class TrackingCmd:
 class SamBoxPromptCmd:
     """Undo/redo for a single SAM-box-prompt paint into one cell.
 
-    Snapshots the affected frame's full mask before and after. Small
-    memory cost (one (H, W) int32 per command). Restoring touches only
-    that frame.
+    Snapshots the affected frame's full mask AND the annotation's ROI
+    geometry (because the bbox may have been tightened to fit the new
+    mask). Memory cost is one (H, W) int32 per command — fine.
     """
     def __init__(self, controller, frame_idx, instance_id,
-                 before_frame, after_frame):
+                 before_frame, after_frame,
+                 before_geom=None, after_geom=None):
         self.ctrl = controller
         self.frame_idx = int(frame_idx)
         self.instance_id = int(instance_id)
         self.before_frame = before_frame  # (H, W) int32 copy
         self.after_frame = after_frame
+        self.before_geom = before_geom    # {'x','y','w','h'} or None
+        self.after_geom = after_geom
 
-    def _restore(self, frame_mask):
+    def _restore(self, frame_mask, geom):
         seg = self.ctrl.window.seg_data
         if seg is None:
             return
         seg.masks[self.frame_idx][:] = frame_mask
-        # Refresh the affected annotation's bbox color/seg-aware visuals
         for a in self.ctrl.annotations:
-            if a.frame_idx == self.frame_idx and a.instance_id == self.instance_id:
+            if (a.frame_idx == self.frame_idx
+                    and a.instance_id == self.instance_id):
+                if geom is not None:
+                    a._is_syncing = True
+                    a.roi.setPos([geom['x'], geom['y']])
+                    a.roi.setSize([geom['w'], geom['h']])
+                    a._is_syncing = False
                 a.update_visuals()
                 break
         if self.frame_idx == self.ctrl.window._current_frame_idx:
@@ -189,10 +197,10 @@ class SamBoxPromptCmd:
         self.ctrl.state.annotations_changed.emit()
 
     def undo(self):
-        self._restore(self.before_frame)
+        self._restore(self.before_frame, self.before_geom)
 
     def redo(self):
-        self._restore(self.after_frame)
+        self._restore(self.after_frame, self.after_geom)
 
 
 class DeletePaintOnlyIdentityCmd:
@@ -683,6 +691,7 @@ class ToolController:
         self.window.slider_brush_size.valueChanged.connect(self._on_brush_size_changed)
         self.window.btn_fill_bbox.clicked.connect(self.fill_bbox_cmd)
         self.window.btn_sam_box.clicked.connect(self.run_sam_box_prompt)
+        self.window.btn_clear_seg_mask.clicked.connect(self.clear_seg_mask_for_selected)
         self.window.btn_save_seg.clicked.connect(self.save_seg_map)
         self.window.btn_propagate_mask.clicked.connect(self.propagate_vein_mask)
 
@@ -736,6 +745,7 @@ class ToolController:
             QShortcut(QKeySequence("Escape"),     self.window, lambda: self._set_seg_mode('select')),
             QShortcut(QKeySequence("F"),          self.window, self.fill_bbox_cmd),
             QShortcut(QKeySequence("B"),          self.window, self.run_sam_box_prompt),
+            QShortcut(QKeySequence("Shift+E"),    self.window, self.clear_seg_mask_for_selected),
             QShortcut(QKeySequence("V"),          self.window, self.spawn_vessel),
             QShortcut(QKeySequence("C"),          self.window, self.spawn_capillary),
             QShortcut(QKeySequence("X"),          self.window, self._shortcut_toggle_force_paint),
@@ -1000,9 +1010,7 @@ class ToolController:
         self._ensure_seg_data()
 
         if start_pos is None:
-            cx, cy = self._get_visible_center()
-            w, h = self._last_size
-            start_pos = (cx - w / 2, cy - h / 2)
+            start_pos = self._next_default_spawn_pos(frame_idx)
 
         # --- Tracking: try to match a cell from the previous frame ---
         match = self._find_tracking_match(frame_idx, start_pos)
@@ -1162,6 +1170,45 @@ class ToolController:
             cx = max(0, min(cx, self.window.video_data.width - 1))
             cy = max(0, min(cy, self.window.video_data.height - 1))
         return cx, cy
+
+    _SPAWN_STEP = 18.0   # px offset between consecutive default-position spawns
+
+    def _next_default_spawn_pos(self, frame_idx):
+        """Pick a non-stacking default position for a new bbox on this frame.
+
+        Without staggering, repeated A presses all land at the visible
+        center -> bboxes overlap exactly and only the topmost is
+        clickable. Offset by ``_SPAWN_STEP`` from the most recent cell
+        on this frame; wrap into the visible viewport if it goes off
+        the right/bottom edge.
+        """
+        cx, cy = self._get_visible_center()
+        w, h = self._last_size
+        base = (cx - w / 2.0, cy - h / 2.0)
+
+        # Find the most recent cell on this frame to offset from.
+        siblings = [a for a in self.annotations
+                    if a.frame_idx == frame_idx and not a.is_paint_only]
+        if not siblings:
+            return base
+
+        last = siblings[-1]
+        lx, ly = last.roi.pos()
+        px = float(lx) + self._SPAWN_STEP
+        py = float(ly) + self._SPAWN_STEP
+
+        vb = self.window.view_frame.getView()
+        (x_lo, x_hi), (y_lo, y_hi) = vb.viewRange()
+        if px + w > x_hi or py + h > y_hi:
+            # Wrap back into the viewport.
+            px, py = x_lo + self._SPAWN_STEP, y_lo + self._SPAWN_STEP
+
+        if self.window.video_data:
+            W = self.window.video_data.width
+            H = self.window.video_data.height
+            px = max(0, min(px, W - w))
+            py = max(0, min(py, H - h))
+        return (px, py)
 
     # ------------------------------------------------------------------
     # TRACKING — match new annotation to previous frame
@@ -2459,6 +2506,70 @@ class ToolController:
             text = f"model: {self.sam_service.model_type} · {ckpt} · {badge}"
         self.window.lbl_sam_status.setText(text)
 
+    def clear_seg_mask_for_selected(self):
+        """Wipe the selected cell's painted pixels on the current frame.
+
+        Leaves all other annotations' pixels untouched. Bbox geometry
+        is preserved. Pushed onto the undo stack so Cmd+Z restores the
+        prior mask.
+        """
+        anno = self.active_annotation
+        if anno is None or anno not in self.annotations:
+            QMessageBox.information(
+                self.window, "Clear Mask",
+                "Select a cell first. Clear Mask wipes the painted pixels "
+                "of the selected annotation on the current frame only.")
+            return
+        if anno.instance_id is None:
+            QMessageBox.information(
+                self.window, "Clear Mask",
+                "Selected annotation has no segmentation instance.")
+            return
+        if anno.is_locked:
+            QMessageBox.information(
+                self.window, "Clear Mask",
+                f"'{anno.name}' is locked. Unlock it (U) first.")
+            return
+        seg = self.window.seg_data
+        if seg is None:
+            self.window.lbl_sam_status.setText("Clear Mask: no segmentation data.")
+            return
+
+        fi = anno.frame_idx
+        if fi != self.window._current_frame_idx:
+            # Navigate to the cell's frame so the result is visible.
+            self.window.slider_timeline.setValue(fi)
+
+        before_frame = seg.masks[fi].copy()
+        before_geom = ToolController._snap_geometry(anno)
+
+        match = (seg.masks[fi] == anno.instance_id)
+        n_cleared = int(match.sum())
+        if n_cleared == 0:
+            self.window.lbl_sam_status.setText(
+                f"'{anno.name}' has no painted pixels on frame {fi} — "
+                f"nothing to clear.")
+            return
+
+        seg.masks[fi][match] = 0
+        after_frame = seg.masks[fi].copy()
+        self._undo_stack.push(
+            SamBoxPromptCmd(self, fi, int(anno.instance_id),
+                            before_frame, after_frame,
+                            before_geom=before_geom,
+                            after_geom=before_geom))  # bbox unchanged
+
+        anno.update_visuals()
+        if fi == self.window._current_frame_idx:
+            self.window._update_seg_overlay()
+            self._show_frame_annotations(fi)
+        self.state.annotations_changed.emit()
+        self.window.lbl_sam_status.setText(
+            f"Cleared {n_cleared} px from {anno.name} on frame {fi} · "
+            f"Cmd+Z to undo")
+        log('controller.sam', 'clear seg mask',
+            anno=anno.name, frame_idx=fi, pixels_cleared=n_cleared)
+
     def run_sam_box_prompt(self):
         """Run SAM with the selected cell's bbox as a prompt.
 
@@ -2582,31 +2693,52 @@ class ToolController:
                 "SAM Box returned an empty mask — nothing to paint.")
             return
 
-        # ---- Apply safely: only background or own-cell pixels --------
+        # ---- Apply safely: replace own pixels with SAM's new result ---
+        # Clearing the cell's existing pixels first means re-running SAM
+        # on the same bbox actually shows the new prediction (otherwise
+        # additive paint sees nothing new and the user sees no change).
+        # Other cells' pixels are NEVER touched.
         seg = self._ensure_seg_data()
         if seg is None:
             return
         fi = anno.frame_idx
         target_id = int(anno.instance_id)
         before_frame = seg.masks[fi].copy()
+        before_geom = ToolController._snap_geometry(anno)
 
         current = seg.masks[fi]
-        own_or_bg = (current == 0) | (current == target_id)
-        paint = mask & own_or_bg
+        # Step 1: wipe this cell's prior pixels on this frame so a fresh
+        # SAM run replaces them. (Pixels elsewhere on the stack are
+        # unaffected — this is per-frame.)
+        current[current == target_id] = 0
+        # Step 2: paint SAM's mask only where the seg is empty (other
+        # cells stay put).
+        background = (current == 0)
+        paint = mask & background
         n_painted = int(paint.sum())
         n_total_sam = int(mask.sum())
         n_blocked = n_total_sam - n_painted
 
         if n_painted == 0:
+            # Restore the wiped state — nothing to commit.
+            seg.masks[fi][:] = before_frame
             self.window.lbl_sam_status.setText(
                 "SAM Box: every predicted pixel was already taken by "
                 "another annotation — nothing painted.")
             return
 
         current[paint] = target_id
+
+        # Step 3: tighten the bbox to fit the painted mask so the user
+        # always sees an outline that matches what got segmented (the
+        # SAM mask sometimes exceeds the user's original bbox).
+        self._fit_bbox_to_seg(anno)
+        after_geom = ToolController._snap_geometry(anno)
+
         after_frame = seg.masks[fi].copy()
         self._undo_stack.push(
-            SamBoxPromptCmd(self, fi, target_id, before_frame, after_frame))
+            SamBoxPromptCmd(self, fi, target_id, before_frame, after_frame,
+                            before_geom=before_geom, after_geom=after_geom))
 
         anno.update_visuals()
         self._show_frame_annotations(self.window._current_frame_idx)
@@ -2615,7 +2747,7 @@ class ToolController:
         self.window.lbl_sam_status.setText(
             f"SAM Box -> {anno.name}: painted {n_painted} px"
             + (f" ({n_blocked} blocked by other cells)" if n_blocked else "")
-            + " · Cmd+Z to undo")
+            + " · bbox fit to mask · Cmd+Z to undo")
         log('controller.sam', 'box prompt: done',
             anno=anno.name, painted=n_painted, blocked_by_other=n_blocked)
 
