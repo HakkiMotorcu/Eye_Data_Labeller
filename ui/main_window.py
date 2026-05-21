@@ -249,6 +249,10 @@ class MainWindow(QMainWindow):
         self._seg_overlay.setZValue(10)  # above the frame image
         self.view_frame.getView().addItem(self._seg_overlay)
         self._seg_visible = True
+        # Default z-order for overlay compositing — bottom to top.
+        # Cells on top reads best for most workflows; the View panel's
+        # "Top: …" buttons reshuffle this at runtime.
+        self._seg_layer_order = ('vessel', 'capillary', 'cell')
 
         # --- Right: Scrollable Panels (draggable splitter on the left edge) ---
         scroll_area = QScrollArea()
@@ -1122,6 +1126,28 @@ class MainWindow(QMainWindow):
         self.btn_toggle_seg.setToolTip("Toggle segmentation overlay visibility (S)")
         seg_opacity_layout.addWidget(self.btn_toggle_seg)
         display_layout.addLayout(seg_opacity_layout)
+
+        # Seg overlay z-order picker — choose which class layer renders
+        # on top when annotations from different classes overlap.
+        zorder_layout = QHBoxLayout()
+        zorder_layout.setSpacing(4)
+        zorder_layout.addWidget(QLabel("Top:"))
+        self.btn_zorder_cell      = QPushButton("Cell")
+        self.btn_zorder_vessel    = QPushButton("Vessel")
+        self.btn_zorder_capillary = QPushButton("Capillary")
+        for btn, _key in [
+            (self.btn_zorder_cell,      'cell'),
+            (self.btn_zorder_vessel,    'vessel'),
+            (self.btn_zorder_capillary, 'capillary'),
+        ]:
+            btn.setCheckable(True)
+            btn.setStyleSheet(
+                "QPushButton{padding:2px 6px;font-size:11px;}"
+                "QPushButton:checked{background:#3a5a8a;color:#fff;}")
+            btn.setToolTip("Which class layer renders on top when classes overlap")
+            zorder_layout.addWidget(btn)
+        self.btn_zorder_cell.setChecked(True)  # default: cell on top
+        display_layout.addLayout(zorder_layout)
 
         display_group.setLayout(display_layout)
 

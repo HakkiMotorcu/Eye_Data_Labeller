@@ -708,6 +708,16 @@ class ToolController:
             # available — bind the key explicitly via a default arg.
             btn.clicked.connect(
                 lambda _checked=False, k=key: self._on_filter_button_clicked(k))
+
+        # Seg-overlay z-order buttons (MC6): pick which class renders on top.
+        self._zorder_btn_map = {
+            self.window.btn_zorder_cell:      'cell',
+            self.window.btn_zorder_vessel:    'vessel',
+            self.window.btn_zorder_capillary: 'capillary',
+        }
+        for btn, key in self._zorder_btn_map.items():
+            btn.clicked.connect(
+                lambda _checked=False, k=key: self._on_zorder_button_clicked(k))
         # Apply the initial visual state (All → every button lit).
         self._apply_filter_visual()
         self.window.btn_lock.clicked.connect(self.lock_active)
@@ -1623,6 +1633,42 @@ class ToolController:
             'filter updated', after=sorted(self._list_filter))
         self._apply_filter_visual()
         self._show_frame_annotations(self.window._current_frame_idx)
+
+    # ------------------------------------------------------------------
+    # Seg overlay z-order (MC6)
+    # ------------------------------------------------------------------
+    # Default depth order (bottom to top, before any "lift to top" pick).
+    # Vessels are the largest/deepest structure, capillaries above,
+    # cells shallowest — so cell-on-top is the natural default.
+    _NATURAL_DEPTH = ('vessel', 'capillary', 'cell')
+
+    def _on_zorder_button_clicked(self, top):
+        """User picked a layer to render on top. The other two retain
+        their natural depth ordering beneath it."""
+        if top not in self._NATURAL_DEPTH:
+            return
+        bottom = [ct for ct in self._NATURAL_DEPTH if ct != top]
+        new_order = (*bottom, top)
+        if new_order == getattr(self.window, '_seg_layer_order', None):
+            # No change — still re-sync the visuals so an idle click on
+            # the already-selected button keeps it lit.
+            self._apply_zorder_visual()
+            return
+        self.window._seg_layer_order = new_order
+        log('controller.zorder', 'layer order changed',
+            order=list(new_order))
+        self._apply_zorder_visual()
+        self.window._update_seg_overlay()
+
+    def _apply_zorder_visual(self):
+        """Light up the button matching the current top layer; others off."""
+        order = getattr(self.window, '_seg_layer_order',
+                         self._NATURAL_DEPTH)
+        top = order[-1]
+        for btn, key in self._zorder_btn_map.items():
+            btn.blockSignals(True)
+            btn.setChecked(key == top)
+            btn.blockSignals(False)
 
     def _apply_filter_visual(self):
         """Sync filter-button checked states to the underlying set.
