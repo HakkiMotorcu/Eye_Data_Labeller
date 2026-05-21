@@ -374,19 +374,27 @@ class MainWindow(QMainWindow):
         brush_row.addWidget(self.lbl_brush_size)
         tools_layout.addLayout(brush_row)
 
-        # Seg-overlay opacity mirror — same slider that lives in the View
-        # panel, duplicated here so it's at hand while painting. The two
-        # are kept in sync (see ToolController._mirror_seg_opacity).
+        # Seg-overlay opacity + Hide Seg — full mirror of the row that
+        # lives in the View panel, duplicated here so it's at hand while
+        # painting. All four widgets are bidirectionally synced (see
+        # ToolController._on_seg_opacity_changed and _on_toggle_seg).
         seg_op_tools_row = QHBoxLayout()
         seg_op_tools_row.setSpacing(4)
-        seg_op_tools_row.addWidget(QLabel("Opacity"))
+        seg_op_tools_row.addWidget(QLabel("Seg opacity"))
         self.slider_seg_opacity_tools = QSlider(Qt.Orientation.Horizontal)
         self.slider_seg_opacity_tools.setRange(0, 100)
         self.slider_seg_opacity_tools.setValue(40)
         self.slider_seg_opacity_tools.setToolTip(
             "Segmentation overlay opacity (0–100). Mirror of the slider in "
-            "the View panel — moving either updates both.")
+            "the View panel.")
         seg_op_tools_row.addWidget(self.slider_seg_opacity_tools, stretch=1)
+        self.btn_toggle_seg_tools = QPushButton("Hide Seg")
+        self.btn_toggle_seg_tools.setCheckable(True)
+        self.btn_toggle_seg_tools.setChecked(True)
+        self.btn_toggle_seg_tools.setToolTip(
+            "Toggle segmentation overlay visibility (mirror of the View "
+            "panel toggle).")
+        seg_op_tools_row.addWidget(self.btn_toggle_seg_tools)
         tools_layout.addLayout(seg_op_tools_row)
 
         # Action buttons
@@ -1585,7 +1593,8 @@ class MainWindow(QMainWindow):
             'btn_export_veins':  'fa6s.file-export',
             'btn_export_all':    'fa6s.file-export',
             'btn_auto_levels':   'fa6s.gauge-high',
-            'btn_toggle_seg':    'fa6s.eye',
+            'btn_toggle_seg':       'fa6s.eye',
+            'btn_toggle_seg_tools': 'fa6s.eye',
             'btn_frame_first':   'fa6s.backward-fast',
             'btn_frame_prev':    'fa6s.backward-step',
             'btn_frame_next':    'fa6s.forward-step',

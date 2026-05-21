@@ -691,6 +691,7 @@ class ToolController:
         self.window.slider_seg_opacity_tools.valueChanged.connect(
             self._on_seg_opacity_tools_changed)
         self.window.btn_toggle_seg.clicked.connect(self._on_toggle_seg)
+        self.window.btn_toggle_seg_tools.clicked.connect(self._on_toggle_seg)
         # Seg editing connections
         self.window._seg_mode_group.idClicked.connect(self._on_seg_mode_changed)
         self.window.slider_brush_size.valueChanged.connect(self._on_brush_size_changed)
@@ -3082,7 +3083,16 @@ class ToolController:
     def _on_toggle_seg(self):
         vis = not self.window._seg_visible
         self.window.set_seg_visible(vis)
-        self.window.btn_toggle_seg.setText("Hide Seg" if vis else "Show Seg")
+        text = "Hide Seg" if vis else "Show Seg"
+        # Update both mirrors; the click handler that triggered this is
+        # responsible for one button's checked state — block the other's
+        # signals so we don't bounce back.
+        for btn in (self.window.btn_toggle_seg,
+                    self.window.btn_toggle_seg_tools):
+            btn.blockSignals(True)
+            btn.setChecked(vis)
+            btn.setText(text)
+            btn.blockSignals(False)
 
     # ------------------------------------------------------------------
     # EXPORT / IMPORT
