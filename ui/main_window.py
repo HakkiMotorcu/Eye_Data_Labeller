@@ -467,7 +467,7 @@ class MainWindow(QMainWindow):
         emb_row.addWidget(self.btn_sam_precompute)
         sam_layout.addLayout(emb_row)
 
-        # Scope selector — current frame vs whole stack
+        # Scope selector + duplicate guard
         scope_row = QHBoxLayout()
         scope_row.setSpacing(4)
         self.chk_sam_all_frames = QCheckBox("All frames")
@@ -475,7 +475,17 @@ class MainWindow(QMainWindow):
             "Off (default): Auto-segment runs on the current frame only.\n"
             "On: loop over every frame in the stack — the status line shows\n"
             "progress; UI may freeze briefly between frames (no async yet).")
+        self.chk_sam_avoid_dupes = QCheckBox("Avoid duplicates")
+        self.chk_sam_avoid_dupes.setChecked(True)
+        self.chk_sam_avoid_dupes.setToolTip(
+            "On (default): if a SAM detection overlaps an existing annotation\n"
+            "by IoU > 0.30 on the same frame, ABSORB it (paint SAM's pixels\n"
+            "into the existing instance_id, keep the existing bbox shape) or\n"
+            "DROP it (when the existing annotation already has painted pixels).\n"
+            "Off: every SAM detection becomes a new annotation — may duplicate\n"
+            "manually-labeled cells.")
         scope_row.addWidget(self.chk_sam_all_frames)
+        scope_row.addWidget(self.chk_sam_avoid_dupes)
         scope_row.addStretch(1)
         sam_layout.addLayout(scope_row)
 

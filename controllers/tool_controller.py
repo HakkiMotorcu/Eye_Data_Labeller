@@ -2237,6 +2237,83 @@ class ToolController:
             self.window, "SAM Auto-segment Complete",
             f"Created {total_created} annotation(s) across {scope_text}.")
 
+    # ---- Duplicate-prevention helpers (used by SAM auto-segment) ----
+    _DUPLICATE_IOU_THRESHOLD = 0.30
+
+    def _existing_mask_for(self, anno, frame_shape):
+        """Return a boolean (H, W) mask representing an existing annotation
+        on its frame.
+
+        For annotations whose seg pixels are painted, that's the actual
+        mask. For bbox-only annotations (manual cells with no painting),
+        synthesize a bbox-shaped mask so we can still compute IoU with
+        a SAM detection.
+        """
+        seg = self.window.seg_data
+        if seg is None or anno.instance_id is None:
+            return None
+        painted = (seg.masks[anno.frame_idx] == anno.instance_id)
+        if painted.any():
+            return painted, True  # (mask, has_painted_pixels)
+        # Synthesize from bbox.
+        try:
+            x, y = anno.roi.pos()
+            w, h = anno.roi.size()
+        except Exception:
+            return None
+        H, W = frame_shape
+        x0, y0 = max(0, int(x)), max(0, int(y))
+        x1, y1 = min(W, int(x + w)), min(H, int(y + h))
+        if x1 <= x0 or y1 <= y0:
+            return None
+        m = np.zeros((H, W), dtype=bool)
+        m[y0:y1, x0:x1] = True
+        return m, False
+
+    def _classify_sam_detection(self, sam_mask, frame_idx,
+                                threshold=_DUPLICATE_IOU_THRESHOLD):
+        """Decide what to do with one SAM-detected mask.
+
+        Returns:
+          ('new',    None)     - allocate a fresh instance + Annotation2D
+          ('absorb', existing) - paint SAM pixels into existing's id (no new
+                                 annotation); existing's bbox is kept as-is
+                                 per the locked design choice
+          ('drop',   existing) - silently drop (user already labeled this
+                                 region with painted pixels)
+        """
+        if sam_mask.sum() == 0:
+            return ('drop', None)
+
+        best_iou = 0.0
+        best_anno = None
+        best_has_pixels = False
+        H, W = sam_mask.shape
+
+        for anno in self.annotations:
+            if anno.frame_idx != frame_idx or anno.instance_id is None:
+                continue
+            res = self._existing_mask_for(anno, (H, W))
+            if res is None:
+                continue
+            existing_mask, has_pixels = res
+            # Quick reject: if bboxes don't overlap, skip the IoU calc.
+            inter = int((sam_mask & existing_mask).sum())
+            if inter == 0:
+                continue
+            union = int((sam_mask | existing_mask).sum())
+            iou = inter / max(1, union)
+            if iou > best_iou:
+                best_iou = iou
+                best_anno = anno
+                best_has_pixels = has_pixels
+
+        if best_iou < threshold:
+            return ('new', None)
+        if best_has_pixels:
+            return ('drop', best_anno)
+        return ('absorb', best_anno)
+
     def _run_sam_on_frame(self, frame_idx):
         """Run SAM auto-segment on a single frame, additively. Returns the
         number of new Annotation2D objects created.
@@ -2264,37 +2341,61 @@ class ToolController:
         if seg is None:
             return 0
 
-        # Remap SAM's local IDs to fresh IDs from the seg layer's allocator
-        # so they don't collide with existing instances (manual or SAM).
-        id_map = {}
+        dedupe = self.window.chk_sam_avoid_dupes.isChecked()
+        H, W = sam_seg.shape
+
+        n_created = 0
+        n_absorbed = 0
+        n_dropped = 0
+        is_current = (frame_idx == self.window._current_frame_idx)
+
         for sid in sam_ids:
+            sam_mask = (sam_seg == sid)
+
+            if dedupe:
+                decision, existing = self._classify_sam_detection(sam_mask, frame_idx)
+            else:
+                decision, existing = ('new', None)
+
+            if decision == 'drop':
+                n_dropped += 1
+                log('controller.sam', 'dropped duplicate',
+                    frame_idx=frame_idx, sam_local_id=int(sid),
+                    matched_anno=existing.name if existing else None)
+                continue
+
+            if decision == 'absorb':
+                # Paint SAM pixels into the existing annotation's seg slot.
+                # Bbox is left unchanged per the locked design choice
+                # ("trust expert labelers' bbox shape").
+                seg.masks[frame_idx][sam_mask & (seg.masks[frame_idx] == 0)] = existing.instance_id
+                n_absorbed += 1
+                log('controller.sam', 'absorbed into bbox-only annotation',
+                    frame_idx=frame_idx, sam_local_id=int(sid),
+                    target=existing.name, instance_id=existing.instance_id)
+                # Refresh the existing annotation's visuals so the new
+                # painted pixels show up in the overlay.
+                if is_current:
+                    existing.update_visuals()
+                continue
+
+            # decision == 'new'
             new_id = seg.next_instance_id()
             seg.register_instance_color(new_id)
-            id_map[int(sid)] = new_id
+            # Only paint where background is empty (manual labels are
+            # already protected, but other just-created SAM cells may
+            # have grabbed adjacent pixels in this loop iteration).
+            background = (seg.masks[frame_idx] == 0)
+            seg.masks[frame_idx][sam_mask & background] = new_id
 
-        # Compose: keep existing non-zero pixels (manual labels survive),
-        # fill SAM masks only on background pixels.
-        existing = seg.masks[frame_idx]
-        new_layer = np.zeros_like(existing)
-        for sid, new_id in id_map.items():
-            new_layer[sam_seg == sid] = new_id
-        background = (existing == 0)
-        seg.masks[frame_idx] = np.where(background, new_layer, existing)
-
-        # Build one Annotation2D per surviving SAM instance.
-        n_created = 0
-        is_current = (frame_idx == self.window._current_frame_idx)
-        for sid, new_id in id_map.items():
             mask_pixels = (seg.masks[frame_idx] == new_id)
             if not mask_pixels.any():
-                # The whole instance was overlapped by a manual label —
-                # drop it cleanly (free the reserved color slot).
                 seg.instance_colors.pop(new_id, None)
                 continue
             ys, xs = np.where(mask_pixels)
             x0, y0 = int(xs.min()), int(ys.min())
             x1, y1 = int(xs.max()), int(ys.max())
-            w, h = x1 - x0 + 1, y1 - y0 + 1
+            bw, bh = x1 - x0 + 1, y1 - y0 + 1
 
             n, name = self._next_available_name('Cell')
             self.anno_counter = max(self.anno_counter, n)
@@ -2303,7 +2404,7 @@ class ToolController:
             anno = Annotation2D(
                 name, self.window.view_frame, self,
                 start_pos=(x0, y0),
-                start_size=(w, h),
+                start_size=(bw, bh),
                 shape_mode='rect',
                 frame_idx=frame_idx,
                 instance_id=new_id,
@@ -2320,7 +2421,8 @@ class ToolController:
             self.window._update_seg_overlay()
         self.state.annotations_changed.emit()
         log('controller.sam', 'frame done',
-            frame_idx=frame_idx, n_created=n_created)
+            frame_idx=frame_idx, n_created=n_created,
+            n_absorbed=n_absorbed, n_dropped=n_dropped)
         return n_created
 
     def _on_seg_opacity_changed(self, _value):
