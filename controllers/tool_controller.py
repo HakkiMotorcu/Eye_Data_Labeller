@@ -752,6 +752,7 @@ class ToolController:
         self.window.btn_delete.clicked.connect(self.delete_selected)
         self.window.btn_rename.clicked.connect(self._start_rename)
         self.window.btn_fit_bbox.clicked.connect(self._manual_fit_bbox)
+        self.window.btn_fix_names.clicked.connect(self._fix_names_clicked)
         self.window.list_annotations.itemChanged.connect(self._on_list_item_edited)
         self.window.list_annotations.itemClicked.connect(self._on_list_item_clicked)
         # Class filter buttons (B): All / Cells / Vessels / Capillaries.
@@ -1144,6 +1145,84 @@ class ToolController:
         self.window.seg_data = SegmentationData.empty(vd.width, vd.height, vd.num_frames)
         self.window._seg_visible = True
         return self.window.seg_data
+
+    # Class → name prefix used by the gap-fill namer and the normalizer.
+    _CLASS_PREFIX = {'cell': 'Cell', 'vessel': 'Vessel', 'capillary': 'Capillary'}
+
+    def _fix_names_clicked(self):
+        """User clicked Fix names — normalize then re-render the list."""
+        renamed, recolored = self._normalize_anno_names_and_colors()
+        self._show_frame_annotations(self.window._current_frame_idx)
+        self.window._update_seg_overlay()
+        QMessageBox.information(
+            self.window, "Fix Names",
+            f"Renamed {renamed} annotation(s); recolored {recolored}."
+            if (renamed or recolored)
+            else "Every annotation already matches its class — no changes.")
+
+    def _normalize_anno_names_and_colors(self):
+        """Force every annotation's name and color into agreement with
+        its class_type.
+
+        Repairs stale state from before the per-class instance-ID
+        namespace fix: an annotation whose name starts with the wrong
+        class prefix is renamed to ``{Class}_{iid}``, and its color is
+        re-registered (or pulled) from the matching per-class palette.
+
+        Safe to call repeatedly — it's idempotent on a well-formed
+        session.
+        """
+        seg = self.window.seg_data
+        renamed = recolored = 0
+        for anno in self.annotations:
+            ct = getattr(anno, 'class_type', 'cell')
+            prefix = self._CLASS_PREFIX.get(ct, 'Cell')
+            iid = getattr(anno, 'instance_id', None)
+
+            # --- Name ---
+            current = anno.name or ''
+            head = current.split('_', 1)[0]
+            if head not in self._CLASS_PREFIX.values() or head != prefix:
+                # Wrong prefix (or none) → coerce to {Class}_{iid}, falling
+                # back to a gap-filled number when iid is None.
+                if iid is not None:
+                    new_name = f"{prefix}_{int(iid)}"
+                else:
+                    _, new_name = self._next_available_name(prefix)
+                if new_name != current:
+                    anno.name = new_name
+                    renamed += 1
+
+            # --- Color ---
+            if seg is not None and iid is not None:
+                colors = seg.get_colors(ct)
+                fresh = seg.register_instance_color(int(iid), class_type=ct)
+                if anno.color != fresh:
+                    anno.color = fresh
+                    recolored += 1
+                # Make sure no leftover color is registered for this iid in
+                # the *other* classes' palettes (cleanup from the old
+                # shared-namespace state).
+                for other in self._CLASS_PREFIX:
+                    if other == ct:
+                        continue
+                    other_colors = seg.get_colors(other)
+                    if int(iid) in other_colors:
+                        # Only pop when the *other* class has no annotation
+                        # owning this iid — otherwise we'd recolor a real
+                        # annotation by surprise.
+                        owned = any(
+                            a.class_type == other and a.instance_id == iid
+                            for a in self.annotations
+                        )
+                        if not owned:
+                            other_colors.pop(int(iid), None)
+
+        if renamed or recolored:
+            log('controller.normalize',
+                'fixed stale state',
+                renamed=renamed, recolored=recolored)
+        return renamed, recolored
 
     def _next_available_name(self, prefix):
         """Lowest unused integer suffix for ``{prefix}_{n}``.
@@ -2684,6 +2763,12 @@ class ToolController:
                 if 'notes' in rec:
                     anno.notes = rec['notes']
 
+        # Repair any stale name/color mismatches against class_type. Old
+        # save files predate the per-class instance-ID namespace, so an
+        # iid=4 capillary may currently carry a "Cell_4" name and a
+        # cell-palette color — fix in place.
+        self._normalize_anno_names_and_colors()
+
         # Show annotations for the current frame
         cur = self.window._current_frame_idx
         self._show_frame_annotations(cur)
@@ -4116,6 +4201,9 @@ class ToolController:
 
         for rec in records:
             self._create_annotation_from_record(rec)
+
+        # Repair stale name/color mismatches imported from older formats.
+        self._normalize_anno_names_and_colors()
 
         # Show only annotations for the current frame
         self._show_frame_annotations(self.window._current_frame_idx)

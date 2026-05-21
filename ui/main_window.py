@@ -368,6 +368,19 @@ class MainWindow(QMainWindow):
         actions_row.addWidget(self.btn_fit_bbox)
         list_layout.addLayout(actions_row)
 
+        # Row 3: maintenance — Normalize names/colors to class_type.
+        # Mostly a rescue button for sessions that started under the
+        # old shared-namespace code (vessels named "Cell_4", etc).
+        fix_row = QHBoxLayout()
+        fix_row.setSpacing(4)
+        self.btn_fix_names = QPushButton("Fix names && colors")
+        self.btn_fix_names.setToolTip(
+            "Force every annotation's name and color into agreement with\n"
+            "its class (Cell_N / Vessel_N / Capillary_N). Useful after\n"
+            "loading an older session.")
+        fix_row.addWidget(self.btn_fix_names)
+        list_layout.addLayout(fix_row)
+
         list_group.setLayout(list_layout)
 
         # 3. Tools
