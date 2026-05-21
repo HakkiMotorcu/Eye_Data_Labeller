@@ -6,12 +6,12 @@ Two roles, one schema:
   ``{video}_drafts.json``   — pending bbox prompts not yet committed to masks
                               (reserved for the SAM-prompt UX in Phase 4)
 
-Schema (meta):
+Schema (meta) v2:
 
     {
-      "version": 1,
+      "version": 2,
       "instances": {
-        "<instance_id>": {
+        "<class_type>:<instance_id>": {
           "name": str,
           "class_type": "cell" | "vessel" | "capillary",
           "locked": bool,
@@ -21,6 +21,13 @@ Schema (meta):
       }
     }
 
+v1 used ``"<instance_id>"`` alone as the key — fine while everything
+shared a single instance namespace, but after the multi-class refactor
+vessel iid=4 and capillary iid=4 collide on the same key and one wins.
+v2 keys by ``"<class_type>:<instance_id>"``. The loader accepts both
+formats: v1 entries fall back to the inline ``class_type`` field (or
+``"cell"`` when missing) so older Meta.json files migrate cleanly.
+
 Loading is lenient — unknown keys are ignored; missing fields fall back
 to defaults. Saving writes a deterministic, sorted JSON for diff-ability.
 """
@@ -28,7 +35,11 @@ to defaults. Saving writes a deterministic, sorted JSON for diff-ability.
 import json
 import os
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# Composite key helpers — keep call-site code readable.
+def _meta_key(class_type, iid):
+    return f"{class_type}:{int(iid)}"
 
 
 def meta_path_for(image_path):
@@ -42,12 +53,13 @@ def drafts_path_for(image_path):
 
 
 def collect_meta_from_annotations(annotations):
-    """Build the meta dict keyed by instance_id from a list of Annotation2D.
+    """Build the meta dict keyed by (class_type, instance_id) from a list
+    of Annotation2D.
 
-    When the same instance_id appears on multiple frames (one identity,
-    many frames), the metadata from the LOCKED instance wins; otherwise
-    the first occurrence wins. Annotations with no instance_id are
-    skipped (they're drafts, not committed instances).
+    When the same (class_type, instance_id) appears on multiple frames
+    (one identity, many frames), the metadata from the LOCKED instance
+    wins; otherwise the first occurrence wins. Annotations with no
+    instance_id are skipped (they're drafts).
     """
     by_id = {}
     locked_winners = set()
@@ -55,10 +67,11 @@ def collect_meta_from_annotations(annotations):
         iid = getattr(anno, 'instance_id', None)
         if iid is None:
             continue
-        key = str(int(iid))
+        ct = getattr(anno, 'class_type', 'cell')
+        key = _meta_key(ct, iid)
         record = {
             "name": anno.name,
-            "class_type": anno.class_type,
+            "class_type": ct,
             "locked": bool(anno.is_locked),
             "notes": getattr(anno, 'notes', '') or '',
         }
@@ -70,6 +83,33 @@ def collect_meta_from_annotations(annotations):
         if anno.is_locked:
             locked_winners.add(key)
     return {"version": SCHEMA_VERSION, "instances": by_id}
+
+
+def meta_lookup(meta, class_type, instance_id):
+    """Look up a meta record by (class_type, instance_id), tolerating
+    both v2 (`"cell:4"`) and v1 (`"4"`) key shapes.
+
+    v1 records had no per-class scoping. We treat them as belonging to
+    whichever class they list inline (defaulting to 'cell'), so an old
+    record that was already tagged class_type='vessel' applies to the
+    vessel layer's iid=4, not the cell layer's.
+    """
+    if meta is None:
+        return None
+    instances = meta.get('instances', {}) if isinstance(meta, dict) else {}
+    key = _meta_key(class_type, instance_id)
+    rec = instances.get(key)
+    if rec is not None:
+        return rec
+    # v1 fallback: try the bare iid key, but only return it if the
+    # record's inline class_type matches what the caller asked for.
+    legacy = instances.get(str(int(instance_id)))
+    if legacy is None:
+        return None
+    legacy_ct = legacy.get('class_type', 'cell')
+    if legacy_ct == 'vein':
+        legacy_ct = 'vessel'
+    return legacy if legacy_ct == class_type else None
 
 
 def save_meta(meta, path):

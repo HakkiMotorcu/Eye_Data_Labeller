@@ -2658,19 +2658,21 @@ class ToolController:
 
         # Apply per-instance metadata from the meta sidecar (if present)
         # so names, class_type, and locked state survive a save/load cycle.
+        # The lookup is class-aware so vessels and capillaries with the
+        # same iid never adopt each other's records.
         from core import sidecar
         meta = sidecar.load_meta(sidecar.meta_path_for(path))
         if meta is not None:
-            instances = meta.get('instances', {})
             for anno in self.annotations:
                 if anno.instance_id is None:
                     continue
-                rec = instances.get(str(int(anno.instance_id)))
+                rec = sidecar.meta_lookup(
+                    meta, anno.class_type, int(anno.instance_id))
                 if not rec:
                     continue
                 # Annotation2D normalizes 'vein' -> 'vessel' in __init__,
                 # but here we have an already-constructed object.
-                ct = rec.get('class_type', 'cell')
+                ct = rec.get('class_type', anno.class_type)
                 if ct == 'vein':
                     ct = 'vessel'
                 if ct in ('cell', 'vessel', 'capillary'):
