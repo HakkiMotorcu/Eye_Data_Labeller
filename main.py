@@ -133,6 +133,9 @@ def main():
     window._controller = controller
     window._current_file = file_path
     window._update_title()
+    # Kick off background precompute of the current frame's SAM embedding
+    # so the first SAM Box click is fast.
+    controller.on_image_loaded()
 
     app.aboutToQuit.connect(controller.cleanup_autosave)
 

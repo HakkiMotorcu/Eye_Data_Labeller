@@ -9,7 +9,10 @@ from PyQt6.QtGui import QColor, QFont, QShortcut, QKeySequence
 
 from core.app_state import AppState
 
-from core.sam_service import SamService, SAM_AVAILABLE, default_sam_hela_path
+from core.sam_service import (
+    SamService, SAM_AVAILABLE, default_sam_hela_path,
+    EmbeddingPrecomputeWorker,
+)
 from core.tracker_service import (
     TRACKERS, make_tracker, get_default_tracker_name, SettingSpec,
 )
@@ -647,6 +650,9 @@ class ToolController:
             model_type='vit_b', checkpoint_path=default_sam_hela_path())
         # Tracker service — default Trackastra via micro-sam.
         self.tracker_service = make_tracker(get_default_tracker_name())
+        # Embedding precompute worker (only one alive at a time — SAM
+        # predictor isn't thread-safe).
+        self._embed_worker = None
 
         # --- Button connections ---
         self.window.btn_add.clicked.connect(self.spawn_new_annotation)
@@ -670,6 +676,10 @@ class ToolController:
         self.window.btn_load_seg.clicked.connect(self.load_segmentation)
         self.window.btn_run_sam.clicked.connect(self.run_sam_segmentation)
         self.window.combo_sam_model.currentIndexChanged.connect(self._on_sam_model_changed)
+        self.window.btn_sam_precompute.clicked.connect(self.precompute_all_frames)
+        self.window.btn_sam_precompute.setEnabled(SamService.available())
+        # Auto-precompute current frame whenever the timeline moves.
+        self.state.frame_changed.connect(self._on_frame_changed_embed)
         self._refresh_sam_status()
 
         # SAM auto-link enable mirrors the All-frames toggle (single-
@@ -2268,6 +2278,8 @@ class ToolController:
     ]
 
     def _on_sam_model_changed(self, idx):
+        # Stop any in-flight embed worker — the new service has its own cache.
+        self._stop_embed_worker(timeout_ms=5000)
         model_type, hint = self._SAM_MODEL_CHOICES[
             idx if 0 <= idx < len(self._SAM_MODEL_CHOICES) else 0]
         if hint == 'sam_hela':
@@ -2276,6 +2288,140 @@ class ToolController:
             ckpt = None
         self.sam_service = SamService(model_type=model_type, checkpoint_path=ckpt)
         self._refresh_sam_status()
+        # If we have an image loaded, kick off precompute for the current
+        # frame with the new model (the previous model's embeddings are
+        # in a different cache dir so this is fresh work).
+        self.on_image_loaded()
+
+    # ------------------------------------------------------------------
+    # Embedding precompute (Phase 1a) — async background worker
+    # ------------------------------------------------------------------
+    def _stop_embed_worker(self, timeout_ms=3000):
+        """Politely stop any running embed worker and wait for it.
+
+        Used before any main-thread SAM call (predictor isn't thread-safe)
+        and before starting a new worker (only one alive at a time).
+        """
+        w = self._embed_worker
+        if w is None:
+            return
+        if not w.isRunning():
+            self._embed_worker = None
+            return
+        w.request_stop()
+        if not w.wait(timeout_ms):
+            log_error('controller.sam',
+                      'embed worker did not stop — forcing terminate')
+            w.terminate()
+            w.wait(500)
+        self._embed_worker = None
+
+    def _frames_to_compute(self, frame_indices):
+        """Skip frames whose embedding is already cached."""
+        img = self.window._current_file
+        if img is None:
+            return []
+        out = []
+        for fi in frame_indices:
+            if not self.sam_service.has_cached_embedding(img, fi):
+                out.append((int(fi), self.window.video_data.get_frame(int(fi))))
+        return out
+
+    def _start_embed_worker(self, frame_indices, *, label=""):
+        if not SamService.available():
+            return
+        if self.window.video_data is None or self.window._current_file is None:
+            return
+        frames = self._frames_to_compute(frame_indices)
+        if not frames:
+            return  # everything already cached
+        self._stop_embed_worker(timeout_ms=5000)
+        self._embed_worker = EmbeddingPrecomputeWorker(
+            self.sam_service, self.window._current_file, frames,
+            parent=self.window)
+        self._embed_worker.progress.connect(self._on_embed_progress)
+        self._embed_worker.frame_done.connect(self._on_embed_frame_done)
+        self._embed_worker.error.connect(self._on_embed_error)
+        self._embed_worker.finished_ok.connect(self._on_embed_finished_ok)
+        self._embed_label = label or f"frame {frames[0][0]}"
+        self._embed_total = len(frames)
+        self.window.lbl_sam_status.setText(
+            f"Precomputing {self._embed_label} (0/{self._embed_total})…")
+        self.window.btn_sam_precompute.setEnabled(False)
+        self._embed_worker.start()
+        log('controller.sam', 'embed worker started',
+            n_frames=len(frames), label=self._embed_label)
+
+    def _on_embed_progress(self, done, total):
+        self.window.lbl_sam_status.setText(
+            f"Precomputing {self._embed_label} ({done}/{total})…")
+
+    def _on_embed_frame_done(self, frame_idx):
+        log('controller.sam', 'frame embedding cached', frame_idx=frame_idx)
+
+    def _on_embed_error(self, msg):
+        log_error('controller.sam', f'embed worker error: {msg}')
+        self.window.lbl_sam_status.setText(f"Embedding error: {msg}")
+        self.window.btn_sam_precompute.setEnabled(True)
+
+    def _on_embed_finished_ok(self):
+        self.window.lbl_sam_status.setText(
+            f"Embeddings ready · {self._embed_total} frame(s) cached.")
+        self.window.btn_sam_precompute.setEnabled(True)
+        self._refresh_sam_status_brief()
+
+    def _refresh_sam_status_brief(self):
+        """Restore the standard 'model: …' status after a short delay so
+        the success message stays visible briefly."""
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(2500, self._refresh_sam_status)
+
+    def on_image_loaded(self):
+        """Called by main.py and the model selector when a fresh image
+        is in play. Auto-precomputes the current frame so the first SAM
+        Box click is instant."""
+        if not SamService.available() or self.window.video_data is None:
+            return
+        if self.window._current_file is None:
+            return
+        fi = self.window._current_frame_idx
+        self._start_embed_worker([fi], label=f"frame {fi}")
+
+    def _on_frame_changed_embed(self, frame_idx):
+        """Hook on state.frame_changed — precompute the new frame in the
+        background (skipped if already cached)."""
+        if not SamService.available() or self.window.video_data is None:
+            return
+        if self.window._current_file is None:
+            return
+        if self.sam_service.has_cached_embedding(
+                self.window._current_file, frame_idx):
+            return
+        self._start_embed_worker([frame_idx], label=f"frame {frame_idx}")
+
+    def precompute_all_frames(self):
+        """Triggered by the 'Precompute embeddings' button.
+
+        Walks every frame in the stack (skipping cached ones), encoding
+        each in the background. Status line shows progress; the button
+        re-enables when done.
+        """
+        if not SamService.available():
+            QMessageBox.critical(self.window, "Error", "MicroSAM is not installed.")
+            return
+        if self.window.video_data is None:
+            return
+        n = self.window.video_data.num_frames
+        # Warn on very large stacks since each is ~4 MB on disk.
+        if n > 200:
+            reply = QMessageBox.question(
+                self.window, "Precompute all frames",
+                f"This will encode {n} frames (~{n * 4} MB on disk and "
+                f"roughly {n * 2}s of compute on MPS). Continue?")
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        self._start_embed_worker(
+            list(range(n)), label=f"all {n} frames")
 
     # ------------------------------------------------------------------
     # Tracking panel helpers
@@ -2679,14 +2825,22 @@ class ToolController:
             return
 
         # ---- Run SAM with the bbox prompt -----------------------------
+        # Predictor isn't thread-safe; wait for any background precompute
+        # to finish before we use it in the main thread.
+        self._stop_embed_worker(timeout_ms=5000)
         frame = self.window.video_data.get_frame(anno.frame_idx)
         multimask = self.window.chk_sam_box_multimask.isChecked()
         log('controller.sam', 'box prompt: running',
             anno=anno.name, instance_id=anno.instance_id, box=box,
             multimask=multimask)
         try:
+            # Pass image_path + frame_idx so the embedding cache kicks in;
+            # subsequent prompts on the same frame are essentially free.
             mask = self.sam_service.segment_from_box(
-                frame, box, multimask_output=multimask)
+                frame, box,
+                image_path=self.window._current_file,
+                frame_idx=anno.frame_idx,
+                multimask_output=multimask)
         except Exception as e:
             log_error('controller.sam', 'box prompt: segment_from_box raised', exc=e)
             QMessageBox.critical(

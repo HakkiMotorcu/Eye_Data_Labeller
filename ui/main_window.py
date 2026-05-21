@@ -497,13 +497,15 @@ class MainWindow(QMainWindow):
         # Embedding precompute — wires up in Phase 4.2
         emb_row = QHBoxLayout()
         emb_row.setSpacing(4)
-        self.btn_sam_precompute = QPushButton("Precompute embeddings")
+        self.btn_sam_precompute = QPushButton("Precompute embeddings (all frames)")
         self.btn_sam_precompute.setToolTip(
-            "Pre-encode every frame so subsequent prompts are interactive.\n"
-            "First time may take 1–2 s/frame on CPU, ~0.1 s on GPU.\n"
-            "Result cached to {video}_sam_embeddings.zarr next to the image.\n"
-            "(Wires up in Phase 4.2 — currently a placeholder.)")
-        self.btn_sam_precompute.setEnabled(False)  # enabled when 4.2 lands
+            "Pre-encode every frame so subsequent box prompts are\n"
+            "interactive (~50 ms instead of ~2 s per click).\n"
+            "Cached in RAM (LRU 16 frames) + on disk\n"
+            "(~/.cache/eye_labeller/sam_embeddings/, per-image and\n"
+            "per-model). The current frame is auto-precomputed in the\n"
+            "background whenever you change frames — this button just\n"
+            "warms up the whole stack at once.")
         emb_row.addWidget(self.btn_sam_precompute)
         sam_layout.addLayout(emb_row)
 
