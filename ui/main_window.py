@@ -1,10 +1,47 @@
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QLabel, QComboBox, QGroupBox, QListWidget,
+                             QTreeWidget, QTreeWidgetItem, QHeaderView,
                              QFileDialog, QMessageBox, QSlider, QScrollArea,
                              QSizePolicy, QSpinBox, QButtonGroup, QSplitter,
                              QCheckBox, QFrame, QFormLayout, QDoubleSpinBox)
 from PyQt6.QtCore import Qt, QSize, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QPixmap, QPainter, QIcon
+
+
+_SWATCH_CACHE = {}
+
+def make_swatch_icon(color, size=12):
+    """Return a small filled-square QIcon for the annotation color column.
+
+    color is a (r, g, b) tuple, a QColor, or None (returns an empty pixmap).
+    Icons are cached so the same color is only painted once.
+    """
+    if color is None:
+        key = ('none', size)
+    elif isinstance(color, QColor):
+        key = (color.rgba(), size)
+    else:
+        key = (tuple(int(c) for c in color), size)
+
+    if key in _SWATCH_CACHE:
+        return _SWATCH_CACHE[key]
+
+    px = QPixmap(size, size)
+    px.fill(Qt.GlobalColor.transparent)
+    if color is not None:
+        if isinstance(color, QColor):
+            qc = color
+        else:
+            qc = QColor(int(color[0]), int(color[1]), int(color[2]))
+        p = QPainter(px)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setBrush(qc)
+        p.setPen(QColor(40, 40, 40))
+        p.drawRoundedRect(1, 1, size - 2, size - 2, 2, 2)
+        p.end()
+    icon = QIcon(px)
+    _SWATCH_CACHE[key] = icon
+    return icon
 import pyqtgraph as pg
 import numpy as np
 import os
@@ -245,11 +282,23 @@ class MainWindow(QMainWindow):
         self.lbl_stats.setWordWrap(True)
         list_layout.addWidget(self.lbl_stats)
 
-        self.list_annotations = QListWidget()
+        self.list_annotations = QTreeWidget()
+        self.list_annotations.setColumnCount(3)
+        self.list_annotations.setHeaderLabels(["", "Name", "Class"])
+        self.list_annotations.setRootIsDecorated(False)
+        self.list_annotations.setUniformRowHeights(True)
         self.list_annotations.setMinimumHeight(60)
-        self.list_annotations.setMaximumHeight(150)
+        self.list_annotations.setMaximumHeight(180)
         self.list_annotations.setEditTriggers(
-            self.list_annotations.EditTrigger.DoubleClicked)
+            QTreeWidget.EditTrigger.DoubleClicked)
+        # Header: tight swatch column, name flexes, class fits content.
+        hdr = self.list_annotations.header()
+        hdr.setStretchLastSection(False)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.list_annotations.setColumnWidth(0, 22)
+        # Keep header bar — column labels help once we add filter tabs.
         list_layout.addWidget(self.list_annotations)
 
         # Row 1: create — Cell / Vessel / Capillary

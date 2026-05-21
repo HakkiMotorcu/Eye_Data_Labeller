@@ -824,10 +824,15 @@ class ToolController:
     def _show_frame_annotations(self, frame_idx):
         """Show only annotations for the given frame, hide the rest.
         Rebuild the list widget to match."""
+        from PyQt6.QtWidgets import QTreeWidgetItem
+        from ui.main_window import make_swatch_icon
+
         self.window.list_annotations.blockSignals(True)
         self.window.list_annotations.clear()
 
         visible_annos = []
+        class_labels = {'cell': 'Cell', 'vessel': 'Vessel',
+                        'capillary': 'Capillary'}
         for anno in self.annotations:
             if anno.frame_idx == frame_idx:
                 if anno.is_paint_only:
@@ -835,17 +840,19 @@ class ToolController:
                 else:
                     anno.roi.setVisible(True)
                 visible_annos.append(anno)
-                from PyQt6.QtWidgets import QListWidgetItem
-                item = QListWidgetItem(anno.name)
+                cls = class_labels.get(anno.class_type, anno.class_type)
+                item = QTreeWidgetItem(["", anno.name, cls])
+                item.setIcon(0, make_swatch_icon(anno.color))
+                # Only the name column is editable.
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
-                self.window.list_annotations.addItem(item)
+                self.window.list_annotations.addTopLevelItem(item)
             else:
                 anno.roi.setVisible(False)
 
         # Re-select the active annotation if it's on this frame
         if self.active_annotation and self.active_annotation.frame_idx == frame_idx:
             items = self.window.list_annotations.findItems(
-                self.active_annotation.name, Qt.MatchFlag.MatchExactly)
+                self.active_annotation.name, Qt.MatchFlag.MatchExactly, 1)
             if items:
                 self.window.list_annotations.setCurrentItem(items[0])
         else:
@@ -855,7 +862,7 @@ class ToolController:
                 self.active_annotation.is_selected = True
                 self.active_annotation.update_visuals()
                 items = self.window.list_annotations.findItems(
-                    visible_annos[0].name, Qt.MatchFlag.MatchExactly)
+                    visible_annos[0].name, Qt.MatchFlag.MatchExactly, 1)
                 if items:
                     self.window.list_annotations.setCurrentItem(items[0])
 
@@ -1456,7 +1463,7 @@ class ToolController:
             if anno.frame_idx == cur:
                 anno.is_selected = (anno == annotation)
                 anno.update_visuals()
-        items = self.window.list_annotations.findItems(annotation.name, Qt.MatchFlag.MatchExactly)
+        items = self.window.list_annotations.findItems(annotation.name, Qt.MatchFlag.MatchExactly, 1)
         if items:
             self.window.list_annotations.blockSignals(True)
             self.window.list_annotations.setCurrentItem(items[0])
@@ -1468,20 +1475,23 @@ class ToolController:
 
     def _on_list_item_changed(self, current, previous):
         if current:
-            name = current.text()
+            name = current.text(1)
             cur = self.window._current_frame_idx
             for anno in self.annotations:
                 if anno.name == name and anno.frame_idx == cur:
                     self.select_annotation(anno)
                     break
 
-    def _on_list_item_edited(self, item):
+    def _on_list_item_edited(self, item, column=1):
         """Called when a list item is renamed via inline editing."""
-        new_name = item.text().strip()
+        # Only the Name column (1) carries rename data.
+        if column != 1:
+            return
+        new_name = item.text(1).strip()
         if not new_name:
             # Revert to old name
             if self.active_annotation:
-                item.setText(self.active_annotation.name)
+                item.setText(1, self.active_annotation.name)
             return
         anno = self.active_annotation
         if anno is None:
@@ -1496,7 +1506,7 @@ class ToolController:
         item = self.window.list_annotations.currentItem()
         if item:
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
-            self.window.list_annotations.editItem(item)
+            self.window.list_annotations.editItem(item, 1)
 
     def _manual_fit_bbox(self):
         """Manually fit the active annotation's bbox to its seg pixels."""
@@ -1704,35 +1714,43 @@ class ToolController:
             f"Frame: {on_frame}  |  Locked: {locked}  |  All frames: {total}")
 
     def _refresh_list_colors(self):
+        from ui.main_window import make_swatch_icon
         cur = self.window._current_frame_idx
         frame_annos = [a for a in self.annotations if a.frame_idx == cur]
+        # Per-class tint for the Class column (matches the spawn buttons).
+        class_color = {
+            'cell':      QColor('#cccccc'),
+            'vessel':    QColor('#9370db'),
+            'capillary': QColor('#eb82c8'),
+        }
         self.window.list_annotations.blockSignals(True)
-        for i in range(self.window.list_annotations.count()):
-            item = self.window.list_annotations.item(i)
+        for i in range(self.window.list_annotations.topLevelItemCount()):
+            item = self.window.list_annotations.topLevelItem(i)
             if item is None:
                 continue
-            name = item.text()
+            name = item.text(1)
             anno = next((a for a in frame_annos if a.name == name), None)
             if anno is None:
                 continue
-            font = item.font()
+            font = item.font(1)
             is_active = (anno == self.active_annotation)
             if is_active and anno.is_locked:
-                item.setForeground(QColor('#2ecc71'))
-                font.setBold(True)
+                fg = QColor('#2ecc71'); bold = True
             elif is_active:
-                item.setForeground(QColor('#ffd700'))
-                font.setBold(True)
+                fg = QColor('#ffd700'); bold = True
             elif anno.is_locked:
-                item.setForeground(QColor('#2ecc71'))
-                font.setBold(False)
+                fg = QColor('#2ecc71'); bold = False
             elif anno.is_paint_only:
-                item.setForeground(QColor('#9370db'))
-                font.setBold(False)
+                fg = QColor('#9370db'); bold = False
             else:
-                item.setForeground(QColor('#cccccc'))
-                font.setBold(False)
-            item.setFont(font)
+                fg = QColor('#cccccc'); bold = False
+            font.setBold(bold)
+            item.setForeground(1, fg)
+            item.setFont(1, font)
+            # Class column gets its own subtle tint regardless of state.
+            item.setForeground(2, class_color.get(anno.class_type, fg))
+            # Keep the swatch in sync — tracking can recolor annotations.
+            item.setIcon(0, make_swatch_icon(anno.color))
         self.window.list_annotations.blockSignals(False)
 
     # ------------------------------------------------------------------
@@ -3632,11 +3650,11 @@ class ToolController:
         if rec.get('locked', 0):
             anno.set_locked(True)
 
-        self.window.list_annotations.addItem(name)
         anno.sig_clicked.connect(self.select_annotation)
         anno.sig_updated.connect(self._on_anno_updated)
         self.annotations.append(anno)
-        self._refresh_list_colors()
+        # Caller follows up with _show_frame_annotations which rebuilds the
+        # list widget — no need to add the row directly here.
 
     def _clear_all_annotations(self):
         for anno in self.annotations:
