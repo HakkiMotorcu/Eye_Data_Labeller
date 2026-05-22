@@ -1,15 +1,16 @@
-"""TIF mask I/O matching the collaborator's labeling format.
+"""TIF mask I/O.
 
-The canonical on-disk label is a multi-page instance-mask TIF:
-``{video}_Masks.tif`` of shape ``(T, H, W)``, where background = 0 and
-each cell carries a unique uint16 instance ID.
+The on-disk canonical layout is a per-class instance-mask TIF inside the
+project output folder, e.g. ``out/<video_stem>/Cells.tif``. Filenames and
+the resolver live in :mod:`core.project_io`.
 
-Existing collaborator files are sometimes written as ``uint32`` or
-``float32`` by Fiji's macro pipeline; the loader accepts any integer-
-valued dtype and casts to uint16 (values up to 65 535 — more than enough
-for the 5-35 cells per frame seen in PC-AOSLO data).
+This module just owns the raw byte-level read/write of a single
+``(T, H, W) uint16`` mask TIF and a project-folder sweep that loads
+every class file at once. The next-to-video and bare-stem helpers that
+older code shipped are gone.
 """
 
+import os
 import numpy as np
 import tifffile
 
@@ -71,97 +72,14 @@ def save_mask_tif(masks, path):
     """Save ``(T, H, W)`` instance masks as a multi-page uint16 TIF.
 
     A 2D ``(H, W)`` array is auto-promoted to a single-frame stack so the
-    output is always a multi-page file (one IFD per frame), which is what
-    the collaborator's Trackpy pipeline expects.
+    output is always a multi-page file (one IFD per frame).
 
     Writes are atomic (temp file + rename) and an existing target is
     backed up to ``<path>.bak`` before being overwritten — see
-    ``core.project_io.atomic_write_tif``.
+    :func:`core.project_io.atomic_write_tif`.
     """
     from core import project_io
     project_io.atomic_write_tif(path, masks)
-
-
-def default_mask_path(image_path):
-    """Return the canonical sidecar mask path for a given image file.
-
-    Mirrors the collaborator convention ``{stem}_Masks.tif``. Examples:
-      308_20230822_02.avi → 308_20230822_02_Masks.tif
-      2216_20231004_01.tif → 2216_20231004_01_Masks.tif
-    """
-    import os
-    base, _ = os.path.splitext(image_path)
-    return f"{base}_Masks.tif"
-
-
-# ----- Per-class (3-layer) save/load --------------------------------------
-# Suffix used for each class's mask TIF. Cells keep the legacy
-# ``_Masks.tif`` suffix for backward compatibility so older sidecar files
-# still match the load path.
-CLASS_FILENAME_SUFFIX = {
-    'cell':      '_Cells.tif',
-    'vessel':    '_Vessels.tif',
-    'capillary': '_Capillaries.tif',
-}
-
-
-def class_mask_path(image_path, class_type):
-    """Return the per-class mask TIF path for a given image file."""
-    import os
-    base, _ = os.path.splitext(image_path)
-    return f"{base}{CLASS_FILENAME_SUFFIX[class_type]}"
-
-
-def save_multiclass_masks(seg, image_path):
-    """Save all non-empty class layers as separate TIFs.
-
-    Returns the list of paths actually written. Empty layers are skipped
-    so we don't litter the directory with zero-content files.
-    """
-    written = []
-    for ct, suffix in CLASS_FILENAME_SUFFIX.items():
-        layer = seg.get_layer(ct)
-        if layer is None or not layer.any():
-            continue
-        path = class_mask_path(image_path, ct)
-        save_mask_tif(layer, path)
-        written.append(path)
-    return written
-
-
-def load_multiclass_masks(image_path):
-    """Look for per-class mask TIFs next to *image_path*.
-
-    Returns a dict {class_type: (T, H, W) uint16}. Missing classes are
-    omitted. If only the legacy ``_Masks.tif`` exists, it's returned
-    under the ``cell`` key — older single-layer saves migrate cleanly.
-
-    Also peeks into the new per-video output folder (``out/<stem>/``)
-    when the per-stem siblings aren't found in the video's directory.
-    """
-    import os
-    found = {}
-    # Modern per-class files next to the source image (legacy layout).
-    for ct in CLASS_FILENAME_SUFFIX:
-        p = class_mask_path(image_path, ct)
-        if os.path.exists(p):
-            found[ct] = load_mask_tif(p)
-    if 'cell' not in found:
-        legacy = default_mask_path(image_path)
-        if os.path.exists(legacy):
-            found['cell'] = load_mask_tif(legacy)
-
-    # If nothing matched, try the new out-folder layout.
-    if not found:
-        from core import project_io  # local import — avoid load-time cycle
-        for mode in (project_io.OUTPUT_MODE_SUBFOLDER,
-                     project_io.OUTPUT_MODE_PREFIXED):
-            folder = project_io.resolve_output_folder(image_path, mode)
-            extra = load_multiclass_from_folder(folder)
-            if extra:
-                found.update(extra)
-                break
-    return found
 
 
 def load_multiclass_from_folder(folder):
@@ -171,7 +89,6 @@ def load_multiclass_from_folder(folder):
     ``project_io.CLASS_MASK_FILES``. Returns ``{class_type: arr}``;
     missing classes are omitted.
     """
-    import os
     from core import project_io
     if not folder or not os.path.isdir(folder):
         return {}

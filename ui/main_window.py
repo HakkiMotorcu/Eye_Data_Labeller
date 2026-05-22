@@ -786,9 +786,6 @@ class MainWindow(QMainWindow):
         load_class_row.addStretch(1)
         io_layout.addLayout(load_class_row)
 
-        # Keep the legacy attribute name pointing at Load Project so any
-        # surviving code path / icon mapping still resolves.
-        self.btn_load_seg = self.btn_load_project
 
         # COCO sidecar export — modern, pipeline-friendly format.
         coco_row = QHBoxLayout()
@@ -809,74 +806,6 @@ class MainWindow(QMainWindow):
         self.btn_import.setStyleSheet("color: #457b9d; font-weight: bold;")
         import_row.addWidget(self.btn_import)
         io_layout.addLayout(import_row)
-
-        # ----- Legacy CSV/JSON exports (collapsible) -----------------
-        # These predate the project out folder and write a per-class
-        # rows file. Kept available for downstream R / Python pipelines
-        # that consume CSV/JSON; collapsed by default to declutter.
-        legacy_group = self._make_collapsible_group(
-            "Legacy exports (CSV / JSON)", _COMPACT_SS)
-        legacy_layout = QVBoxLayout()
-        legacy_layout.setContentsMargins(4, 2, 4, 4)
-        legacy_layout.setSpacing(4)
-
-        legacy_fmt_row = QHBoxLayout()
-        legacy_fmt_row.setSpacing(4)
-        self.combo_export_format = QComboBox()
-        self.combo_export_format.addItems(["CSV", "JSON"])
-        self.combo_export_format.setToolTip(
-            "Output format for the Cells / Vessels / All export buttons.")
-        legacy_fmt_row.addWidget(QLabel("Format:"))
-        legacy_fmt_row.addWidget(self.combo_export_format, stretch=1)
-        legacy_layout.addLayout(legacy_fmt_row)
-
-        opts_row = QHBoxLayout()
-        opts_row.setSpacing(6)
-        self.chk_export_bbox = QCheckBox("BBoxes")
-        self.chk_export_bbox.setChecked(True)
-        self.chk_export_bbox.setToolTip(
-            "Include bounding-box columns (x0, y0, width, height).")
-        self.chk_export_seg_bbox = QCheckBox("Seg BBoxes")
-        self.chk_export_seg_bbox.setChecked(False)
-        self.chk_export_seg_bbox.setToolTip(
-            "Use tight bboxes recomputed from the painted seg mask\n"
-            "instead of the ROI box. Useful after brush edits.")
-        self.chk_export_vein_flag = QCheckBox("Vessel flag")
-        self.chk_export_vein_flag.setChecked(True)
-        self.chk_export_vein_flag.setToolTip(
-            "Add an 'inside_vessel' column (1/0) to the cells export:\n"
-            "1 = cell centroid or bbox overlaps a vessel mask on that\n"
-            "frame.")
-        opts_row.addWidget(self.chk_export_bbox)
-        opts_row.addWidget(self.chk_export_seg_bbox)
-        opts_row.addWidget(self.chk_export_vein_flag)
-        legacy_layout.addLayout(opts_row)
-
-        export_row = QHBoxLayout()
-        export_row.setSpacing(4)
-        self.btn_export_cells = QPushButton("Export Cells")
-        self.btn_export_cells.setToolTip(
-            "Export only cell annotations to CSV/JSON.")
-        self.btn_export_cells.setStyleSheet("color: #2a9d8f; font-weight: bold;")
-        self.btn_export_veins = QPushButton("Export Vessels")
-        self.btn_export_veins.setToolTip(
-            "Export only vessel annotations to CSV/JSON.")
-        self.btn_export_veins.setStyleSheet("color: #9370db; font-weight: bold;")
-        self.btn_export_all = QPushButton("Export All")
-        self.btn_export_all.setToolTip(
-            "Export every annotation (all classes) to CSV/JSON.")
-        self.btn_export_all.setStyleSheet("color: #e9c46a; font-weight: bold;")
-        export_row.addWidget(self.btn_export_cells)
-        export_row.addWidget(self.btn_export_veins)
-        export_row.addWidget(self.btn_export_all)
-        legacy_layout.addLayout(export_row)
-
-        legacy_group.setLayout(legacy_layout)
-        # _make_collapsible_group returns a QGroupBox with setCheckable
-        # True; unchecking collapses its contents. Default collapsed so
-        # the panel feels lean — legacy buttons are one click away.
-        legacy_group.setChecked(False)
-        io_layout.addWidget(legacy_group)
 
         io_group.setLayout(io_layout)
 
@@ -1813,12 +1742,11 @@ class MainWindow(QMainWindow):
             'btn_force_paint':   'fa6s.bolt',
             'btn_propagate_mask':'fa6s.arrows-left-right',
             'btn_save_seg':      'fa6s.floppy-disk',
-            'btn_load_seg':      'fa6s.folder-open',
+            'btn_load_project':  'fa6s.folder-open',
+            'btn_load_class':    'fa6s.file-import',
             'btn_run_sam':       'fa6s.wand-magic-sparkles',
             'btn_import':        'fa6s.file-import',
-            'btn_export_cells':  'fa6s.file-export',
-            'btn_export_veins':  'fa6s.file-export',
-            'btn_export_all':    'fa6s.file-export',
+            'btn_export_coco':   'fa6s.file-export',
             'btn_auto_levels':   'fa6s.gauge-high',
             'btn_toggle_seg':       'fa6s.eye',
             'btn_toggle_seg_tools': 'fa6s.eye',

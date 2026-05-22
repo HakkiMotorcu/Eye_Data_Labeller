@@ -798,9 +798,6 @@ class ToolController:
         self.window.btn_unlock_all.clicked.connect(self.unlock_all)
         self.window.btn_hide_locked.clicked.connect(self.toggle_hide_locked)
         self.window.btn_label_colors.clicked.connect(self.toggle_label_colors)
-        self.window.btn_export_cells.clicked.connect(self.export_cells)
-        self.window.btn_export_veins.clicked.connect(self.export_veins)
-        self.window.btn_export_all.clicked.connect(self.export_all)
         self.window.btn_export_coco.clicked.connect(self.export_coco_sidecar)
         self.window.btn_import.clicked.connect(self.load_annotations)
         # Load actions: Project (folder picker) vs Single Class (file picker).
@@ -870,7 +867,7 @@ class ToolController:
             QShortcut(QKeySequence("R"),          self.window, self.reset_zoom),
             QShortcut(QKeySequence("Delete"),     self.window, self.delete_selected),
             QShortcut(QKeySequence("Backspace"),  self.window, self.delete_selected),
-            QShortcut(QKeySequence("Ctrl+S"),     self.window, self.save_annotations),
+            QShortcut(QKeySequence("Ctrl+S"),     self.window, self.save_seg_map),
             QShortcut(QKeySequence("Ctrl+I"),     self.window, self.load_annotations),
             QShortcut(QKeySequence("N"),          self.window, self.select_next_annotation),
             QShortcut(QKeySequence("P"),          self.window, self.select_prev_annotation),
@@ -2941,216 +2938,6 @@ class ToolController:
             self.window, "Load Class",
             f"Imported {ct} layer from:\n{os.path.basename(path)}")
 
-    def load_segmentation(self):
-        from core.volume_data import SegmentationData
-        from core import mask_io
-
-        # Default search dir = location of the open image, if any.
-        start_dir = (os.path.dirname(self.window._current_file)
-                     if self.window._current_file else os.getcwd())
-        path, _ = QFileDialog.getOpenFileName(
-            self.window, "Load Segmentation Map",
-            start_dir,
-            "Instance mask TIF (*.tif *.tiff);;Video Files (*.avi *.mp4);;All Files (*)")
-        if not path:
-            return
-
-        ext = os.path.splitext(path)[1].lower()
-        try:
-            if ext in ('.tif', '.tiff'):
-                # Three layouts to detect:
-                #   1. Project out folder containing Cells.tif / Vessels.tif / Capillaries.tif
-                #   2. Legacy next-to-video {stem}_Cells.tif etc.
-                #   3. Standalone TIF — treat as a cell layer.
-                from core import project_io
-                picked_dir = os.path.dirname(os.path.abspath(path))
-                picked_name = os.path.basename(path)
-                if picked_name in project_io.CLASS_MASK_FILES.values():
-                    # Inside an out folder — sweep all canonical files there.
-                    layers = mask_io.load_multiclass_from_folder(picked_dir)
-                else:
-                    anchor = path
-                    for ct, suffix in mask_io.CLASS_FILENAME_SUFFIX.items():
-                        if path.endswith(suffix):
-                            anchor = path[:-len(suffix)] + '.x'
-                            break
-                    if path.endswith('_Masks.tif'):
-                        anchor = path[:-len('_Masks.tif')] + '.x'
-                    layers = mask_io.load_multiclass_masks(anchor)
-
-                if not layers:
-                    # Fall back: treat the picked file alone as the cells layer
-                    layers = {'cell': mask_io.load_mask_tif(path)}
-
-                # All layers must share shape; cells (or whichever is
-                # present) defines the canvas.
-                first_layer = next(iter(layers.values()))
-                T, H, W = first_layer.shape
-
-                vd = self.window.video_data
-                if vd is not None and (H, W) != (vd.height, vd.width):
-                    QMessageBox.warning(
-                        self.window, "Load Seg",
-                        f"Mask size {(H, W)} does not match image "
-                        f"{(vd.height, vd.width)}. Loading anyway — overlay "
-                        f"will be resized at display time.")
-
-                seg = SegmentationData.empty(W, H, T)
-                seg.filepath = path
-                for ct, arr in layers.items():
-                    if arr.shape != (T, H, W):
-                        raise ValueError(
-                            f"{ct} layer shape {arr.shape} does not match "
-                            f"cell shape {(T, H, W)}")
-                    seg.set_layer(ct, arr.astype(np.int32))
-                    for iid in np.unique(arr):
-                        if iid == 0:
-                            continue
-                        seg.register_instance_color(int(iid), class_type=ct)
-            else:
-                seg = SegmentationData(path)
-        except Exception as e:
-            QMessageBox.critical(self.window, "Error", str(e))
-            return
-
-        self.window.seg_data = seg
-        self.window._seg_visible = True
-
-        # Clear existing annotations before importing
-        self._clear_all_annotations()
-
-        # Use the stair-based colours already computed by SegmentationData
-        stair_color_map = dict(seg.instance_colors)
-
-        # Scale factors if seg map size differs from video
-        sx, sy = 1.0, 1.0
-        if self.window.video_data:
-            if seg.width != self.window.video_data.width:
-                sx = self.window.video_data.width / seg.width
-            if seg.height != self.window.video_data.height:
-                sy = self.window.video_data.height / seg.height
-
-        anno_count = 0
-        max_stair = 0
-        for frame_idx in range(seg.num_frames):
-            bboxes = seg.get_all_bboxes(frame_idx)
-            for (stair_id, blob_idx), (x0, y0, w, h) in bboxes.items():
-                color = stair_color_map.get(stair_id, (255, 80, 80))
-                if blob_idx == 0:
-                    name = f"Cell_{stair_id}"
-                else:
-                    name = f"Cell_{stair_id}_{blob_idx}"
-                if stair_id > max_stair:
-                    max_stair = stair_id
-
-                # Scale bbox to video coordinates
-                ax = x0 * sx
-                ay = y0 * sy
-                aw = w * sx
-                ah = h * sy
-
-                anno = Annotation2D(
-                    name, self.window.view_frame, self,
-                    start_pos=(ax, ay),
-                    start_size=(aw, ah),
-                    shape_mode='rect',
-                    frame_idx=frame_idx,
-                    instance_id=stair_id,
-                    color=color,
-                )
-                anno.sig_clicked.connect(self.select_annotation)
-                anno.sig_updated.connect(self._on_anno_updated)
-                self.annotations.append(anno)
-                # Hide ROI; _show_frame_annotations will reveal current frame
-                anno.roi.setVisible(False)
-                anno_count += 1
-
-        self.anno_counter = max_stair
-
-        # Build paint-only annotations from the vessel and capillary
-        # layers — one entry per (instance_id, frame_idx).
-        for ct in ('vessel', 'capillary'):
-            layer = seg.get_layer(ct)
-            colors = seg.get_colors(ct)
-            if layer is None:
-                continue
-            for fi in range(seg.num_frames):
-                frame_ids = np.unique(layer[fi])
-                for iid in frame_ids:
-                    if iid == 0:
-                        continue
-                    iid = int(iid)
-                    color = colors.get(iid, (147, 112, 219))
-                    label = 'Vessel' if ct == 'vessel' else 'Capillary'
-                    name = f"{label}_{iid}"
-                    anno = Annotation2D(
-                        name, self.window.view_frame, self,
-                        start_pos=(0, 0),
-                        start_size=(1, 1),
-                        shape_mode='rect',
-                        frame_idx=fi,
-                        instance_id=iid,
-                        color=color,
-                        class_type=ct,
-                    )
-                    anno.sig_clicked.connect(self.select_annotation)
-                    anno.sig_updated.connect(self._on_anno_updated)
-                    self.annotations.append(anno)
-                    anno_count += 1
-
-        # Apply per-instance metadata from the meta sidecar (if present)
-        # so names, class_type, and locked state survive a save/load cycle.
-        # The lookup is class-aware so vessels and capillaries with the
-        # same iid never adopt each other's records. Look in the new
-        # out-folder layout first, then fall back to the legacy sidecar
-        # next to the picked TIF.
-        from core import sidecar, project_io
-        meta = None
-        picked_dir = os.path.dirname(os.path.abspath(path))
-        picked_meta = os.path.join(picked_dir, project_io.FILE_META)
-        if os.path.exists(picked_meta):
-            meta = sidecar.load_meta(picked_meta)
-        if meta is None:
-            meta = sidecar.load_meta(sidecar.meta_path_for(path))
-        if meta is not None:
-            for anno in self.annotations:
-                if anno.instance_id is None:
-                    continue
-                rec = sidecar.meta_lookup(
-                    meta, anno.class_type, int(anno.instance_id))
-                if not rec:
-                    continue
-                # Annotation2D normalizes 'vein' -> 'vessel' in __init__,
-                # but here we have an already-constructed object.
-                ct = rec.get('class_type', anno.class_type)
-                if ct == 'vein':
-                    ct = 'vessel'
-                if ct in ('cell', 'vessel', 'capillary'):
-                    anno.class_type = ct
-                if 'name' in rec and rec['name']:
-                    anno.name = rec['name']
-                if rec.get('locked'):
-                    anno.set_locked(True)
-                if 'notes' in rec:
-                    anno.notes = rec['notes']
-
-        # Repair any stale name/color mismatches against class_type. Old
-        # save files predate the per-class instance-ID namespace, so an
-        # iid=4 capillary may currently carry a "Cell_4" name and a
-        # cell-palette color — fix in place.
-        self._normalize_anno_names_and_colors()
-
-        # Show annotations for the current frame
-        cur = self.window._current_frame_idx
-        self._show_frame_annotations(cur)
-        self.window._update_seg_overlay()
-
-        all_stairs = sorted(stair_color_map.keys())
-        QMessageBox.information(
-            self.window, "Segmentation Loaded",
-            f"Created {anno_count} bbox annotations from "
-            f"{len(all_stairs)} stairs across {seg.num_frames} frames.")
-
     # ------------------------------------------------------------------
     # SAM panel helpers (Phase 4.1)
     # ------------------------------------------------------------------
@@ -4493,15 +4280,16 @@ class ToolController:
 
         Each row contains:
           name, frame, class_type, instance_id,
-          x0, y0, width, height  (from the ROI — or from seg mask if
-                                   chk_export_seg_bbox is checked),
+          x0, y0, width, height  (from the ROI),
           locked, shape_mode,
-          inside_vein             (only for cells, when chk_export_vein_flag
-                                   is checked and a seg map is loaded)
+          inside_vein             (only for cells, when a seg map is loaded)
+
+        Defaults are fixed now that the legacy CSV/JSON UI is gone — this
+        function still feeds the autosave snapshot.
         """
-        include_bbox    = self.window.chk_export_bbox.isChecked()
-        use_seg_bbox    = self.window.chk_export_seg_bbox.isChecked()
-        add_vein_flag   = self.window.chk_export_vein_flag.isChecked()
+        include_bbox    = True
+        use_seg_bbox    = False
+        add_vein_flag   = True
 
         # Pre-build per-frame vein masks for the vein-flag computation
         vein_masks = {}   # {frame_idx: binary H×W ndarray or None}
@@ -4604,91 +4392,6 @@ class ToolController:
             vm |= (mask == iid)
         return vm
 
-    # ---- file writing helpers --------------------------------------------
-
-    @staticmethod
-    def _field_order(rows):
-        """Stable column order: fixed fields first, then extras alphabetically."""
-        fixed = ["name", "frame", "class_type", "instance_id",
-                 "x0", "y0", "width", "height", "locked", "shape_mode"]
-        extras = sorted({k for r in rows for k in r if k not in fixed})
-        return [f for f in fixed if any(f in r for r in rows)] + extras
-
-    def _write_rows(self, path, rows):
-        fmt = self.window.combo_export_format.currentText()
-        if fmt == "JSON":
-            with open(path, "w") as f:
-                json.dump({"annotations": rows}, f, indent=2)
-        else:
-            fields = self._field_order(rows)
-            with open(path, "w", newline="") as f:
-                w = csv.DictWriter(f, fieldnames=fields, extrasaction='ignore',
-                                   restval=0)
-                w.writeheader()
-                w.writerows(rows)
-
-    def _default_export_path(self, suffix, ext):
-        stem = ""
-        if self.window._current_file:
-            stem = os.path.splitext(os.path.basename(self.window._current_file))[0]
-            d = os.path.dirname(self.window._current_file)
-        else:
-            d = os.getcwd()
-        return os.path.join(d, f"{stem}_{suffix}{ext}")
-
-    def _export_dialog(self, title, suffix):
-        fmt = self.window.combo_export_format.currentText()
-        if fmt == "JSON":
-            filt, ext = "JSON Files (*.json)", ".json"
-        else:
-            filt, ext = "CSV Files (*.csv)", ".csv"
-        default = self._default_export_path(suffix, ext)
-        path, _ = QFileDialog.getSaveFileName(self.window, title, default, filt)
-        return path
-
-    # ---- public export actions ------------------------------------------
-
-    def export_cells(self):
-        if not any(a.class_type == 'cell' for a in self.annotations):
-            QMessageBox.information(self.window, "Export Cells",
-                                    "No cell annotations to export.")
-            return
-        path = self._export_dialog("Export Cells", "cells")
-        if not path:
-            return
-        rows = self._get_anno_rows(class_filter='cell')
-        self._write_rows(path, rows)
-        print(f"Cells exported → {path}  ({len(rows)} rows)")
-
-    def export_veins(self):
-        # Exports all non-cell (paint-only) annotations: vessels + capillaries.
-        # Method name kept for backwards-compat with internal call sites.
-        if not any(a.is_paint_only for a in self.annotations):
-            QMessageBox.information(self.window, "Export Vessels",
-                                    "No vessel / capillary annotations to export.")
-            return
-        path = self._export_dialog("Export Vessels & Capillaries", "vessels")
-        if not path:
-            return
-        rows = self._get_anno_rows(class_filter='non_cell')
-        self._write_rows(path, rows)
-        print(f"Vessels/capillaries exported → {path}  ({len(rows)} rows)")
-
-    def export_all(self):
-        if not self.annotations:
-            QMessageBox.information(self.window, "Export All",
-                                    "No annotations to export.")
-            return
-        path = self._export_dialog("Export All Annotations", "annotations")
-        if not path:
-            return
-        rows = self._get_anno_rows()
-        self._write_rows(path, rows)
-        print(f"All annotations exported → {path}  ({len(rows)} rows)")
-
-    # keep old name as alias so Ctrl+S still works
-    def save_annotations(self):
-        self.export_all()
 
     def export_coco_sidecar(self):
         """Write a COCO JSON describing every committed instance mask.
@@ -4887,19 +4590,14 @@ class ToolController:
     # AUTO-SAVE
     # ------------------------------------------------------------------
     def _get_autosave_path(self):
-        """autosave.json lives in the out folder when one is available,
-        falling back to the legacy hidden file next to the video so older
-        sessions can still recover."""
+        """autosave.json lives in the out folder. Returns an empty
+        string when no video is open or the out folder cannot be
+        resolved — in which case the autosave tick is skipped."""
         from core import project_io
-        if self.window._current_file:
-            out_folder = self._resolve_out_folder()
-            if out_folder:
-                return os.path.join(out_folder, project_io.FILE_AUTOSAVE)
-            # Fallback: next to the video, hidden-prefixed (legacy).
-            d = os.path.dirname(self.window._current_file)
-            stem = os.path.splitext(os.path.basename(self.window._current_file))[0]
-            return os.path.join(d, f"._{stem}_autosave.json")
-        return os.path.join(os.getcwd(), "._autosave_annotations.json")
+        out_folder = self._resolve_out_folder()
+        if not out_folder:
+            return ""
+        return os.path.join(out_folder, project_io.FILE_AUTOSAVE)
 
     def _autosave_mode(self):
         from PyQt6.QtCore import QSettings
@@ -4956,15 +4654,19 @@ class ToolController:
         if getattr(self, '_is_painting', False):
             return  # mid-stroke; try again next tick
 
+        autosave_path = self._get_autosave_path()
+        if not autosave_path:
+            return  # no resolvable out folder — nothing to write to
+
         # Always write the lightweight autosave snapshot (annotations
         # only) so the user can recover names/classes/locks on crash.
         try:
             rows = self._get_anno_rows()
             project_io.atomic_write_json(
-                self._get_autosave_path(),
+                autosave_path,
                 {"annotations": rows, "schema": 2},
                 keep_backup=False)
-            self._autosave_path = self._get_autosave_path()
+            self._autosave_path = autosave_path
         except Exception as e:
             log_error('controller.autosave', f'light snapshot failed: {e}')
 
