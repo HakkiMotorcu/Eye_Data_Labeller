@@ -38,3 +38,10 @@ Support Documents/
 
 # Generated/derived files
 *.npy
+
+# PyInstaller build artifacts
+build/
+dist/
+
+# Per-user app data (cache, models, settings) when running from source
+.user_data/
