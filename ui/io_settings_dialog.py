@@ -55,6 +55,13 @@ class IOSettingsDialog(QDialog):
         except (TypeError, ValueError):
             mask_min_sec = project_io.DEFAULTS[project_io.SETTING_AUTOSAVE_MASK_MIN_SEC]
 
+        # Model download URL — what we hit on first SAM use if the
+        # checkpoint isn't on disk yet.
+        from core import model_download
+        model_url = str(self._settings.value(
+            model_download.SETTINGS_KEY,
+            model_download.DEFAULT_SAM_HELA_URL))
+
         # ----- Output mode group ------------------------------------
         out_lbl = QLabel("Output folder")
         out_lbl.setStyleSheet("font-weight: bold;")
@@ -121,6 +128,16 @@ class IOSettingsDialog(QDialog):
             "Smart mode only: minimum seconds between two on-disk mask "
             "flushes, regardless of how often the seg gets dirtied.")
 
+        # SAM-HeLa checkpoint download URL.
+        self.ed_model_url = QLineEdit(model_url)
+        self.ed_model_url.setPlaceholderText(
+            "https://huggingface.co/…/best.pt   "
+            "(downloaded on first use if not already on disk)")
+        self.ed_model_url.setToolTip(
+            "Where to fetch sam_hela/best.pt when the file is missing on "
+            "disk. Set this to a public HTTPS URL — Hugging Face, GitHub "
+            "Release asset, S3, etc.")
+
         # ----- Assemble form ----------------------------------------
         layout = QVBoxLayout(self)
 
@@ -142,6 +159,15 @@ class IOSettingsDialog(QDialog):
         form.addRow("Tick interval:", self.spin_interval)
         form.addRow("Min mask flush:", self.spin_mask_min)
         layout.addLayout(form)
+
+        divider2 = QFrame()
+        divider2.setFrameShape(QFrame.Shape.HLine)
+        divider2.setStyleSheet("color: #444;")
+        layout.addWidget(divider2)
+        model_lbl = QLabel("SAM-HeLa download URL")
+        model_lbl.setStyleSheet("font-weight: bold;")
+        layout.addWidget(model_lbl)
+        layout.addWidget(self.ed_model_url)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -177,6 +203,7 @@ class IOSettingsDialog(QDialog):
             self.rb_cust.setChecked(True)
 
     def accept(self):
+        from core import model_download
         s = self._settings
         s.setValue(project_io.SETTING_OUTPUT_MODE, self._selected_mode())
         s.setValue(project_io.SETTING_OUTPUT_CUSTOM_ROOT, self.ed_custom.text())
@@ -186,5 +213,6 @@ class IOSettingsDialog(QDialog):
                     int(self.spin_interval.value()))
         s.setValue(project_io.SETTING_AUTOSAVE_MASK_MIN_SEC,
                     int(self.spin_mask_min.value()))
+        s.setValue(model_download.SETTINGS_KEY, self.ed_model_url.text().strip())
         s.sync()
         super().accept()

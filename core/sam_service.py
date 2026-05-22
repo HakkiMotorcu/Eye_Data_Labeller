@@ -155,8 +155,36 @@ class SamService:
             log('sam_service', 'load: already loaded', model_type=self.model_type)
             return self._predictor
         if self.checkpoint_path and not os.path.exists(self.checkpoint_path):
-            raise FileNotFoundError(
-                f"SAM checkpoint not found: {self.checkpoint_path}")
+            # Auto-download the fine-tuned checkpoint on first use, if the
+            # deployer configured a URL. The downloader is in its own
+            # module so headless callers can opt out of the Qt progress
+            # dialog by passing qt_parent=None.
+            try:
+                from core import model_download
+                qt_parent = None
+                try:
+                    from PyQt6.QtWidgets import QApplication
+                    app = QApplication.instance()
+                    if app is not None:
+                        qt_parent = app.activeWindow()
+                except Exception:
+                    pass
+                log('sam_service', 'checkpoint missing; attempting download',
+                    target=self.checkpoint_path)
+                model_download.ensure_sam_hela_checkpoint(
+                    self.checkpoint_path, qt_parent=qt_parent)
+            except model_download.MissingModelURL as e:
+                raise FileNotFoundError(
+                    f"SAM checkpoint not found at:\n  {self.checkpoint_path}\n\n"
+                    f"{e}") from e
+            except InterruptedError:
+                raise FileNotFoundError(
+                    f"Download of SAM checkpoint was cancelled. "
+                    f"Try again — or drop the file at:\n  {self.checkpoint_path}")
+            except Exception as e:
+                raise FileNotFoundError(
+                    f"Could not download SAM checkpoint:\n  {self.checkpoint_path}\n"
+                    f"({type(e).__name__}: {e})") from e
 
         kwargs = dict(model_type=self.model_type)
         if self.checkpoint_path:
