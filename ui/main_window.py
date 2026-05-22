@@ -787,18 +787,6 @@ class MainWindow(QMainWindow):
         io_layout.addLayout(load_class_row)
 
 
-        # COCO sidecar export — modern, pipeline-friendly format.
-        coco_row = QHBoxLayout()
-        coco_row.setSpacing(4)
-        self.btn_export_coco = QPushButton("Export COCO")
-        self.btn_export_coco.setToolTip(
-            "Write a COCO JSON sidecar (RLE masks + bboxes + categories).\n"
-            "Ready to drop into Detectron2 / MMDetection / Roboflow / "
-            "pycocotools.")
-        self.btn_export_coco.setStyleSheet("color: #4cc9f0; font-weight: bold;")
-        coco_row.addWidget(self.btn_export_coco)
-        io_layout.addLayout(coco_row)
-
         # Import annotations from JSON/CSV (always-visible).
         import_row = QHBoxLayout()
         import_row.setSpacing(4)
@@ -1746,7 +1734,6 @@ class MainWindow(QMainWindow):
             'btn_load_class':    'fa6s.file-import',
             'btn_run_sam':       'fa6s.wand-magic-sparkles',
             'btn_import':        'fa6s.file-import',
-            'btn_export_coco':   'fa6s.file-export',
             'btn_auto_levels':   'fa6s.gauge-high',
             'btn_toggle_seg':       'fa6s.eye',
             'btn_toggle_seg_tools': 'fa6s.eye',

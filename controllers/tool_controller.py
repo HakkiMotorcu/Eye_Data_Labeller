@@ -798,7 +798,6 @@ class ToolController:
         self.window.btn_unlock_all.clicked.connect(self.unlock_all)
         self.window.btn_hide_locked.clicked.connect(self.toggle_hide_locked)
         self.window.btn_label_colors.clicked.connect(self.toggle_label_colors)
-        self.window.btn_export_coco.clicked.connect(self.export_coco_sidecar)
         self.window.btn_import.clicked.connect(self.load_annotations)
         # Load actions: Project (folder picker) vs Single Class (file picker).
         self.window.btn_load_project.clicked.connect(self.load_project_folder)
@@ -4392,51 +4391,6 @@ class ToolController:
             vm |= (mask == iid)
         return vm
 
-
-    def export_coco_sidecar(self):
-        """Write a COCO JSON describing every committed instance mask.
-
-        Uses the current seg_data (mask source of truth) + the metadata
-        derived from this session's annotations (class_type per instance).
-        Round-trip import isn't part of this path — anyone consuming the
-        export reads it with standard pycocotools tooling.
-        """
-        from core import coco_export, sidecar
-
-        seg = self.window.seg_data
-        # Refuse only when every class layer is empty — a vessel-only or
-        # capillary-only session is a legitimate thing to export.
-        if seg is None or not any(
-                np.any(seg.get_layer(ct)) for ct in seg.CLASS_TYPES):
-            QMessageBox.information(
-                self.window, "Export COCO",
-                "No segmentation data to export. Paint or load a mask first.")
-            return
-
-        # Default filename: {image_stem}_coco.json next to the image.
-        source = self.window._current_file
-        if source:
-            default = os.path.join(
-                os.path.dirname(source),
-                os.path.splitext(os.path.basename(source))[0] + "_coco.json")
-        else:
-            default = os.path.join(os.getcwd(), "annotations_coco.json")
-
-        path, _ = QFileDialog.getSaveFileName(
-            self.window, "Export COCO",
-            default, "COCO JSON (*.json);;All Files (*)")
-        if not path:
-            return
-
-        try:
-            meta = sidecar.collect_meta_from_annotations(self.annotations)
-            n = coco_export.export_coco(
-                source or default, seg, meta, path)
-            QMessageBox.information(
-                self.window, "Export COCO",
-                f"Wrote {n} annotations across {seg.num_frames} frames to:\n{path}")
-        except Exception as e:
-            QMessageBox.critical(self.window, "Error", f"COCO export failed:\n{e}")
 
     def load_annotations(self):
         if not self.window.video_data:
