@@ -61,6 +61,11 @@ class IOSettingsDialog(QDialog):
         model_url = str(self._settings.value(
             model_download.SETTINGS_KEY,
             model_download.DEFAULT_SAM_HELA_URL))
+        # Optional explicit local checkpoint path — takes precedence
+        # over the download URL when set, so collaborators can point
+        # the app at a file they already have on disk.
+        model_local = str(self._settings.value(
+            model_download.LOCAL_PATH_SETTINGS_KEY, ""))
 
         # ----- Output mode group ------------------------------------
         out_lbl = QLabel("Output folder")
@@ -138,6 +143,17 @@ class IOSettingsDialog(QDialog):
             "disk. Set this to a public HTTPS URL — Hugging Face, GitHub "
             "Release asset, S3, etc.")
 
+        # Local checkpoint file (overrides the download URL when set).
+        self.ed_model_local = QLineEdit(model_local)
+        self.ed_model_local.setPlaceholderText(
+            "/path/to/sam_hela/best.pt  (optional; bypasses download)")
+        self.ed_model_local.setToolTip(
+            "If you already have the SAM-HeLa checkpoint on disk, point\n"
+            "the app at it here. Takes precedence over the download URL\n"
+            "and stops the app from copying or re-downloading anything.")
+        self.btn_model_local_browse = QPushButton("Browse…")
+        self.btn_model_local_browse.clicked.connect(self._browse_model_local)
+
         # ----- Assemble form ----------------------------------------
         layout = QVBoxLayout(self)
 
@@ -164,10 +180,20 @@ class IOSettingsDialog(QDialog):
         divider2.setFrameShape(QFrame.Shape.HLine)
         divider2.setStyleSheet("color: #444;")
         layout.addWidget(divider2)
-        model_lbl = QLabel("SAM-HeLa download URL")
+        model_lbl = QLabel("SAM-HeLa checkpoint")
         model_lbl.setStyleSheet("font-weight: bold;")
         layout.addWidget(model_lbl)
-        layout.addWidget(self.ed_model_url)
+
+        local_row = QHBoxLayout()
+        local_row.addWidget(QLabel("Local file:"))
+        local_row.addWidget(self.ed_model_local, stretch=1)
+        local_row.addWidget(self.btn_model_local_browse)
+        layout.addLayout(local_row)
+
+        url_row = QHBoxLayout()
+        url_row.addWidget(QLabel("or URL:    "))
+        url_row.addWidget(self.ed_model_url, stretch=1)
+        layout.addLayout(url_row)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -194,6 +220,14 @@ class IOSettingsDialog(QDialog):
         self.lbl_preview.setText(f"Preview: {out}")
         self.ed_custom.setEnabled(self.rb_cust.isChecked())
 
+    def _browse_model_local(self):
+        start = self.ed_model_local.text() or os.path.expanduser("~")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Pick SAM-HeLa checkpoint", start,
+            "PyTorch checkpoint (*.pt *.pth);;All files (*)")
+        if path:
+            self.ed_model_local.setText(path)
+
     def _browse_custom_root(self):
         start = os.path.expanduser(self.ed_custom.text() or "~")
         path = QFileDialog.getExistingDirectory(
@@ -214,5 +248,7 @@ class IOSettingsDialog(QDialog):
         s.setValue(project_io.SETTING_AUTOSAVE_MASK_MIN_SEC,
                     int(self.spin_mask_min.value()))
         s.setValue(model_download.SETTINGS_KEY, self.ed_model_url.text().strip())
+        s.setValue(model_download.LOCAL_PATH_SETTINGS_KEY,
+                    self.ed_model_local.text().strip())
         s.sync()
         super().accept()

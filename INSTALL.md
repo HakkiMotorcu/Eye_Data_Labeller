@@ -80,19 +80,40 @@ torch --index-url …` swap as Windows above.
 
 ## Model weights
 
-`sam_hela/best.pt` (~400 MB) is downloaded on first use.
+`sam_hela/best.pt` (~400 MB) isn't bundled. Two ways to get the app to
+find it:
 
-### Where the app looks
+### A. Point at a file you already have (recommended for now)
 
-In order:
+Easiest when you can hand-deliver the file (USB, Box / Drive share,
+network drive). No upload required.
 
-1. **In-app setting**: open **I/O panel → Output settings… → SAM-HeLa
-   download URL**. Paste a public HTTPS URL.
+- **At install time**: every Tier B installer prompts at the end with
+  `Path to best.pt (or empty to skip):`. Paste the full path; the
+  installer remembers it via the app's settings store.
+- **From inside the app**: open **I/O → Output settings… → SAM-HeLa
+  checkpoint → Local file → Browse…** to pick the file. Or paste the
+  absolute path directly. Persists across launches.
+- **Via env var**: set `EYE_LABELLER_SAM_HELA_LOCAL_PATH=/full/path`
+  before launching (useful for shared lab machines).
+
+The file is read in place — nothing is copied, and the original
+location can be on a network drive or read-only volume.
+
+### B. Download from a URL on first use
+
+Use this once you have a public HTTPS URL to host `best.pt`.
+
+1. **In-app setting**: open **I/O → Output settings… → SAM-HeLa
+   checkpoint → or URL** and paste a public HTTPS URL.
 2. **Environment variable**: `EYE_LABELLER_SAM_HELA_URL=<url>` before
    launching.
 3. **Compile-time default**: `DEFAULT_SAM_HELA_URL` in
    `core/model_download.py` — set this before packaging the Tier A
    bundles so users don't need to configure anything.
+
+Resolution order: local file path → download URL → friendly error
+asking the user to configure one of the two.
 
 ### Where to host
 

@@ -45,9 +45,28 @@ DEFAULT_SAM_HELA_URL: str = ""
 ENV_VAR = "EYE_LABELLER_SAM_HELA_URL"
 SETTINGS_KEY = "model/sam_hela_url"
 
+# A user-pointed local checkpoint file takes precedence over downloads.
+# Useful while we don't have a public hosting URL yet — collaborators
+# drop the file somewhere on their disk and we just read it in place.
+LOCAL_PATH_ENV_VAR = "EYE_LABELLER_SAM_HELA_LOCAL_PATH"
+LOCAL_PATH_SETTINGS_KEY = "model/sam_hela_local_path"
+
 
 class MissingModelURL(RuntimeError):
     """Raised when no SAM-HeLa download URL is configured."""
+
+
+def resolve_sam_hela_local_path() -> str:
+    """Return a user-configured filesystem path to an existing
+    sam_hela/best.pt, or ``""`` when nothing's set."""
+    try:
+        from PyQt6.QtCore import QSettings
+        v = QSettings().value(LOCAL_PATH_SETTINGS_KEY, "")
+        if v:
+            return str(v)
+    except Exception:
+        pass
+    return os.environ.get(LOCAL_PATH_ENV_VAR, "")
 
 
 def resolve_sam_hela_url() -> str:

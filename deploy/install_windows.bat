@@ -70,6 +70,19 @@ echo [install] Writing launcher to %DESKTOP_LAUNCHER%
     echo python main.py %%*
 ) > "%DESKTOP_LAUNCHER%"
 
+REM ---- 4. Optional SAM-HeLa checkpoint path -----------------------
+echo.
+echo [install] Optional: if you already have sam_hela\best.pt on disk,
+echo [install] you can point the app at it now. Press Enter to skip --
+echo [install] you can configure it later in the app's I/O settings.
+set /p "MODEL_PATH=  Path to best.pt (or empty to skip): "
+if not "%MODEL_PATH%"=="" (
+    call conda activate "%ENV_NAME%"
+    python "%SCRIPT_DIR%configure_model.py" "%MODEL_PATH%" || (
+        echo [install] (path not saved; you can set it later in the app settings)
+    )
+)
+
 echo [install] Done. Double-click EyeDataLabeller on your Desktop to launch.
 endlocal
 exit /b 0

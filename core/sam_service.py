@@ -93,15 +93,24 @@ def default_sam_hela_path():
     """Where the fine-tuned SAM-HeLa checkpoint should live on disk.
 
     Order of preference:
-      1. The legacy in-project location (``<project>/models/checkpoints/
-         sam_hela/best.pt``) — used when the file already exists there
-         so dev installs don't re-download what they already have.
-      2. The per-user data directory under
-         ``user_data_root()/models/checkpoints/sam_hela/best.pt`` — the
-         canonical location for bundled installs and the place the
-         downloader writes to.
+      1. A user-configured **local path** (settings key
+         ``model/sam_hela_local_path`` or env var
+         ``EYE_LABELLER_SAM_HELA_LOCAL_PATH``). Lets collaborators
+         point at a file they already have without copying it. Wins
+         over every other option as long as the file exists.
+      2. The legacy in-project location
+         ``<project>/models/checkpoints/sam_hela/best.pt`` — for dev
+         installs that already have the file there.
+      3. ``user_data_root()/models/checkpoints/sam_hela/best.pt`` —
+         the canonical location for bundled installs and the place
+         the URL downloader writes to.
     """
-    from core import app_paths
+    from core import app_paths, model_download
+
+    explicit = model_download.resolve_sam_hela_local_path()
+    if explicit and os.path.exists(explicit):
+        return explicit
+
     legacy = os.path.join(app_paths.bundled_root(),
                            'models', 'checkpoints', 'sam_hela', 'best.pt')
     if os.path.exists(legacy):

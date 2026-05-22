@@ -62,4 +62,18 @@ exec python main.py "\$@"
 EOF
 chmod +x "$DESKTOP_LAUNCHER"
 
+# ---- 4. Optional SAM-HeLa checkpoint path ---------------------------
+echo ""
+say "Optional: if you already have sam_hela/best.pt on disk, you can"
+say "point the app at it now so SAM works out of the box."
+say "Press Enter to skip — you can configure it later via the app's"
+say "I/O > Output settings… dialog."
+printf "  Path to best.pt (or empty to skip): "
+read MODEL_PATH || MODEL_PATH=""
+if [ -n "$MODEL_PATH" ]; then
+    conda activate "$ENV_NAME"
+    python "$SCRIPT_DIR/configure_model.py" "$MODEL_PATH" || \
+        say "(path not saved; you can set it later in the app settings)"
+fi
+
 say "Done. Double-click EyeDataLabeller on your Desktop to launch."
