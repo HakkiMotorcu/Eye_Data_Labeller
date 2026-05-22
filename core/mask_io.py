@@ -73,24 +73,13 @@ def save_mask_tif(masks, path):
     A 2D ``(H, W)`` array is auto-promoted to a single-frame stack so the
     output is always a multi-page file (one IFD per frame), which is what
     the collaborator's Trackpy pipeline expects.
+
+    Writes are atomic (temp file + rename) and an existing target is
+    backed up to ``<path>.bak`` before being overwritten — see
+    ``core.project_io.atomic_write_tif``.
     """
-    masks = np.asarray(masks)
-    if masks.ndim == 2:
-        masks = masks[np.newaxis, ...]
-    if masks.ndim != 3:
-        raise ValueError(
-            f"save_mask_tif expects (T, H, W) or (H, W); got shape {masks.shape}")
-
-    if np.issubdtype(masks.dtype, np.floating):
-        masks = np.rint(masks)
-
-    if masks.max() > np.iinfo(np.uint16).max:
-        raise ValueError(
-            f"Cannot save mask: max instance ID {masks.max()} exceeds uint16. "
-            f"Relabel before export or split per-frame.")
-
-    out = masks.astype(np.uint16, copy=False)
-    tifffile.imwrite(path, out)
+    from core import project_io
+    project_io.atomic_write_tif(path, masks)
 
 
 def default_mask_path(image_path):

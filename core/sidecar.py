@@ -113,8 +113,14 @@ def meta_lookup(meta, class_type, instance_id):
 
 
 def save_meta(meta, path):
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(meta, f, indent=2, sort_keys=True)
+    """Save the meta dict to ``path``.
+
+    Writes go through the atomic+backup helper so a crash mid-write
+    can never leave a half-written file (and the previous version is
+    preserved at ``<path>.bak``).
+    """
+    from core import project_io
+    project_io.atomic_write_json(path, meta)
 
 
 def load_meta(path):
