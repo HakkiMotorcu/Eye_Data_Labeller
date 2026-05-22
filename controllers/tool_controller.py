@@ -3100,14 +3100,195 @@ class ToolController:
 
     def on_image_loaded(self):
         """Called by main.py and the model selector when a fresh image
-        is in play. Auto-precomputes the current frame so the first SAM
-        Box click is instant."""
+        is in play.
+
+        Two responsibilities:
+          1. Offer to resume the previous session (if one exists in the
+             out folder for this video).
+          2. Kick off the auto-precompute of the current frame's SAM
+             embedding so the first SAM Box click is instant.
+        """
+        # Resume prompt comes first so the embed worker (if started)
+        # only runs against the loaded session.
+        self._maybe_prompt_resume()
         if not SamService.available() or self.window.video_data is None:
             return
         if self.window._current_file is None:
             return
         fi = self.window._current_frame_idx
         self._start_embed_worker([fi], label=f"frame {fi}")
+
+    def _maybe_prompt_resume(self):
+        """If the current video has a saved session in its out folder,
+        ask the user whether to resume it.
+
+        Does nothing when no out folder / no saved files exist, when no
+        video is loaded, or when annotations are already in memory (we
+        don't want to clobber unsaved work)."""
+        from core import project_io
+        if self.window._current_file is None:
+            return
+        if self.annotations:
+            return  # work already in progress — don't ask
+        out_folder = self._resolve_out_folder()
+        summary = project_io.session_summary(out_folder)
+        if summary is None or not summary.get('has_masks'):
+            # Also consider the legacy next-to-video sidecars: load_segmentation
+            # already handles them via the file picker, but for resume we keep
+            # it simple — only prompt when the new layout has artifacts.
+            return
+
+        manifest = summary.get('manifest') or {}
+        counts = manifest.get('class_counts', {})
+        when = summary.get('updated_at', '?')
+        n_cell = counts.get('cell', '?')
+        n_vess = counts.get('vessel', '?')
+        n_cap  = counts.get('capillary', '?')
+
+        msg = QMessageBox(self.window)
+        msg.setWindowTitle("Resume session?")
+        msg.setIcon(QMessageBox.Icon.Question)
+        msg.setText(
+            f"Found a saved session for this video.\n\n"
+            f"  Folder:  {out_folder}\n"
+            f"  Saved:   {when}\n"
+            f"  Counts:  {n_cell} cells · {n_vess} vessels · {n_cap} capillaries\n")
+        msg.setInformativeText(
+            "Resume picks up where you left off (masks + names + locks).\n"
+            "Start fresh leaves the saved files alone — you can still "
+            "save over them later.")
+        btn_resume = msg.addButton("Resume", QMessageBox.ButtonRole.AcceptRole)
+        msg.addButton("Start fresh", QMessageBox.ButtonRole.RejectRole)
+        msg.setDefaultButton(btn_resume)
+        msg.exec()
+        if msg.clickedButton() is not btn_resume:
+            return
+
+        try:
+            self._load_session_from_out_folder(out_folder)
+        except Exception as e:
+            log_error('controller.resume', 'resume load failed', exc=e)
+            QMessageBox.critical(
+                self.window, "Resume failed",
+                f"Could not load saved session:\n\n{type(e).__name__}: {e}")
+
+    def _load_session_from_out_folder(self, out_folder):
+        """Programmatic load equivalent to load_segmentation, but
+        sourced from an output folder rather than a file picker."""
+        from core import mask_io, sidecar, project_io
+        from core.volume_data import SegmentationData
+
+        layers = mask_io.load_multiclass_from_folder(out_folder)
+        if not layers:
+            return  # nothing on disk after all
+
+        first_layer = next(iter(layers.values()))
+        T, H, W = first_layer.shape
+        seg = SegmentationData.empty(W, H, T)
+        seg.filepath = os.path.join(
+            out_folder, project_io.CLASS_MASK_FILES.get('cell', 'Cells.tif'))
+        for ct, arr in layers.items():
+            if arr.shape != (T, H, W):
+                raise ValueError(
+                    f"{ct} layer shape {arr.shape} does not match "
+                    f"cell shape {(T, H, W)}")
+            seg.set_layer(ct, arr.astype(np.int32))
+            for iid in np.unique(arr):
+                if iid == 0:
+                    continue
+                seg.register_instance_color(int(iid), class_type=ct)
+
+        self.window.seg_data = seg
+        self.window._seg_visible = True
+        self._clear_all_annotations()
+
+        # Rebuild annotations from each layer the same way load_segmentation
+        # does — cells get bboxes (one per blob); vessels & capillaries get
+        # paint-only entries per (frame, iid).
+        stair_color_map = dict(seg.instance_colors)
+        sx = sy = 1.0
+        if self.window.video_data:
+            if seg.width != self.window.video_data.width:
+                sx = self.window.video_data.width / seg.width
+            if seg.height != self.window.video_data.height:
+                sy = self.window.video_data.height / seg.height
+
+        max_stair = 0
+        for frame_idx in range(seg.num_frames):
+            bboxes = seg.get_all_bboxes(frame_idx)
+            for (stair_id, blob_idx), (x0, y0, w, h) in bboxes.items():
+                color = stair_color_map.get(stair_id, (255, 80, 80))
+                name = f"Cell_{stair_id}" if blob_idx == 0 \
+                       else f"Cell_{stair_id}_{blob_idx}"
+                if stair_id > max_stair:
+                    max_stair = stair_id
+                anno = Annotation2D(
+                    name, self.window.view_frame, self,
+                    start_pos=(x0 * sx, y0 * sy),
+                    start_size=(w * sx, h * sy),
+                    shape_mode='rect',
+                    frame_idx=frame_idx,
+                    instance_id=stair_id,
+                    color=color,
+                )
+                anno.sig_clicked.connect(self.select_annotation)
+                anno.sig_updated.connect(self._on_anno_updated)
+                self.annotations.append(anno)
+                anno.roi.setVisible(False)
+        self.anno_counter = max_stair
+
+        for ct in ('vessel', 'capillary'):
+            layer = seg.get_layer(ct)
+            if layer is None:
+                continue
+            colors = seg.get_colors(ct)
+            for fi in range(seg.num_frames):
+                for iid in np.unique(layer[fi]):
+                    if iid == 0:
+                        continue
+                    iid = int(iid)
+                    color = colors.get(iid, (147, 112, 219))
+                    label = 'Vessel' if ct == 'vessel' else 'Capillary'
+                    anno = Annotation2D(
+                        f"{label}_{iid}", self.window.view_frame, self,
+                        start_pos=(0, 0), start_size=(1, 1),
+                        shape_mode='rect', frame_idx=fi,
+                        instance_id=iid, color=color, class_type=ct)
+                    anno.sig_clicked.connect(self.select_annotation)
+                    anno.sig_updated.connect(self._on_anno_updated)
+                    self.annotations.append(anno)
+
+        # Meta sidecar in the out folder (class-aware lookups).
+        meta_path = os.path.join(out_folder, project_io.FILE_META)
+        meta = sidecar.load_meta(meta_path)
+        if meta is not None:
+            for anno in self.annotations:
+                if anno.instance_id is None:
+                    continue
+                rec = sidecar.meta_lookup(
+                    meta, anno.class_type, int(anno.instance_id))
+                if not rec:
+                    continue
+                ct = rec.get('class_type', anno.class_type)
+                if ct == 'vein':
+                    ct = 'vessel'
+                if ct in ('cell', 'vessel', 'capillary'):
+                    anno.class_type = ct
+                if rec.get('name'):
+                    anno.name = rec['name']
+                if rec.get('locked'):
+                    anno.set_locked(True)
+                if 'notes' in rec:
+                    anno.notes = rec['notes']
+
+        self._normalize_anno_names_and_colors()
+        self._mark_seg_clean()
+        cur = self.window._current_frame_idx
+        self._show_frame_annotations(cur)
+        self.window._update_seg_overlay()
+        self._update_stats()
+        log('controller.resume', 'session loaded',
+            out_folder=out_folder, n_annos=len(self.annotations))
 
     def _on_frame_changed_embed(self, frame_idx):
         """Hook on state.frame_changed — precompute the new frame in the
