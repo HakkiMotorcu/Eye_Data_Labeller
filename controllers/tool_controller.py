@@ -968,15 +968,20 @@ class ToolController:
                 if anno.class_type not in flt:
                     continue
                 # For paint-only classes (vessel / capillary) the seg
-                # pixels ARE the annotation — an entry with zero painted
-                # pixels on this frame is a phantom (e.g. from spawning
-                # with "all frames" but only painting one). Hide it so
-                # the list reflects what's actually drawn.
+                # pixels ARE the annotation. An entry with no pixels on
+                # this frame is normally a phantom (e.g. from spawning
+                # with "all frames" and only painting one) and gets
+                # hidden — BUT a brand-new annotation that has no pixels
+                # anywhere yet is the user's freshly-spawned vessel
+                # they're about to paint into, so it stays visible.
                 if (anno.is_paint_only and seg is not None
                         and anno.instance_id is not None):
                     layer = seg.get_layer(anno.class_type)
-                    if not np.any(layer[frame_idx] == anno.instance_id):
-                        continue
+                    here = np.any(layer[frame_idx] == anno.instance_id)
+                    if not here:
+                        anywhere = np.any(layer == anno.instance_id)
+                        if anywhere:
+                            continue  # phantom on this frame
                 visible_annos.append(anno)
                 cls = class_labels.get(anno.class_type, anno.class_type)
                 vis_glyph  = " " if hidden else "●"
@@ -2278,6 +2283,15 @@ class ToolController:
                                 self.ctrl._undo_stack.push(
                                     BrushStrokeCmd(self.ctrl, fi, snap, new_mask,
                                                    class_type=ct))
+                                # A paint-only entry that was a phantom
+                                # (hidden because no pixels here) becomes
+                                # real the moment we paint into it — and
+                                # vice-versa for an erase that wipes the
+                                # last pixel. Refresh the list so it
+                                # reflects the new state immediately.
+                                if ct in ('vessel', 'capillary'):
+                                    self.ctrl._show_frame_annotations(fi)
+                                    self.ctrl._update_stats()
                             self.ctrl._brush_mask_snapshot = None
                             self.ctrl._brush_snapshot_class = None
                         return True
