@@ -760,15 +760,35 @@ class MainWindow(QMainWindow):
         self.btn_io_settings.setToolTip(
             "Where exports / autosave files land + autosave cadence.\n"
             "Persists across launches via QSettings.")
-        self.btn_load_seg = QPushButton("Load Seg")
-        self.btn_load_seg.setToolTip(
-            "Load saved segmentation (the new out-folder layout OR the\n"
-            "legacy next-to-video {stem}_Cells.tif style).")
-        self.btn_load_seg.setStyleSheet("color: #e9c46a; font-weight: bold;")
+        self.btn_load_project = QPushButton("Load Project")
+        self.btn_load_project.setToolTip(
+            "Open a project output folder (Cells.tif + Vessels.tif +\n"
+            "Capillaries.tif + Meta.json). Loads every class layer plus\n"
+            "the metadata in one shot — replaces the current session.")
+        self.btn_load_project.setStyleSheet("color: #e9c46a; font-weight: bold;")
         primary_row.addWidget(self.btn_io_settings)
-        primary_row.addWidget(self.btn_load_seg)
+        primary_row.addWidget(self.btn_load_project)
         primary_row.addWidget(self.btn_save_seg)
         io_layout.addLayout(primary_row)
+
+        # Secondary load row — single-class TIF that merges into the
+        # current session without touching the other class layers.
+        load_class_row = QHBoxLayout()
+        load_class_row.setSpacing(4)
+        self.btn_load_class = QPushButton("Load Single Class…")
+        self.btn_load_class.setToolTip(
+            "Import one mask TIF into a single class layer (cell / vessel\n"
+            "/ capillary) of your choice. Leaves the other classes alone.\n"
+            "Use this when you want to merge a separately-saved layer\n"
+            "into the current project.")
+        self.btn_load_class.setStyleSheet("color: #e9c46a;")
+        load_class_row.addWidget(self.btn_load_class)
+        load_class_row.addStretch(1)
+        io_layout.addLayout(load_class_row)
+
+        # Keep the legacy attribute name pointing at Load Project so any
+        # surviving code path / icon mapping still resolves.
+        self.btn_load_seg = self.btn_load_project
 
         # COCO sidecar export — modern, pipeline-friendly format.
         coco_row = QHBoxLayout()

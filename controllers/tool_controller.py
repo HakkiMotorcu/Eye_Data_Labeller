@@ -803,7 +803,9 @@ class ToolController:
         self.window.btn_export_all.clicked.connect(self.export_all)
         self.window.btn_export_coco.clicked.connect(self.export_coco_sidecar)
         self.window.btn_import.clicked.connect(self.load_annotations)
-        self.window.btn_load_seg.clicked.connect(self.load_segmentation)
+        # Load actions: Project (folder picker) vs Single Class (file picker).
+        self.window.btn_load_project.clicked.connect(self.load_project_folder)
+        self.window.btn_load_class.clicked.connect(self.load_single_class_tif)
         self.window.btn_io_settings.clicked.connect(self.open_io_settings)
         self.window.btn_run_sam.clicked.connect(self.run_sam_segmentation)
         self.window.combo_sam_model.currentIndexChanged.connect(self._on_sam_model_changed)
@@ -2738,6 +2740,206 @@ class ToolController:
         (220, 220, 80),  (220, 80, 220),  (80, 220, 220),  (255, 200, 120),
         (120, 200, 255), (200, 255, 120), (240, 128, 180), (128, 240, 180),
     ]
+
+    def load_project_folder(self):
+        """User picks an output folder; we load every class TIF + meta
+        from it as a single project. Replaces the current session.
+
+        Defaults the dialog to the current video's resolved out folder,
+        so the user just hits Enter in the common case.
+        """
+        from core import project_io
+
+        start = (self._resolve_out_folder()
+                  or (os.path.dirname(self.window._current_file)
+                       if self.window._current_file else os.getcwd()))
+        # If start doesn't exist yet, walk up to the nearest real folder.
+        while start and not os.path.isdir(start):
+            parent = os.path.dirname(start)
+            if parent == start:
+                start = os.getcwd()
+                break
+            start = parent
+
+        folder = QFileDialog.getExistingDirectory(
+            self.window, "Load project folder", start)
+        if not folder:
+            return
+
+        summary = project_io.session_summary(folder)
+        if summary is None or not summary.get('has_masks'):
+            QMessageBox.warning(
+                self.window, "Load Project",
+                f"No mask TIFs found in:\n{folder}\n\n"
+                f"Expected at least one of "
+                f"{', '.join(project_io.CLASS_MASK_FILES.values())}.")
+            return
+
+        if self.annotations:
+            reply = QMessageBox.question(
+                self.window, "Replace current session?",
+                f"Loading this project will replace the current session "
+                f"(annotations, masks, meta).\n\n"
+                f"  Folder:  {folder}\n"
+                f"  Saved:   {summary.get('updated_at', '?')}\n\n"
+                f"Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        try:
+            self._load_session_from_out_folder(folder)
+        except Exception as e:
+            log_error('controller.load_project', 'load failed', exc=e)
+            QMessageBox.critical(
+                self.window, "Load Project",
+                f"Could not load project:\n\n{type(e).__name__}: {e}")
+            return
+
+        QMessageBox.information(
+            self.window, "Load Project",
+            f"Loaded:\n{folder}")
+
+    def load_single_class_tif(self):
+        """Import a single TIF into one chosen class layer, merging it
+        into the current session without touching the other classes.
+        """
+        from core import mask_io, project_io
+        from core.volume_data import SegmentationData
+
+        start_dir = (self._resolve_out_folder()
+                      or (os.path.dirname(self.window._current_file)
+                           if self.window._current_file else os.getcwd()))
+        path, _ = QFileDialog.getOpenFileName(
+            self.window, "Load single-class mask TIF", start_dir,
+            "Instance mask TIF (*.tif *.tiff);;All Files (*)")
+        if not path:
+            return
+
+        from PyQt6.QtWidgets import QInputDialog
+        choices = ['cell', 'vessel', 'capillary']
+        # Pre-select based on filename if possible.
+        base = os.path.basename(path).lower()
+        default_idx = 0
+        if 'vessel' in base:
+            default_idx = 1
+        elif 'capill' in base:
+            default_idx = 2
+        ct, ok = QInputDialog.getItem(
+            self.window, "Load Class",
+            f"Import {os.path.basename(path)} as which class?",
+            [c.capitalize() for c in choices], default_idx, False)
+        if not ok:
+            return
+        ct = ct.lower()
+
+        try:
+            arr = mask_io.load_mask_tif(path).astype(np.int32)
+        except Exception as e:
+            QMessageBox.critical(self.window, "Load Class",
+                                  f"Failed to read TIF:\n\n{e}")
+            return
+
+        T, H, W = arr.shape
+        seg = self.window.seg_data
+        if seg is None:
+            seg = SegmentationData.empty(W, H, T)
+            seg.filepath = path
+            self.window.seg_data = seg
+            self.window._seg_visible = True
+        else:
+            if (T, H, W) != (seg.num_frames, seg.height, seg.width):
+                QMessageBox.critical(
+                    self.window, "Load Class",
+                    f"Shape mismatch with current session:\n"
+                    f"  current: {(seg.num_frames, seg.height, seg.width)}\n"
+                    f"  picked:  {(T, H, W)}\n\n"
+                    f"Refusing to load a layer that doesn't fit.")
+                return
+
+        # Confirm overwrite if the target class already has content.
+        existing_layer = seg.get_layer(ct)
+        if existing_layer is not None and np.any(existing_layer):
+            reply = QMessageBox.question(
+                self.window, "Overwrite class?",
+                f"The {ct} layer already has painted pixels. Replace it "
+                f"with the contents of {os.path.basename(path)}?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        # Wipe the target class's annotations + colors + pixels, then
+        # rebuild from the freshly-loaded layer.
+        to_drop = [a for a in self.annotations if a.class_type == ct]
+        for anno in to_drop:
+            try:
+                anno.delete_ui()
+            except Exception:
+                pass
+            self.annotations.remove(anno)
+        if self.active_annotation in to_drop:
+            self.active_annotation = None
+        seg.get_colors(ct).clear()
+        seg.set_layer(ct, arr)
+        for iid in np.unique(arr):
+            if iid == 0:
+                continue
+            seg.register_instance_color(int(iid), class_type=ct)
+
+        # Rebuild annotations for the loaded class only.
+        if ct == 'cell':
+            for frame_idx in range(seg.num_frames):
+                bboxes = seg.get_all_bboxes(frame_idx, class_type='cell')
+                for (stair_id, blob_idx), (x0, y0, w, h) in bboxes.items():
+                    name = (f"Cell_{stair_id}" if blob_idx == 0
+                             else f"Cell_{stair_id}_{blob_idx}")
+                    anno = Annotation2D(
+                        name, self.window.view_frame, self,
+                        start_pos=(x0, y0), start_size=(w, h),
+                        shape_mode='rect', frame_idx=frame_idx,
+                        instance_id=stair_id,
+                        color=seg.get_colors('cell').get(
+                            int(stair_id), (255, 80, 80)),
+                    )
+                    anno.sig_clicked.connect(self.select_annotation)
+                    anno.sig_updated.connect(self._on_anno_updated)
+                    self.annotations.append(anno)
+                    anno.roi.setVisible(False)
+        else:
+            label = 'Vessel' if ct == 'vessel' else 'Capillary'
+            colors = seg.get_colors(ct)
+            for fi in range(seg.num_frames):
+                for iid in np.unique(arr[fi]):
+                    if iid == 0:
+                        continue
+                    iid = int(iid)
+                    anno = Annotation2D(
+                        f"{label}_{iid}", self.window.view_frame, self,
+                        start_pos=(0, 0), start_size=(1, 1),
+                        shape_mode='rect', frame_idx=fi,
+                        instance_id=iid,
+                        color=colors.get(iid, (147, 112, 219)),
+                        class_type=ct)
+                    anno.sig_clicked.connect(self.select_annotation)
+                    anno.sig_updated.connect(self._on_anno_updated)
+                    self.annotations.append(anno)
+
+        self._normalize_anno_names_and_colors()
+        self._mark_seg_dirty()  # imported pixels need a save
+        cur = self.window._current_frame_idx
+        self._show_frame_annotations(cur)
+        self.window._update_seg_overlay()
+        self._update_stats()
+        log('controller.load_class', 'merged single class',
+            class_type=ct, path=path,
+            n_instances=int(len(np.unique(arr)) - 1))
+        QMessageBox.information(
+            self.window, "Load Class",
+            f"Imported {ct} layer from:\n{os.path.basename(path)}")
 
     def load_segmentation(self):
         from core.volume_data import SegmentationData
