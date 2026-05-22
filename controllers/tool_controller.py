@@ -723,6 +723,10 @@ class ToolController:
         self._brush_cursor = None       # circle item showing brush on view
         self._brush_mask_snapshot = None # mask copy before current brush stroke
         self._brush_snapshot_class = None # class layer that snapshot came from
+        # Auto-save dirty tracking for smart-mode mask flushing.
+        self._seg_dirty_since_save = False
+        import time as _time_mod
+        self._last_mask_save_ts = _time_mod.monotonic()
         # SAM service — lazy-loaded on first use. Default model is the
         # collaborators' fine-tuned ViT-B (sam_hela). User can swap via
         # the SAM section in the View panel.
@@ -1143,6 +1147,53 @@ class ToolController:
     # ------------------------------------------------------------------
     # ANNOTATION CRUD HELPERS
     # ------------------------------------------------------------------
+    # ----- Project I/O helpers ------------------------------------------
+    # Dirty-mask tracking — set True every time seg pixels change, reset
+    # whenever the project is saved (explicit Save or smart autosave).
+    # Defined as an instance attribute in __init__; helpers below.
+    def _mark_seg_dirty(self):
+        self._seg_dirty_since_save = True
+
+    def _mark_seg_clean(self):
+        self._seg_dirty_since_save = False
+        import time
+        self._last_mask_save_ts = time.monotonic()
+
+    def _io_settings(self):
+        """Return a ``(mode, custom_root)`` tuple from QSettings."""
+        from PyQt6.QtCore import QSettings
+        from core import project_io
+        s = QSettings()
+        mode = s.value(project_io.SETTING_OUTPUT_MODE,
+                        project_io.DEFAULTS[project_io.SETTING_OUTPUT_MODE])
+        root = s.value(project_io.SETTING_OUTPUT_CUSTOM_ROOT,
+                        project_io.DEFAULTS[project_io.SETTING_OUTPUT_CUSTOM_ROOT])
+        return str(mode or project_io.OUTPUT_MODE_SUBFOLDER), str(root or "")
+
+    def _resolve_out_folder(self, video_path=None):
+        """Return the per-video output folder for the active session.
+
+        Used by every save / load / autosave / resume path so the
+        location is consistent.
+        """
+        from core import project_io
+        video_path = video_path or self.window._current_file
+        if not video_path:
+            return ""
+        mode, root = self._io_settings()
+        return project_io.resolve_output_folder(video_path, mode, root)
+
+    def _class_counts_for_manifest(self):
+        """Per-class *unique-instance* counts for the project manifest."""
+        seen = {'cell': set(), 'vessel': set(), 'capillary': set()}
+        for a in self.annotations:
+            if a.instance_id is None:
+                continue
+            ct = getattr(a, 'class_type', 'cell')
+            if ct in seen:
+                seen[ct].add(int(a.instance_id))
+        return {k: len(v) for k, v in seen.items()}
+
     def _ensure_seg_data(self):
         """Guarantee ``window.seg_data`` exists once a video is loaded.
 
@@ -2283,6 +2334,7 @@ class ToolController:
                                 self.ctrl._undo_stack.push(
                                     BrushStrokeCmd(self.ctrl, fi, snap, new_mask,
                                                    class_type=ct))
+                                self.ctrl._mark_seg_dirty()
                                 # A paint-only entry that was a phantom
                                 # (hidden because no pixels here) becomes
                                 # real the moment we paint into it — and
@@ -2421,15 +2473,14 @@ class ToolController:
         self.window._update_seg_overlay()
 
     def save_seg_map(self):
-        """Save the segmentation masks as 3 per-class TIFs.
+        """Save the project — 3 per-class TIFs + Meta.json + project.json.
 
-        Cells, vessels, and capillaries are independent semantic layers
-        and each goes to its own ``{video}_Cells.tif`` / ``_Vessels.tif``
-        / ``_Capillaries.tif`` file. Empty classes are skipped so we
-        don't litter the directory.
+        All artifacts land in the per-video output folder resolved from
+        QSettings (default: ``<video_dir>/out/<stem>/``). Writes are
+        atomic; existing files are backed up to ``<file>.bak`` before
+        overwrite. Empty class layers are skipped.
         """
-        from core import mask_io
-        from core import sidecar
+        from core import sidecar, project_io
 
         seg = self.window.seg_data
         if seg is None:
@@ -2444,31 +2495,51 @@ class ToolController:
                                 "to save the masks.")
             return
 
+        out_folder = self._resolve_out_folder(source)
+        project_io.ensure_dir(out_folder)
+
+        written = []
         try:
-            written = mask_io.save_multiclass_masks(seg, source)
-            # Meta sidecar matches the cell mask path (or the image when
-            # there are no cells yet — vessels still benefit from meta).
-            meta_anchor = (mask_io.class_mask_path(source, 'cell')
-                            if 'cell' in {'cell'}  # always anchor to cells path
-                            else written[0] if written else source)
-            meta_path = sidecar.meta_path_for(meta_anchor)
+            for ct, fname in project_io.CLASS_MASK_FILES.items():
+                layer = seg.get_layer(ct)
+                if layer is None or not layer.any():
+                    continue
+                target = os.path.join(out_folder, fname)
+                project_io.atomic_write_tif(target, layer)
+                written.append(target)
+
+            meta_path = os.path.join(out_folder, project_io.FILE_META)
             meta = sidecar.collect_meta_from_annotations(self.annotations)
             sidecar.save_meta(meta, meta_path)
+
+            project_io.write_project_manifest(
+                out_folder,
+                source_video_path=source,
+                frame_count=int(seg.num_frames),
+                frame_size=(int(seg.height), int(seg.width)),
+                class_counts=self._class_counts_for_manifest(),
+            )
         except Exception as e:
             QMessageBox.critical(self.window, "Error", str(e))
             return
 
+        # Mark the seg layers as clean so the smart autosave knows it
+        # doesn't need to re-flush masks until something changes again.
+        self._mark_seg_clean()
+
         if not written:
             QMessageBox.information(
                 self.window, "Save Seg",
-                "Nothing to save — every class layer is empty.")
+                f"No mask layers had pixels — wrote only Meta.json + "
+                f"project.json:\n{out_folder}")
             return
 
         lines = "\n".join(f"  {os.path.basename(p)}" for p in written)
         QMessageBox.information(
             self.window, "Save Seg",
-            f"Saved {seg.num_frames} frames as 3-class masks:\n{lines}\n"
-            f"meta: {os.path.basename(meta_path)}")
+            f"Saved into {out_folder}:\n{lines}\n"
+            f"  {project_io.FILE_META}\n"
+            f"  {project_io.FILE_PROJECT}")
 
     def propagate_vein_mask(self):
         """Copy the current frame's painted mask pixels for the active annotation
@@ -2638,21 +2709,26 @@ class ToolController:
         ext = os.path.splitext(path)[1].lower()
         try:
             if ext in ('.tif', '.tiff'):
-                # The user might have picked any of the 3 per-class TIFs
-                # (or a legacy _Masks.tif). Derive the image stem from
-                # the filename suffix and try to load all sibling layers.
-                anchor = path
-                for ct, suffix in mask_io.CLASS_FILENAME_SUFFIX.items():
-                    if path.endswith(suffix):
-                        anchor = path[:-len(suffix)] + os.path.splitext(path)[1]
-                        # Reconstruct an image-like path so siblings are
-                        # discovered relative to the same stem.
-                        anchor = path[:-len(suffix)] + '.x'
-                        break
-                if path.endswith('_Masks.tif'):
-                    anchor = path[:-len('_Masks.tif')] + '.x'
+                # Three layouts to detect:
+                #   1. Project out folder containing Cells.tif / Vessels.tif / Capillaries.tif
+                #   2. Legacy next-to-video {stem}_Cells.tif etc.
+                #   3. Standalone TIF — treat as a cell layer.
+                from core import project_io
+                picked_dir = os.path.dirname(os.path.abspath(path))
+                picked_name = os.path.basename(path)
+                if picked_name in project_io.CLASS_MASK_FILES.values():
+                    # Inside an out folder — sweep all canonical files there.
+                    layers = mask_io.load_multiclass_from_folder(picked_dir)
+                else:
+                    anchor = path
+                    for ct, suffix in mask_io.CLASS_FILENAME_SUFFIX.items():
+                        if path.endswith(suffix):
+                            anchor = path[:-len(suffix)] + '.x'
+                            break
+                    if path.endswith('_Masks.tif'):
+                        anchor = path[:-len('_Masks.tif')] + '.x'
+                    layers = mask_io.load_multiclass_masks(anchor)
 
-                layers = mask_io.load_multiclass_masks(anchor)
                 if not layers:
                     # Fall back: treat the picked file alone as the cells layer
                     layers = {'cell': mask_io.load_mask_tif(path)}
@@ -2776,9 +2852,17 @@ class ToolController:
         # Apply per-instance metadata from the meta sidecar (if present)
         # so names, class_type, and locked state survive a save/load cycle.
         # The lookup is class-aware so vessels and capillaries with the
-        # same iid never adopt each other's records.
-        from core import sidecar
-        meta = sidecar.load_meta(sidecar.meta_path_for(path))
+        # same iid never adopt each other's records. Look in the new
+        # out-folder layout first, then fall back to the legacy sidecar
+        # next to the picked TIF.
+        from core import sidecar, project_io
+        meta = None
+        picked_dir = os.path.dirname(os.path.abspath(path))
+        picked_meta = os.path.join(picked_dir, project_io.FILE_META)
+        if os.path.exists(picked_meta):
+            meta = sidecar.load_meta(picked_meta)
+        if meta is None:
+            meta = sidecar.load_meta(sidecar.meta_path_for(path))
         if meta is not None:
             for anno in self.annotations:
                 if anno.instance_id is None:

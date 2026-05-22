@@ -135,17 +135,49 @@ def load_multiclass_masks(image_path):
     Returns a dict {class_type: (T, H, W) uint16}. Missing classes are
     omitted. If only the legacy ``_Masks.tif`` exists, it's returned
     under the ``cell`` key — older single-layer saves migrate cleanly.
+
+    Also peeks into the new per-video output folder (``out/<stem>/``)
+    when the per-stem siblings aren't found in the video's directory.
     """
     import os
     found = {}
-    # Modern per-class files
+    # Modern per-class files next to the source image (legacy layout).
     for ct in CLASS_FILENAME_SUFFIX:
         p = class_mask_path(image_path, ct)
         if os.path.exists(p):
             found[ct] = load_mask_tif(p)
-    # Legacy single-layer file → treat as cells
     if 'cell' not in found:
         legacy = default_mask_path(image_path)
         if os.path.exists(legacy):
             found['cell'] = load_mask_tif(legacy)
+
+    # If nothing matched, try the new out-folder layout.
+    if not found:
+        from core import project_io  # local import — avoid load-time cycle
+        for mode in (project_io.OUTPUT_MODE_SUBFOLDER,
+                     project_io.OUTPUT_MODE_PREFIXED):
+            folder = project_io.resolve_output_folder(image_path, mode)
+            extra = load_multiclass_from_folder(folder)
+            if extra:
+                found.update(extra)
+                break
     return found
+
+
+def load_multiclass_from_folder(folder):
+    """Read per-class mask TIFs from a project output folder.
+
+    Filenames follow the canonical names in
+    ``project_io.CLASS_MASK_FILES``. Returns ``{class_type: arr}``;
+    missing classes are omitted.
+    """
+    import os
+    from core import project_io
+    if not folder or not os.path.isdir(folder):
+        return {}
+    out = {}
+    for ct, fname in project_io.CLASS_MASK_FILES.items():
+        p = os.path.join(folder, fname)
+        if os.path.exists(p):
+            out[ct] = load_mask_tif(p)
+    return out
