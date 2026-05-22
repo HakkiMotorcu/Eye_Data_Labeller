@@ -798,6 +798,7 @@ class ToolController:
         self.window.btn_export_coco.clicked.connect(self.export_coco_sidecar)
         self.window.btn_import.clicked.connect(self.load_annotations)
         self.window.btn_load_seg.clicked.connect(self.load_segmentation)
+        self.window.btn_io_settings.clicked.connect(self.open_io_settings)
         self.window.btn_run_sam.clicked.connect(self.run_sam_segmentation)
         self.window.combo_sam_model.currentIndexChanged.connect(self._on_sam_model_changed)
         self.window.btn_sam_precompute.clicked.connect(self.precompute_all_frames)
@@ -1147,6 +1148,15 @@ class ToolController:
     # ------------------------------------------------------------------
     # ANNOTATION CRUD HELPERS
     # ------------------------------------------------------------------
+    def open_io_settings(self):
+        """Open the modal output / autosave settings dialog. On accept,
+        re-apply the autosave timer interval so changes take effect
+        without a restart."""
+        from ui.io_settings_dialog import IOSettingsDialog
+        dlg = IOSettingsDialog(self.window)
+        if dlg.exec():
+            self._apply_autosave_interval()
+
     # ----- Project I/O helpers ------------------------------------------
     # Dirty-mask tracking — set True every time seg pixels change, reset
     # whenever the project is saved (explicit Save or smart autosave).

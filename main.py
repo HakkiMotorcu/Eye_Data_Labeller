@@ -101,7 +101,11 @@ def main():
     if is_debug():
         log('main', 'launching with debug enabled', argv=sys.argv)
     app = QApplication(sys.argv)
+    app.setOrganizationName("EyeDataLabeller")
     app.setApplicationName("Eye Data Labeller")
+    # QSettings without explicit identity ends up in a generic
+    # "Unknown organization" bucket on macOS — pin it so the I/O
+    # settings dialog's values are stable across launches.
 
     # Dark theme — consistent palette across all widgets.
     try:

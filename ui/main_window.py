@@ -739,6 +739,17 @@ class MainWindow(QMainWindow):
         io_layout.setContentsMargins(4, 2, 4, 4)
         io_layout.setSpacing(4)
 
+        # Output / autosave settings — opens a modal dialog.
+        settings_row = QHBoxLayout()
+        settings_row.setSpacing(4)
+        self.btn_io_settings = QPushButton("Output settings…")
+        self.btn_io_settings.setToolTip(
+            "Choose where exports / autosave files land, and how often\n"
+            "autosave runs. Stored in your Qt user settings.")
+        settings_row.addWidget(self.btn_io_settings)
+        settings_row.addStretch(1)
+        io_layout.addLayout(settings_row)
+
         # Format picker + Load Seg on one row
         fmt_row = QHBoxLayout()
         fmt_row.setSpacing(4)
