@@ -902,7 +902,7 @@ class ToolController:
         self._autosave_path = None
         self._autosave_timer = QTimer()
         self._autosave_timer.timeout.connect(self._autosave)
-        self._autosave_timer.start(60_000)
+        self._apply_autosave_interval()  # reads QSettings, defaults to 30s
 
     # ------------------------------------------------------------------
     # FRAME NAVIGATION
@@ -4626,30 +4626,130 @@ class ToolController:
     # AUTO-SAVE
     # ------------------------------------------------------------------
     def _get_autosave_path(self):
+        """autosave.json lives in the out folder when one is available,
+        falling back to the legacy hidden file next to the video so older
+        sessions can still recover."""
+        from core import project_io
         if self.window._current_file:
+            out_folder = self._resolve_out_folder()
+            if out_folder:
+                return os.path.join(out_folder, project_io.FILE_AUTOSAVE)
+            # Fallback: next to the video, hidden-prefixed (legacy).
             d = os.path.dirname(self.window._current_file)
             stem = os.path.splitext(os.path.basename(self.window._current_file))[0]
             return os.path.join(d, f"._{stem}_autosave.json")
         return os.path.join(os.getcwd(), "._autosave_annotations.json")
 
+    def _autosave_mode(self):
+        from PyQt6.QtCore import QSettings
+        from core import project_io
+        s = QSettings()
+        return str(s.value(project_io.SETTING_AUTOSAVE_MODE,
+                            project_io.DEFAULTS[project_io.SETTING_AUTOSAVE_MODE]))
+
+    def _autosave_mask_min_sec(self):
+        from PyQt6.QtCore import QSettings
+        from core import project_io
+        s = QSettings()
+        try:
+            return int(s.value(project_io.SETTING_AUTOSAVE_MASK_MIN_SEC,
+                                project_io.DEFAULTS[project_io.SETTING_AUTOSAVE_MASK_MIN_SEC]))
+        except (TypeError, ValueError):
+            return project_io.DEFAULTS[project_io.SETTING_AUTOSAVE_MASK_MIN_SEC]
+
+    def _apply_autosave_interval(self):
+        """Read the autosave interval (seconds) from QSettings and
+        (re)start the timer with it. Called at startup and from the
+        I/O settings dialog when the user changes the value."""
+        from PyQt6.QtCore import QSettings
+        from core import project_io
+        s = QSettings()
+        try:
+            sec = int(s.value(project_io.SETTING_AUTOSAVE_INTERVAL_SEC,
+                               project_io.DEFAULTS[project_io.SETTING_AUTOSAVE_INTERVAL_SEC]))
+        except (TypeError, ValueError):
+            sec = project_io.DEFAULTS[project_io.SETTING_AUTOSAVE_INTERVAL_SEC]
+        sec = max(5, sec)
+        self._autosave_timer.start(sec * 1000)
+
     def _autosave(self):
-        if not self.annotations:
+        """Periodic auto-save tick. Behavior depends on mode:
+
+        - ``off``:   no-op.
+        - ``light``: annotations + meta JSON only (cheap, <10 KB).
+        - ``smart``: light + per-class mask TIFs when the seg has been
+                     dirtied AND the mask-min-interval has elapsed.
+
+        Skips while a brush stroke is in flight to avoid mid-stroke
+        snapshots — the next tick picks it up.
+        """
+        from core import project_io, sidecar
+        if not self.annotations and not (
+                self.window.seg_data is not None and self._seg_dirty_since_save):
             return
         if not self.window.video_data:
             return
-        path = self._get_autosave_path()
+        mode = self._autosave_mode()
+        if mode == project_io.AUTOSAVE_OFF:
+            return
+        if getattr(self, '_is_painting', False):
+            return  # mid-stroke; try again next tick
+
+        # Always write the lightweight autosave snapshot (annotations
+        # only) so the user can recover names/classes/locks on crash.
         try:
             rows = self._get_anno_rows()
-            with open(path, "w") as f:
-                json.dump({"annotations": rows}, f)
-            self._autosave_path = path
+            project_io.atomic_write_json(
+                self._get_autosave_path(),
+                {"annotations": rows, "schema": 2},
+                keep_backup=False)
+            self._autosave_path = self._get_autosave_path()
         except Exception as e:
-            print(f"Auto-save failed: {e}")
+            log_error('controller.autosave', f'light snapshot failed: {e}')
+
+        if mode != project_io.AUTOSAVE_SMART:
+            return
+
+        # Smart mode: flush masks + meta + manifest when dirty and the
+        # min interval has elapsed since the last mask save. Cheap when
+        # the seg is clean (no I/O at all).
+        import time
+        seg = self.window.seg_data
+        if seg is None or not self._seg_dirty_since_save:
+            return
+        if time.monotonic() - self._last_mask_save_ts < self._autosave_mask_min_sec():
+            return
+
+        source = self.window._current_file
+        if not source:
+            return
+        out_folder = self._resolve_out_folder()
+        try:
+            project_io.ensure_dir(out_folder)
+            for ct, fname in project_io.CLASS_MASK_FILES.items():
+                layer = seg.get_layer(ct)
+                if layer is None or not layer.any():
+                    continue
+                project_io.atomic_write_tif(
+                    os.path.join(out_folder, fname), layer)
+            sidecar.save_meta(
+                sidecar.collect_meta_from_annotations(self.annotations),
+                os.path.join(out_folder, project_io.FILE_META))
+            project_io.write_project_manifest(
+                out_folder,
+                source_video_path=source,
+                frame_count=int(seg.num_frames),
+                frame_size=(int(seg.height), int(seg.width)),
+                class_counts=self._class_counts_for_manifest(),
+                extra={"autosaved": True},
+            )
+            self._mark_seg_clean()
+            log('controller.autosave', 'smart mask flush', out=out_folder)
+        except Exception as e:
+            log_error('controller.autosave', f'mask flush failed: {e}')
 
     def cleanup_autosave(self):
-        path = self._autosave_path or self._get_autosave_path()
-        if path and os.path.exists(path):
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+        """No-op by design: autosave.json is meant to survive crashes
+        AND clean exits so the resume prompt on next open can reach it.
+        Kept as a hook for tests / future cleanup policies."""
+        return
