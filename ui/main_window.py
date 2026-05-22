@@ -521,7 +521,11 @@ class MainWindow(QMainWindow):
         # Save Seg is a whole-stack save action, not a per-cell tool —
         # it lives in the I/O panel below, next to Load Seg.
         self.btn_save_seg = QPushButton("Save Seg")
-        self.btn_save_seg.setToolTip("Export modified segmentation masks (mask TIF)")
+        self.btn_save_seg.setToolTip(
+            "Write the whole project to the output folder:\n"
+            "  Cells.tif, Vessels.tif, Capillaries.tif (ZLIB-compressed)\n"
+            "  Meta.json, project.json\n"
+            "Atomic + backup-on-overwrite. Resets the 'unsaved' indicator.")
         self.btn_save_seg.setStyleSheet("color: #2a9d8f; font-weight: bold;")
 
         # Force paint toggle (bypasses safe-paint mode)
@@ -739,76 +743,34 @@ class MainWindow(QMainWindow):
         io_layout.setContentsMargins(4, 2, 4, 4)
         io_layout.setSpacing(4)
 
-        # Output / autosave settings — opens a modal dialog.
-        settings_row = QHBoxLayout()
-        settings_row.setSpacing(4)
+        # ----- Primary actions (modern project I/O) -------------------
+        # Save status indicator: "Saved …" / "Unsaved changes". Updated
+        # by the controller on save / dirty / on a periodic timer.
+        self.lbl_save_status = QLabel("—")
+        self.lbl_save_status.setStyleSheet(
+            "color: #888; font-family: monospace; font-size: 11px;")
+        self.lbl_save_status.setWordWrap(True)
+        io_layout.addWidget(self.lbl_save_status)
+
+        # Top action row: Output settings + Load Seg + Save Seg.
+        # Save/Load are the most common ops so they get to the top.
+        primary_row = QHBoxLayout()
+        primary_row.setSpacing(4)
         self.btn_io_settings = QPushButton("Output settings…")
         self.btn_io_settings.setToolTip(
-            "Choose where exports / autosave files land, and how often\n"
-            "autosave runs. Stored in your Qt user settings.")
-        settings_row.addWidget(self.btn_io_settings)
-        settings_row.addStretch(1)
-        io_layout.addLayout(settings_row)
-
-        # Format picker + Load Seg on one row
-        fmt_row = QHBoxLayout()
-        fmt_row.setSpacing(4)
-        self.combo_export_format = QComboBox()
-        self.combo_export_format.addItems(["CSV", "JSON"])
-        self.combo_export_format.setToolTip("Output format for all export buttons")
+            "Where exports / autosave files land + autosave cadence.\n"
+            "Persists across launches via QSettings.")
         self.btn_load_seg = QPushButton("Load Seg")
-        self.btn_load_seg.setToolTip("Load instance segmentation AVI")
+        self.btn_load_seg.setToolTip(
+            "Load saved segmentation (the new out-folder layout OR the\n"
+            "legacy next-to-video {stem}_Cells.tif style).")
         self.btn_load_seg.setStyleSheet("color: #e9c46a; font-weight: bold;")
-        fmt_row.addWidget(QLabel("Format:"))
-        fmt_row.addWidget(self.combo_export_format, stretch=1)
-        fmt_row.addWidget(self.btn_load_seg)
-        fmt_row.addWidget(self.btn_save_seg)
-        io_layout.addLayout(fmt_row)
+        primary_row.addWidget(self.btn_io_settings)
+        primary_row.addWidget(self.btn_load_seg)
+        primary_row.addWidget(self.btn_save_seg)
+        io_layout.addLayout(primary_row)
 
-        # Export options checkboxes
-        opts_row = QHBoxLayout()
-        opts_row.setSpacing(6)
-        self.chk_export_bbox = QCheckBox("BBoxes")
-        self.chk_export_bbox.setChecked(True)
-        self.chk_export_bbox.setToolTip(
-            "Include bounding-box columns (x0, y0, width, height) in export")
-        self.chk_export_seg_bbox = QCheckBox("Seg BBoxes")
-        self.chk_export_seg_bbox.setChecked(False)
-        self.chk_export_seg_bbox.setToolTip(
-            "Re-compute tight bounding boxes from the painted seg mask pixels\n"
-            "and use those instead of the ROI box.\n"
-            "Useful after brush edits changed the actual shape.")
-        self.chk_export_vein_flag = QCheckBox("Vein flag")
-        self.chk_export_vein_flag.setChecked(True)
-        self.chk_export_vein_flag.setToolTip(
-            "Add an 'inside_vein' column (1/0) to the cells export:\n"
-            "1 = cell centroid or bbox overlaps a vein mask pixel on that frame.")
-        opts_row.addWidget(self.chk_export_bbox)
-        opts_row.addWidget(self.chk_export_seg_bbox)
-        opts_row.addWidget(self.chk_export_vein_flag)
-        io_layout.addLayout(opts_row)
-
-        # Export buttons: Cells / Veins / All
-        export_row = QHBoxLayout()
-        export_row.setSpacing(4)
-        self.btn_export_cells = QPushButton("Export Cells")
-        self.btn_export_cells.setToolTip(
-            "Export only cell annotations (class_type='cell') to a file.")
-        self.btn_export_cells.setStyleSheet("color: #2a9d8f; font-weight: bold;")
-        self.btn_export_veins = QPushButton("Export Veins")
-        self.btn_export_veins.setToolTip(
-            "Export only vein annotations (class_type='vein') to a file.")
-        self.btn_export_veins.setStyleSheet("color: #9370db; font-weight: bold;")
-        self.btn_export_all = QPushButton("Export All")
-        self.btn_export_all.setToolTip(
-            "Export all annotations (cells + veins) to a single file.")
-        self.btn_export_all.setStyleSheet("color: #e9c46a; font-weight: bold;")
-        export_row.addWidget(self.btn_export_cells)
-        export_row.addWidget(self.btn_export_veins)
-        export_row.addWidget(self.btn_export_all)
-        io_layout.addLayout(export_row)
-
-        # COCO sidecar export — the modern, training-pipeline-friendly format.
+        # COCO sidecar export — modern, pipeline-friendly format.
         coco_row = QHBoxLayout()
         coco_row.setSpacing(4)
         self.btn_export_coco = QPushButton("Export COCO")
@@ -820,13 +782,81 @@ class MainWindow(QMainWindow):
         coco_row.addWidget(self.btn_export_coco)
         io_layout.addLayout(coco_row)
 
-        # Import row
+        # Import annotations from JSON/CSV (always-visible).
         import_row = QHBoxLayout()
         import_row.setSpacing(4)
         self.btn_import = QPushButton("Import Annotations  [Ctrl+I]")
         self.btn_import.setStyleSheet("color: #457b9d; font-weight: bold;")
         import_row.addWidget(self.btn_import)
         io_layout.addLayout(import_row)
+
+        # ----- Legacy CSV/JSON exports (collapsible) -----------------
+        # These predate the project out folder and write a per-class
+        # rows file. Kept available for downstream R / Python pipelines
+        # that consume CSV/JSON; collapsed by default to declutter.
+        legacy_group = self._make_collapsible_group(
+            "Legacy exports (CSV / JSON)", _COMPACT_SS)
+        legacy_layout = QVBoxLayout()
+        legacy_layout.setContentsMargins(4, 2, 4, 4)
+        legacy_layout.setSpacing(4)
+
+        legacy_fmt_row = QHBoxLayout()
+        legacy_fmt_row.setSpacing(4)
+        self.combo_export_format = QComboBox()
+        self.combo_export_format.addItems(["CSV", "JSON"])
+        self.combo_export_format.setToolTip(
+            "Output format for the Cells / Vessels / All export buttons.")
+        legacy_fmt_row.addWidget(QLabel("Format:"))
+        legacy_fmt_row.addWidget(self.combo_export_format, stretch=1)
+        legacy_layout.addLayout(legacy_fmt_row)
+
+        opts_row = QHBoxLayout()
+        opts_row.setSpacing(6)
+        self.chk_export_bbox = QCheckBox("BBoxes")
+        self.chk_export_bbox.setChecked(True)
+        self.chk_export_bbox.setToolTip(
+            "Include bounding-box columns (x0, y0, width, height).")
+        self.chk_export_seg_bbox = QCheckBox("Seg BBoxes")
+        self.chk_export_seg_bbox.setChecked(False)
+        self.chk_export_seg_bbox.setToolTip(
+            "Use tight bboxes recomputed from the painted seg mask\n"
+            "instead of the ROI box. Useful after brush edits.")
+        self.chk_export_vein_flag = QCheckBox("Vessel flag")
+        self.chk_export_vein_flag.setChecked(True)
+        self.chk_export_vein_flag.setToolTip(
+            "Add an 'inside_vessel' column (1/0) to the cells export:\n"
+            "1 = cell centroid or bbox overlaps a vessel mask on that\n"
+            "frame.")
+        opts_row.addWidget(self.chk_export_bbox)
+        opts_row.addWidget(self.chk_export_seg_bbox)
+        opts_row.addWidget(self.chk_export_vein_flag)
+        legacy_layout.addLayout(opts_row)
+
+        export_row = QHBoxLayout()
+        export_row.setSpacing(4)
+        self.btn_export_cells = QPushButton("Export Cells")
+        self.btn_export_cells.setToolTip(
+            "Export only cell annotations to CSV/JSON.")
+        self.btn_export_cells.setStyleSheet("color: #2a9d8f; font-weight: bold;")
+        self.btn_export_veins = QPushButton("Export Vessels")
+        self.btn_export_veins.setToolTip(
+            "Export only vessel annotations to CSV/JSON.")
+        self.btn_export_veins.setStyleSheet("color: #9370db; font-weight: bold;")
+        self.btn_export_all = QPushButton("Export All")
+        self.btn_export_all.setToolTip(
+            "Export every annotation (all classes) to CSV/JSON.")
+        self.btn_export_all.setStyleSheet("color: #e9c46a; font-weight: bold;")
+        export_row.addWidget(self.btn_export_cells)
+        export_row.addWidget(self.btn_export_veins)
+        export_row.addWidget(self.btn_export_all)
+        legacy_layout.addLayout(export_row)
+
+        legacy_group.setLayout(legacy_layout)
+        # _make_collapsible_group returns a QGroupBox with setCheckable
+        # True; unchecking collapses its contents. Default collapsed so
+        # the panel feels lean — legacy buttons are one click away.
+        legacy_group.setChecked(False)
+        io_layout.addWidget(legacy_group)
 
         io_group.setLayout(io_layout)
 

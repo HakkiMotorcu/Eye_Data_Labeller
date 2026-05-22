@@ -727,6 +727,12 @@ class ToolController:
         self._seg_dirty_since_save = False
         import time as _time_mod
         self._last_mask_save_ts = _time_mod.monotonic()
+        self._last_save_at = None  # wall-clock ts of last explicit save
+        # Periodic refresh of the I/O panel save-status label so the
+        # "Saved 2 min ago" text rolls forward without user action.
+        self._save_status_timer = QTimer()
+        self._save_status_timer.timeout.connect(self._refresh_save_status)
+        self._save_status_timer.start(10_000)
         # SAM service — lazy-loaded on first use. Default model is the
         # collaborators' fine-tuned ViT-B (sam_hela). User can swap via
         # the SAM section in the View panel.
@@ -1163,11 +1169,42 @@ class ToolController:
     # Defined as an instance attribute in __init__; helpers below.
     def _mark_seg_dirty(self):
         self._seg_dirty_since_save = True
+        self._refresh_save_status()
 
     def _mark_seg_clean(self):
         self._seg_dirty_since_save = False
         import time
         self._last_mask_save_ts = time.monotonic()
+        self._last_save_at = time.time()
+        self._refresh_save_status()
+
+    def _refresh_save_status(self):
+        """Update the I/O panel's save status label."""
+        lbl = getattr(self.window, 'lbl_save_status', None)
+        if lbl is None:
+            return
+        import time
+        if self._seg_dirty_since_save:
+            lbl.setText("● Unsaved changes")
+            lbl.setStyleSheet(
+                "color: #e9a33a; font-family: monospace; font-size: 11px;")
+            return
+        last = getattr(self, '_last_save_at', None)
+        if last is None:
+            lbl.setText("Not saved yet")
+            lbl.setStyleSheet(
+                "color: #888; font-family: monospace; font-size: 11px;")
+            return
+        secs = int(time.time() - last)
+        if secs < 60:
+            ago = f"{secs}s ago"
+        elif secs < 3600:
+            ago = f"{secs // 60} min ago"
+        else:
+            ago = f"{secs // 3600} h ago"
+        lbl.setText(f"✓ Saved {ago}")
+        lbl.setStyleSheet(
+            "color: #2a9d8f; font-family: monospace; font-size: 11px;")
 
     def _io_settings(self):
         """Return a ``(mode, custom_root)`` tuple from QSettings."""
@@ -3293,6 +3330,18 @@ class ToolController:
 
         self._normalize_anno_names_and_colors()
         self._mark_seg_clean()
+        # Preserve the manifest timestamp on the status label so the
+        # user sees "Saved 2 days ago" rather than "Saved 0s ago" right
+        # after a resume.
+        manifest = project_io.read_project_manifest(out_folder) or {}
+        when = manifest.get('updated_at')
+        if when:
+            try:
+                import datetime as _dt
+                self._last_save_at = _dt.datetime.fromisoformat(when).timestamp()
+                self._refresh_save_status()
+            except (TypeError, ValueError):
+                pass
         cur = self.window._current_frame_idx
         self._show_frame_annotations(cur)
         self.window._update_seg_overlay()
