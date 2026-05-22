@@ -89,15 +89,24 @@ class EmbeddingPrecomputeWorker(QThread):
         self.finished_ok.emit()
 
 
-# Default checkpoint path inside the project — matches the collaborator
-# training-output convention.
 def default_sam_hela_path():
-    """Resolve ``models/checkpoints/sam_hela/best.pt`` relative to the
-    project root (the directory that contains ``main.py``)."""
-    here = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(here)
-    return os.path.join(project_root, 'models', 'checkpoints',
-                        'sam_hela', 'best.pt')
+    """Where the fine-tuned SAM-HeLa checkpoint should live on disk.
+
+    Order of preference:
+      1. The legacy in-project location (``<project>/models/checkpoints/
+         sam_hela/best.pt``) — used when the file already exists there
+         so dev installs don't re-download what they already have.
+      2. The per-user data directory under
+         ``user_data_root()/models/checkpoints/sam_hela/best.pt`` — the
+         canonical location for bundled installs and the place the
+         downloader writes to.
+    """
+    from core import app_paths
+    legacy = os.path.join(app_paths.bundled_root(),
+                           'models', 'checkpoints', 'sam_hela', 'best.pt')
+    if os.path.exists(legacy):
+        return legacy
+    return app_paths.default_sam_hela_checkpoint_path()
 
 
 class SamService:
