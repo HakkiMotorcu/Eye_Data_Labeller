@@ -97,12 +97,15 @@ class TrackastraTracker(TrackerService):
         return [
             SettingSpec(
                 'mode', 'Mode', 'choice',
-                default='greedy', choices=['greedy', 'ilp'],
-                tooltip="greedy: per-cell next-edge matching. Fast (seconds).\n"
-                        "ilp:    globally optimal association via integer\n"
-                        "        linear programming. Slower but better for\n"
-                        "        crowded scenes and fast-moving cells.\n"
-                        "        Use if greedy is splitting/swapping tracks."),
+                default='ilp', choices=['greedy', 'ilp'],
+                tooltip="ilp:    globally optimal association via integer\n"
+                        "        linear programming. Slower but consistently\n"
+                        "        better for crowded scenes / fast-moving cells.\n"
+                        "        Default since it produced fewer split/swap\n"
+                        "        errors on our PC-AOSLO data.\n"
+                        "greedy: per-cell next-edge matching. Fast (seconds).\n"
+                        "        Switch to this when ILP is unavailable\n"
+                        "        (motile.solver not installed) or too slow."),
             SettingSpec(
                 'gap_closing', 'Gap closing (frames)', 'int',
                 default=3, min=0, max=20, step=1,

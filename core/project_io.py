@@ -164,8 +164,20 @@ def atomic_write_json(path: str, obj, *, keep_backup: bool = True) -> None:
 
 
 def atomic_write_tif(path: str, arr: np.ndarray, *,
-                      keep_backup: bool = True) -> None:
-    """Write a (T, H, W) uint16 instance mask atomically."""
+                      keep_backup: bool = True,
+                      compression: str = 'zlib',
+                      compression_level: int = 6) -> None:
+    """Write a (T, H, W) uint16 instance mask atomically.
+
+    Instance masks are dominated by zero pixels and small repeating
+    integer runs, so ZLIB (DEFLATE) typically shrinks them 10-100x with
+    no quality loss. The output is still a standard TIF — Fiji,
+    OpenCV, scikit-image, and pycocotools all read compressed TIFs
+    transparently.
+
+    Pass ``compression=None`` to write uncompressed (rare; useful only
+    if a downstream tool insists).
+    """
     arr = np.asarray(arr)
     if arr.ndim == 2:
         arr = arr[np.newaxis, ...]
@@ -179,7 +191,11 @@ def atomic_write_tif(path: str, arr: np.ndarray, *,
             f"Cannot save mask: max instance ID {arr.max()} exceeds uint16.")
     arr = arr.astype(np.uint16, copy=False)
     with _backup_then_atomic(path, keep_backup=keep_backup) as tmp:
-        tifffile.imwrite(tmp, arr)
+        kwargs = {}
+        if compression:
+            kwargs['compression'] = compression
+            kwargs['compressionargs'] = {'level': int(compression_level)}
+        tifffile.imwrite(tmp, arr, **kwargs)
 
 
 # ============================================================
