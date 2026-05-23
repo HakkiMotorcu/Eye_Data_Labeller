@@ -22,6 +22,21 @@ channels:
 dependencies:
   - python >=3.10,<3.13
 
+  # ---- BLAS / LAPACK ---------------------------------------------
+  # Force every numerical package in the env to use OpenBLAS rather
+  # than Apple's Accelerate framework. Why: numpy 2.x links against
+  # LAPACK >=3.10 (it needs symbols like _ctrsyl3_), but Apple's
+  # Accelerate re-export shim on macOS arm64 doesn't export them.
+  # Inside a live conda env the lookup order happens to work; inside
+  # a PyInstaller bundle the dylib reshuffle exposes the gap and
+  # numpy crashes at import. OpenBLAS has every symbol — solves it
+  # cleanly. Cross-platform safe: Linux + Windows ignore Accelerate
+  # anyway, but having one consistent BLAS implementation across the
+  # matrix means scipy/numpy ABI quirks behave the same everywhere.
+  - libblas=*=*openblas
+  - libcblas=*=*openblas
+  - liblapack=*=*openblas
+
   # ---- micro-sam runtime (mirrors micro-sam/environment.yaml) ----
   # Pytorch from conda-forge is generally the most optimized build for
   # your OS + CUDA. To force CPU-only: replace with `pytorch=*=cpu*`.
