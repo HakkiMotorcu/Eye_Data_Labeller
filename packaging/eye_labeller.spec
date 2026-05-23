@@ -71,7 +71,16 @@ for pkg in ("torch", "torchvision", "micro_sam", "trackastra",
 
 # ---- Excludes ---------------------------------------------------------
 # Trim the bundle by excluding things we definitely don't use.
+#
+# PyQt5 + PySide2 + PySide6 — the conda env pulls PyQt5 in
+# transitively (via qtpy / magicgui / napari-adjacent helpers shipped
+# with micro_sam). PyInstaller refuses to bundle multiple Qt bindings
+# in one app — without the exclude the build dies with:
+#   "attempt to collect multiple Qt bindings packages"
+# We're a PyQt6 app, so any PyQt5 reachable through `import qtpy` etc.
+# at runtime is dead code for us.
 excludes = [
+    "PyQt5", "PySide2", "PySide6",
     "matplotlib.tests", "scipy.tests",
     "tornado", "notebook", "jupyter", "jupyterlab",
     "IPython", "pytest",
