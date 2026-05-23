@@ -49,24 +49,21 @@ jobs:
         with:
           environment-file: environment.yml
           environment-name: eye-labeller
-          # On Linux + macOS, `bash` alone is enough — Git/system bash
-          # picks up the activation hook. On Windows runners, the post-
-          # action cleanup step reads from PowerShell's profile to find
-          # which env to deactivate; with only `bash`, that cleanup
-          # fails ("Could not find micromamba activate eye-labeller in
-          # C:\Users\runneradmin\.bash_profile") and tanks the whole
-          # job with exit code 1, even though build steps succeeded.
-          # Listing both bash + powershell initializes both: build
-          # steps continue to use `shell: bash -el {0}` (Git Bash on
-          # Windows), and cleanup finds what it needs in PowerShell.
-          #
-          # IMPORTANT: setup-micromamba's input schema rejects comma-
-          # separated values ("bash,powershell" -> invalid enum). Use
-          # YAML literal-block syntax so the action receives one shell
-          # name per line and splits on whitespace.
-          init-shell: |
-            bash
-            powershell
+          # init-shell only accepts ONE shell name (the action's schema
+          # validates the raw input as a single enum — no whitespace,
+          # newline, or comma separation works). Use bash for build
+          # steps via `shell: bash -el {0}`.
+          init-shell: bash
+          # post-cleanup defaults to 'shell-init' which tries to remove
+          # micromamba hooks from the shell profile after the job ends.
+          # On Windows it fails ("Could not find micromamba activate
+          # eye-labeller in C:\Users\runneradmin\.bash_profile") and
+          # tanks the whole job with exit code 1 EVEN IF the build
+          # succeeded — because Git Bash's .bash_profile doesn't get
+          # created on the runner before the post step runs. Setting
+          # to 'none' skips the cleanup; this is cosmetic-only on
+          # ephemeral runners that are destroyed anyway.
+          post-cleanup: none
           cache-environment: true
 
       # PyInstaller has to live in the same env as the app's deps so
