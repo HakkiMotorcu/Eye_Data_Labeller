@@ -19,6 +19,7 @@ from PyInstaller.utils.hooks import (
     collect_data_files, collect_dynamic_libs, collect_submodules,
     copy_metadata,
 )
+import os
 import sys
 from pathlib import Path
 
@@ -82,6 +83,26 @@ for pkg in ("cv2",):
         binaries += collect_dynamic_libs(pkg)
     except Exception:
         pass
+
+# cv2 also stashes its native module at
+# cv2/python-<ver>/cv2.cpython-<ver>-<plat>.so. The Python-ABI-tagged
+# filename trips collect_dynamic_libs's *.so / *.dylib glob in some
+# PyInstaller versions, so the .so silently doesn't make it into the
+# bundle and cv2 import hits a recursion ("ERROR: recursion is
+# detected during loading of cv2 binary extensions"). Explicitly add
+# every python-X.Y/ subdir as a data tree so the native .so lands at
+# Contents/Frameworks/cv2/python-X.Y/ where the patched config-X.Y.py
+# expects it.
+try:
+    import cv2 as _cv2
+    import glob as _glob
+    _cv2_dir = os.path.dirname(_cv2.__file__)
+    for _pydir in _glob.glob(os.path.join(_cv2_dir, 'python-*')):
+        if os.path.isdir(_pydir):
+            datas.append((_pydir,
+                          os.path.join('cv2', os.path.basename(_pydir))))
+except Exception:
+    pass
 
 # Some packages stash version info / metadata files PyInstaller doesn't
 # pick up by default; copy them so importlib.metadata works at runtime.
