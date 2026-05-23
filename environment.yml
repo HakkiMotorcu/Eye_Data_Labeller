@@ -22,20 +22,17 @@ channels:
 dependencies:
   - python >=3.10,<3.13
 
-  # ---- BLAS / LAPACK ---------------------------------------------
-  # Force every numerical package in the env to use OpenBLAS rather
-  # than Apple's Accelerate framework. Why: numpy 2.x links against
-  # LAPACK >=3.10 (it needs symbols like _ctrsyl3_), but Apple's
-  # Accelerate re-export shim on macOS arm64 doesn't export them.
-  # Inside a live conda env the lookup order happens to work; inside
-  # a PyInstaller bundle the dylib reshuffle exposes the gap and
-  # numpy crashes at import. OpenBLAS has every symbol — solves it
-  # cleanly. Cross-platform safe: Linux + Windows ignore Accelerate
-  # anyway, but having one consistent BLAS implementation across the
-  # matrix means scipy/numpy ABI quirks behave the same everywhere.
-  - libblas=*=*openblas
-  - libcblas=*=*openblas
-  - liblapack=*=*openblas
+  # NOTE: We don't pin BLAS/LAPACK here because Windows conda-forge
+  # uses a different build family (MKL-based) than Mac/Linux and
+  # adding `libblas=*=*openblas` makes Windows unsolvable. The macOS
+  # bundle DOES need OpenBLAS though — numpy 2.x links against LAPACK
+  # symbols (e.g. _ctrsyl3_) that Apple's Accelerate doesn't export.
+  # That fix is applied as a macOS-only post-create step in
+  # .github/workflows/build.yml ("Force OpenBLAS on macOS"). Tier B
+  # Mac users running locally may hit the same crash with numpy >=2.4;
+  # workaround is the same:
+  #   micromamba install -n eye-labeller 'libblas=*=*openblas' 'libcblas=*=*openblas' 'liblapack=*=*openblas'
+  # See INSTALL.md troubleshooting if you hit it.
 
   # ---- micro-sam runtime (mirrors micro-sam/environment.yaml) ----
   # Pytorch from conda-forge is generally the most optimized build for
@@ -64,18 +61,14 @@ dependencies:
   - tifffile
   - imageio
   - scikit-image
-  # NOTE: opencv comes from pip below (opencv-python-headless), NOT from
-  # conda-forge. Why: conda-forge's opencv build patches cv2/__init__.py
-  # to use absolute paths inside the conda env prefix (e.g.
-  # /opt/conda/envs/.../lib/python3.12/site-packages/cv2/python-3.12).
-  # Inside a PyInstaller .app those paths don't exist on the user's
-  # machine, the bootstrap fails to find the native .so, falls through
-  # to a recursive cv2 re-import, and crashes with:
-  #   ImportError: ERROR: recursion is detected during loading of
-  #   "cv2" binary extensions. Check OpenCV installation.
-  # The pip wheel uses LOADER_DIR-relative paths — bundle-portable.
-  # Headless variant has no Qt/GTK GUI built-in (we use PyQt6 anyway,
-  # so cv2's GUI features are dead weight and would conflict).
+  # NOTE: we don't list `opencv` here, but it WILL still end up in the
+  # env because micro_sam depends on it transitively. That conda-forge
+  # opencv works fine for direct (Tier B) users running from the env —
+  # it only breaks when bundled by PyInstaller. The .github workflow
+  # force-reinstalls opencv-python-headless (pip, bundle-friendly) on
+  # top of conda's opencv before running PyInstaller, so Tier A
+  # bundles ship with the pip variant. See .github/workflows/build.yml
+  # "Force-replace conda opencv with pip headless" step for context.
   - pycocotools
 
   # micro-sam from conda-forge — cross-platform, no local clone needed.
@@ -90,8 +83,5 @@ dependencies:
       - pyqtgraph
       - qtawesome
       - pyqtdarktheme
-      # opencv via pip (headless) for PyInstaller compatibility — see
-      # comment under the dependencies: block above for the why.
-      - opencv-python-headless
       # MobileSAM (vit_t support) — same as upstream micro-sam env
       - git+https://github.com/ChaoningZhang/MobileSAM.git

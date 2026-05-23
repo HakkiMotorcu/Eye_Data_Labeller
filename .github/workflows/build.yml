@@ -66,12 +66,56 @@ jobs:
           post-cleanup: none
           cache-environment: true
 
+      # macOS-only: force the BLAS/LAPACK stack to OpenBLAS. We can't
+      # put this in environment.yml because the openblas constraint
+      # makes Windows unsolvable (MKL-based build family conflicts).
+      # Why we need it on Mac: numpy 2.x links against LAPACK
+      # symbols (notably _ctrsyl3_) that Apple's Accelerate framework
+      # doesn't export. Inside a live conda env the dyld lookup
+      # happens to find them; inside a PyInstaller .app the layout
+      # shifts and numpy crashes at import with:
+      #   Symbol not found: _ctrsyl3_
+      #     Referenced from: liblapacke-netlib.3.11.0.dylib
+      #     Expected in:     libblas_reexport.dylib
+      # micromamba install with the constraint forces every BLAS
+      # consumer to use the OpenBLAS variant, which has every symbol.
+      - name: Force OpenBLAS on macOS (Accelerate symbol gap)
+        if: runner.os == 'macOS'
+        shell: bash -el {0}
+        run: |
+          micromamba install -n eye-labeller -y -c conda-forge \
+            'libblas=*=*openblas' 'libcblas=*=*openblas' 'liblapack=*=*openblas'
+
       # PyInstaller has to live in the same env as the app's deps so
       # it can introspect them. Pin to a known-good major.
       - name: Install PyInstaller
         shell: bash -el {0}
         run: |
           pip install "pyinstaller>=6,<7"
+
+      # The conda-forge opencv package patches cv2/__init__.py with
+      # absolute paths inside the conda env prefix (e.g.
+      # /Users/runner/micromamba/envs/eye-labeller/lib/python3.12/
+      # site-packages/cv2/python-3.12). Those paths get baked into the
+      # bundled cv2 config files and crash on the user's machine with:
+      #
+      #   ImportError: ERROR: recursion is detected during loading of
+      #   "cv2" binary extensions. Check OpenCV installation.
+      #
+      # We can't just remove `opencv` from environment.yml — micro_sam
+      # depends on it transitively, so conda's solver pulls it in
+      # anyway. And pip in the env file runs AFTER conda, so a regular
+      # `opencv-python-headless` pip line is silently skipped (cv2 is
+      # "already installed"). Solution: force-reinstall pip's headless
+      # variant after env setup so the bundle picks it up. --no-deps
+      # so we don't reinstall numpy (would clobber the BLAS pin).
+      # Code grep confirms we don't use any cv2 GUI features
+      # (imshow / namedWindow / waitKey / etc.) so headless is safe.
+      - name: Force-replace conda opencv with pip headless
+        shell: bash -el {0}
+        run: |
+          pip install --force-reinstall --no-deps opencv-python-headless
+          python -c "import cv2; print('cv2', cv2.__version__, 'at', cv2.__file__)"
 
       - name: Build with PyInstaller
         shell: bash -el {0}
