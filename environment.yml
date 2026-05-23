@@ -64,7 +64,18 @@ dependencies:
   - tifffile
   - imageio
   - scikit-image
-  - opencv
+  # NOTE: opencv comes from pip below (opencv-python-headless), NOT from
+  # conda-forge. Why: conda-forge's opencv build patches cv2/__init__.py
+  # to use absolute paths inside the conda env prefix (e.g.
+  # /opt/conda/envs/.../lib/python3.12/site-packages/cv2/python-3.12).
+  # Inside a PyInstaller .app those paths don't exist on the user's
+  # machine, the bootstrap fails to find the native .so, falls through
+  # to a recursive cv2 re-import, and crashes with:
+  #   ImportError: ERROR: recursion is detected during loading of
+  #   "cv2" binary extensions. Check OpenCV installation.
+  # The pip wheel uses LOADER_DIR-relative paths — bundle-portable.
+  # Headless variant has no Qt/GTK GUI built-in (we use PyQt6 anyway,
+  # so cv2's GUI features are dead weight and would conflict).
   - pycocotools
 
   # micro-sam from conda-forge — cross-platform, no local clone needed.
@@ -79,5 +90,8 @@ dependencies:
       - pyqtgraph
       - qtawesome
       - pyqtdarktheme
+      # opencv via pip (headless) for PyInstaller compatibility — see
+      # comment under the dependencies: block above for the why.
+      - opencv-python-headless
       # MobileSAM (vit_t support) — same as upstream micro-sam env
       - git+https://github.com/ChaoningZhang/MobileSAM.git
