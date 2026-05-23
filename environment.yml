@@ -52,12 +52,13 @@ dependencies:
   - opencv
   - pycocotools
 
+  # micro-sam from conda-forge — cross-platform, no local clone needed.
+  # (If you want the editable local clone for hacking on micro-sam,
+  #  comment this line out and add `-e <your-local-path>` under pip:.)
+  - micro_sam
+
   - pip
   - pip:
-      # micro_sam is installed editable from your local clone so any
-      # tweaks in micro-sam-master apply without reinstalling. To use
-      # the upstream release instead, swap for: micro_sam
-      - -e /Users/hakkimotorcu/Desktop/micro-sam-master
       # PyQt6 stack — installed via pip because conda-forge ships only PyQt5
       - PyQt6
       - pyqtgraph
