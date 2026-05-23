@@ -111,39 +111,63 @@ jobs:
       # so we don't reinstall numpy (would clobber the BLAS pin).
       # Code grep confirms we don't use any cv2 GUI features
       # (imshow / namedWindow / waitKey / etc.) so headless is safe.
-      - name: Force-replace conda opencv with pip headless
+      - name: Patch cv2 config files to use bundle-safe relative paths
         shell: bash -el {0}
         run: |
-          # conda-forge ships its own `opencv-python-headless` package
-          # (yes, same name as pip's), but with config.py /
-          # config-<py-ver>.py files that hardcode the conda env's
-          # absolute path. Those paths get baked into the bundle and
-          # crash on the user's machine with the cv2 recursion error.
-          # pip's wheel has LOADER_DIR-relative configs (bundle-safe).
+          # conda-forge's opencv-python-headless ships config.py /
+          # config-<pyver>.py with the conda env's ABSOLUTE PATH baked
+          # in -- those paths get into the PyInstaller bundle and
+          # crash on the user's machine with:
+          #   ImportError: ERROR: recursion is detected during loading
+          #   of "cv2" binary extensions. Check OpenCV installation.
           #
-          # We can't --force-reinstall: pip refuses with
-          #   "Cannot uninstall opencv-python-headless 4.13.0
-          #    The package was installed by conda."
-          # --ignore-installed skips the uninstall check and overlays
-          # pip's files (importantly the config*.py) on top of conda's.
-          # --no-deps so we don't disturb numpy / BLAS pin.
-          pip install --ignore-installed --no-deps opencv-python-headless
-          python -c "import cv2; print('cv2', cv2.__version__, 'at', cv2.__file__)"
-          # Verify config files now have LOADER_DIR-relative paths (not
-          # the runner's absolute path). Fail loudly if not — better to
-          # die in CI than ship another broken bundle.
+          # First tried `pip install --ignore-installed
+          # opencv-python-headless` (v0.1.7) to overlay pip's wheel
+          # files, but pip's wheel uses a flat cv2/ layout and doesn't
+          # ship config*.py at all -- conda's broken ones stayed put.
+          #
+          # Final fix: overwrite the config files in-place with paths
+          # computed at runtime from __file__. Works both inside the
+          # live env (LOADER_DIR resolves to the env's cv2/) and inside
+          # a PyInstaller bundle (LOADER_DIR resolves to the bundle's
+          # cv2/). Single source of truth, no surprise.
+          CV2_DIR=$(python -c "import cv2, os; print(os.path.dirname(cv2.__file__))")
+          PY_VER=$(python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+          echo "Patching $CV2_DIR/config*.py for Python $PY_VER"
+
+          # config.py — keep BINARIES_PATHS empty; system-default lib
+          # dirs and PyInstaller's @rpath rewrites handle .dylib/.so
+          # lookup. The conda version pointed BINARIES_PATHS at the
+          # env's lib/ dir which doesn't exist in the bundle.
+          cat > "$CV2_DIR/config.py" <<'EOF'
+          import os
+          BINARIES_PATHS = []
+          EOF
+
+          # config-<pyver>.py — point PYTHON_EXTENSIONS_PATHS at the
+          # python-<pyver>/ subdir RELATIVE to where this config file
+          # lives. __file__ resolves correctly in both env and bundle.
+          cat > "$CV2_DIR/config-${PY_VER}.py" <<EOF
+          import os
+          PYTHON_EXTENSIONS_PATHS = [
+              os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           'python-${PY_VER}')
+          ] + PYTHON_EXTENSIONS_PATHS
+          EOF
+
+          # Verify the new configs are bundle-safe AND cv2 still loads.
           python - <<'PY'
-          import cv2, os, pathlib
+          import pathlib, sys
+          import cv2
           cv2_dir = pathlib.Path(cv2.__file__).parent
-          for cfg in ('config.py', f'config-{__import__("sys").version_info.major}.{__import__("sys").version_info.minor}.py'):
+          for cfg in ('config.py', f'config-{sys.version_info.major}.{sys.version_info.minor}.py'):
               p = cv2_dir / cfg
-              if not p.exists():
-                  continue
               text = p.read_text()
               print(f'--- {cfg} ---'); print(text)
-              if '/Users/runner/' in text or '/home/runner/' in text or 'runneradmin' in text.lower():
-                  raise SystemExit(f'FAIL: {cfg} still contains runner build paths -- bundle will crash on user machines')
-          print('cv2 config files look bundle-safe')
+              for bad in ('/Users/runner/', '/home/runner/', 'runneradmin'):
+                  if bad in text:
+                      raise SystemExit(f'FAIL: {cfg} still contains {bad!r}')
+          print(f'cv2 OK: {cv2.__version__} at {cv2.__file__}')
           PY
 
       - name: Build with PyInstaller
