@@ -49,7 +49,17 @@ jobs:
         with:
           environment-file: environment.yml
           environment-name: eye-labeller
-          init-shell: bash
+          # On Linux + macOS, `bash` alone is enough — Git/system bash
+          # picks up the activation hook. On Windows runners, the post-
+          # action cleanup step reads from PowerShell's profile to find
+          # which env to deactivate; with only `bash`, that cleanup
+          # fails ("Could not find micromamba activate eye-labeller in
+          # C:\Users\runneradmin\.bash_profile") and tanks the whole
+          # job with exit code 1, even though build steps succeeded.
+          # `bash,powershell` initializes both: build steps continue to
+          # use `shell: bash -el {0}` (Git Bash), and cleanup finds
+          # what it needs in PowerShell.
+          init-shell: bash,powershell
           cache-environment: true
 
       # PyInstaller has to live in the same env as the app's deps so

@@ -16,7 +16,8 @@ so the bundle doesn't drop dynamic imports.
 """
 
 from PyInstaller.utils.hooks import (
-    collect_data_files, collect_submodules, copy_metadata,
+    collect_data_files, collect_dynamic_libs, collect_submodules,
+    copy_metadata,
 )
 import sys
 from pathlib import Path
@@ -28,6 +29,19 @@ ENTRY = str(PROJECT_ROOT / "main.py")
 # ---- Hidden imports ---------------------------------------------------
 # PyTorch / micro-sam / trackastra dynamically import submodules that
 # PyInstaller can't trace statically — collect them up front.
+#
+# qdarktheme: main.py imports `qdarktheme` inside try/except. PyInstaller
+# DOES trace the import, but the package ships .qss/.svg theme assets
+# that only get bundled via collect_data_files (below). Without those,
+# load_stylesheet("dark") raises and we silently fall back to system
+# theme — listing it here for symmetry with the data-files block.
+#
+# cv2 (opencv): imported at module top in core/volume_data.py so the
+# static scanner picks up the main module, but opencv's codec plugins
+# (libjpeg/libpng/libtiff backends, video backends) live as separate
+# dylibs that PyInstaller often misses — collect_dynamic_libs catches
+# them. Without this, cv2.imread / imwrite of certain formats raise
+# cryptic "could not find a writer for the specified extension" errors.
 hidden = []
 for pkg in (
     "torch", "torchvision", "torch_em",
@@ -35,6 +49,7 @@ for pkg in (
     "trackastra", "motile",
     "skimage", "scipy", "tifffile",
     "pyqtgraph", "qtawesome",
+    "qdarktheme", "cv2",
 ):
     try:
         hidden += collect_submodules(pkg)
@@ -45,14 +60,26 @@ for pkg in (
 # ---- Data files -------------------------------------------------------
 # Anything the apps reads at runtime that isn't a .py file: model
 # configs shipped by micro_sam, pyqtgraph icon resources, qtawesome
-# font files, etc.
+# font files, qdarktheme stylesheets, etc.
 datas = []
 for pkg in (
     "micro_sam", "segment_anything", "trackastra",
-    "pyqtgraph", "qtawesome",
+    "pyqtgraph", "qtawesome", "qdarktheme",
 ):
     try:
         datas += collect_data_files(pkg)
+    except Exception:
+        pass
+
+# ---- Dynamic libraries ------------------------------------------------
+# Some packages ship plugin-style .dylib/.so files alongside their main
+# binary — PyInstaller's hook system catches most, but cv2's image-
+# codec backends and ffmpeg shim are inconsistent across opencv builds.
+# Force-collect to avoid "could not find a writer" failures at runtime.
+binaries = []
+for pkg in ("cv2",):
+    try:
+        binaries += collect_dynamic_libs(pkg)
     except Exception:
         pass
 
@@ -90,7 +117,7 @@ excludes = [
 a = Analysis(
     [ENTRY],
     pathex=[str(PROJECT_ROOT)],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hidden,
     hookspath=[],
