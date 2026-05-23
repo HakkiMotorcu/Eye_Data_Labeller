@@ -56,10 +56,17 @@ jobs:
           # fails ("Could not find micromamba activate eye-labeller in
           # C:\Users\runneradmin\.bash_profile") and tanks the whole
           # job with exit code 1, even though build steps succeeded.
-          # `bash,powershell` initializes both: build steps continue to
-          # use `shell: bash -el {0}` (Git Bash), and cleanup finds
-          # what it needs in PowerShell.
-          init-shell: bash,powershell
+          # Listing both bash + powershell initializes both: build
+          # steps continue to use `shell: bash -el {0}` (Git Bash on
+          # Windows), and cleanup finds what it needs in PowerShell.
+          #
+          # IMPORTANT: setup-micromamba's input schema rejects comma-
+          # separated values ("bash,powershell" -> invalid enum). Use
+          # YAML literal-block syntax so the action receives one shell
+          # name per line and splits on whitespace.
+          init-shell: |
+            bash
+            powershell
           cache-environment: true
 
       # PyInstaller has to live in the same env as the app's deps so
