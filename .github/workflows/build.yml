@@ -36,32 +36,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Miniforge
-        uses: conda-incubator/setup-miniconda@v3
+      # We use micromamba (not setup-miniconda) because the Ubuntu
+      # runner repeatedly died with "received a shutdown signal" mid-
+      # solve — the classic conda solver's memory footprint on a
+      # large env (PyTorch + micro-sam + scientific stack) pushes a
+      # 7 GB runner over the edge. Micromamba uses libmamba's C++
+      # solver, which is ~5x faster and dramatically lighter.
+      # `init-shell: bash` makes the env auto-activate in subsequent
+      # `bash -el {0}` steps (the `-e` makes the script fail-fast).
+      - name: Set up micromamba + eye-labeller env
+        uses: mamba-org/setup-micromamba@v1
         with:
-          miniforge-version: latest
-          activate-environment: eye-labeller
           environment-file: environment.yml
-          auto-activate-base: false
+          environment-name: eye-labeller
+          init-shell: bash
+          cache-environment: true
 
       # PyInstaller has to live in the same env as the app's deps so
       # it can introspect them. Pin to a known-good major.
       - name: Install PyInstaller
-        shell: bash -l {0}
+        shell: bash -el {0}
         run: |
-          conda run -n eye-labeller pip install "pyinstaller>=6,<7"
+          pip install "pyinstaller>=6,<7"
 
       - name: Build with PyInstaller
-        shell: bash -l {0}
+        shell: bash -el {0}
         run: |
-          conda run -n eye-labeller pyinstaller \
-            packaging/eye_labeller.spec --clean --noconfirm
+          pyinstaller packaging/eye_labeller.spec --clean --noconfirm
 
       # macOS: turn the COLLECT folder into a .app + a .dmg ready to
       # mount. Windows / Linux: zip the COLLECT folder as-is.
       - name: Package macOS artifact
         if: runner.os == 'macOS'
-        shell: bash -l {0}
+        shell: bash -el {0}
         run: |
           cd dist
           # PyInstaller emits both EyeDataLabeller/ and EyeDataLabeller.app
@@ -79,7 +86,7 @@ jobs:
 
       - name: Package Linux artifact
         if: runner.os == 'Linux'
-        shell: bash -l {0}
+        shell: bash -el {0}
         run: |
           cd dist
           zip -ry ../${{ matrix.artifact }} EyeDataLabeller
