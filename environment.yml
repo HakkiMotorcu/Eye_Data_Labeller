@@ -35,9 +35,19 @@ dependencies:
   # See INSTALL.md troubleshooting if you hit it.
 
   # ---- micro-sam runtime (mirrors micro-sam/environment.yaml) ----
-  # Pytorch from conda-forge is generally the most optimized build for
-  # your OS + CUDA. To force CPU-only: replace with `pytorch=*=cpu*`.
-  - pytorch >=2.5
+  # PyTorch pinned to CPU build so every platform installs the SAME
+  # baseline. CUDA gets installed as a post-create step by the
+  # install_*.{sh,bat} scripts when an NVIDIA GPU is detected. Why
+  # this matters: conda-forge ships CUDA-enabled torch by default on
+  # Linux but CPU-only on Windows, which caused silent "GPU working
+  # on Linux, not on Windows" surprises in past runs. Explicit CPU
+  # baseline + explicit CUDA swap removes that surprise.
+  #
+  # Mac arm64 note: MPS (Apple GPU) support is BAKED INTO every
+  # pytorch build on arm64 — there is no CUDA on Mac, so cpu* and
+  # the default build are the same package. Mac users get MPS for
+  # free with this pin; no install-script swap needed.
+  - pytorch >=2.5=cpu*
   - torchvision
   - segment-anything
   - torch_em >=0.8

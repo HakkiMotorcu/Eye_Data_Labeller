@@ -1,156 +1,201 @@
 # Installing Eye Data Labeller
 
-Two install paths. Pick whichever fits the user.
-
-| | Tier A — Standalone bundle | Tier B — Miniforge installer |
-| --- | --- | --- |
-| Terminal needed? | No, ever. | One double-click on `install_*` |
-| Disk footprint | 1.5–2.5 GB | ~3.5 GB (conda env on disk) |
-| Updates | Re-download new bundle | `git pull` + re-run `install_*` |
-| Best for | Non-Python collaborators | Labs that update often |
-
-The model weights (`sam_hela/best.pt`, ~400 MB) are **not bundled** —
-the app downloads them on first use from a URL configured in the I/O
-Settings dialog. See "Model weights" at the bottom.
-
----
-
-## Tier A — One-click bundles
-
-After the repo is pushed to GitHub and `.github/workflows/build.yml`
-has run (on a tag push, e.g. `git tag v0.1.0 && git push --tags`),
-three artifacts appear on the project's Releases page:
-
-| OS | Download | What to do |
-| --- | --- | --- |
-| macOS (Apple Silicon) | `EyeDataLabeller-macos-arm64.zip` | Unzip → drag `EyeDataLabeller.app` into Applications → first launch: **right-click → Open** to bypass Gatekeeper warning. |
-| Windows | `EyeDataLabeller-windows-x86_64.zip` | Unzip anywhere → double-click `EyeDataLabeller.exe`. SmartScreen warning: *More info* → *Run anyway*. |
-| Linux  | `EyeDataLabeller-linux-x86_64.zip` | Unzip → `./EyeDataLabeller/EyeDataLabeller`. |
-
-The first-run Gatekeeper / SmartScreen dance is unavoidable for
-unsigned binaries. Code signing (Apple Developer Program $99/year or
-a Windows code-signing certificate ~$300/year) removes both warnings —
-worth it if the user count crosses ~10.
-
----
-
-## Tier B — Miniforge installer
-
-Best when the user has a few minutes for a one-time terminal moment
-and you'll be pushing updates often.
-
-### macOS
-
-1. Clone or unzip the project somewhere stable (e.g.
-   `~/Projects/Eye_Data_Labeller`).
-2. Open Finder → navigate to `deploy/` → **right-click**
-   `install_mac.command` → **Open**. Confirm "Open" when macOS warns.
-3. Wait ~5–15 minutes while Miniforge installs and the env builds.
-4. Double-click **EyeDataLabeller** on your Desktop.
-
-### Windows
-
-1. Clone or unzip the project (e.g.
-   `C:\Users\<you>\Projects\Eye_Data_Labeller`).
-2. Open `deploy\` → double-click `install_windows.bat`. SmartScreen:
-   *More info* → *Run anyway*.
-3. Double-click **EyeDataLabeller.bat** on your Desktop.
-
-NVIDIA GPU? After install, open *Anaconda Prompt (Miniforge3)*:
-```bat
-conda activate eye-labeller
-pip uninstall torch torchvision
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-```
-(`cu118` / `cu124` etc. depending on your driver — `nvidia-smi`
-shows it.)
-
-### Linux
+## TL;DR for collaborators
 
 ```bash
-cd /path/to/Eye_Data_Labeller
+git clone https://github.com/HakkiMotorcu/Eye_Data_Labeller.git
+cd Eye_Data_Labeller
+# macOS:
+deploy/install_mac.command          # right-click → Open if Gatekeeper warns
+# Linux:
+bash deploy/install_linux.sh
+# Windows (in cmd.exe):
+deploy\install_windows.bat
+```
+
+The installer drops a launcher on your Desktop. Double-click it. First
+launch asks for an image file (TIFF or AVI), then the main window opens.
+
+If you have an NVIDIA GPU on Linux/Windows, the installer auto-detects
+it and swaps in CUDA-enabled PyTorch. On macOS, Apple Silicon GPU (MPS)
+support is automatic.
+
+---
+
+## What you need before you start
+
+- **A machine you can install software on.** No admin password needed —
+  everything goes under your home directory.
+- **~3.5 GB free disk** for the conda environment.
+- **Internet** for the initial install (downloads conda + dependencies).
+- **A `best.pt` SAM-HeLa checkpoint file** *(optional)* — you can
+  configure this later via the app's I/O Settings dialog.
+
+---
+
+## Per-OS install
+
+### macOS (Apple Silicon)
+
+1. **Clone the repo** somewhere stable, e.g. `~/Projects/Eye_Data_Labeller`.
+2. **Finder → navigate to `deploy/` → right-click `install_mac.command`
+   → Open.** Confirm "Open" when macOS warns about an unsigned script.
+3. Wait ~5–15 minutes for Miniforge install + conda env create.
+4. (Optional) When prompted, paste the path to your `best.pt` so SAM
+   works out of the box. Hit Enter to skip.
+5. Double-click **EyeDataLabeller** on your Desktop.
+
+**Apple Silicon GPU (MPS):** automatic. Nothing to configure.
+
+### Linux (x86_64)
+
+```bash
+git clone https://github.com/HakkiMotorcu/Eye_Data_Labeller.git
+cd Eye_Data_Labeller
 bash deploy/install_linux.sh
 ```
 
-Adds `~/Desktop/EyeDataLabeller.sh` and a CLI shim
-`~/.local/bin/eye-labeller`. For NVIDIA, do the same `pip install
-torch --index-url …` swap as Windows above.
+Adds `~/Desktop/EyeDataLabeller.sh` (if you have a Desktop folder) and
+a CLI shim `~/.local/bin/eye-labeller` you can run from anywhere.
+
+**NVIDIA GPU:** detected automatically. The installer prints
+`NVIDIA GPU detected: <model> (driver <X>)` and swaps to CUDA-enabled
+PyTorch. If your driver is older than 550 (`nvidia-smi` shows it),
+edit `CUDA_INDEX` in the script — see the header comment for the
+mapping.
+
+### Windows (x86_64)
+
+1. Clone the repo (e.g. via GitHub Desktop or `git clone` in cmd).
+2. Open File Explorer → `deploy\` → double-click `install_windows.bat`.
+   If SmartScreen warns: *More info* → *Run anyway*.
+3. Wait for Miniforge + env install.
+4. (Optional) Paste your `best.pt` path when prompted.
+5. Double-click **EyeDataLabeller** on your Desktop.
+
+**NVIDIA GPU:** detected via `nvidia-smi` from the cmd shell. Same
+auto-swap behavior as Linux.
 
 ---
 
-## Model weights
+## SAM-HeLa model weights (`best.pt`)
 
-`sam_hela/best.pt` (~400 MB) isn't bundled. Two ways to get the app to
-find it:
+The ~400 MB checkpoint isn't bundled with the app. Three ways to get
+the app to find it:
 
-### A. Point at a file you already have (recommended for now)
+### Easiest: point at an existing file
 
-Easiest when you can hand-deliver the file (USB, Box / Drive share,
-network drive). No upload required.
+If a colleague has handed you the `best.pt` (USB / Box / Drive / network
+share), you don't need to copy it anywhere. Just tell the app where it is:
 
-- **At install time**: every Tier B installer prompts at the end with
-  `Path to best.pt (or empty to skip):`. Paste the full path; the
-  installer remembers it via the app's settings store.
-- **From inside the app**: open **I/O → Output settings… → SAM-HeLa
-  checkpoint → Local file → Browse…** to pick the file. Or paste the
-  absolute path directly. Persists across launches.
-- **Via env var**: set `EYE_LABELLER_SAM_HELA_LOCAL_PATH=/full/path`
-  before launching (useful for shared lab machines).
+- **At install time:** every installer prompts at the end —
+  `Path to best.pt (or empty to skip):`. Paste the full path.
+- **In the app:** I/O → Output settings… → SAM-HeLa checkpoint →
+  Local file → Browse… → pick the file.
+- **Via env var:** `EYE_LABELLER_SAM_HELA_LOCAL_PATH=/full/path` before
+  launching (useful on shared lab machines).
 
-The file is read in place — nothing is copied, and the original
-location can be on a network drive or read-only volume.
+The file is read in place — nothing copied, original can live anywhere
+readable (network drive, read-only volume, etc.).
 
-### B. Download from a URL on first use
+### If your lab has a public download URL for `best.pt`
 
-Use this once you have a public HTTPS URL to host `best.pt`.
+- **In the app:** I/O → Output settings… → SAM-HeLa checkpoint →
+  or URL → paste a public HTTPS URL.
+- **Via env var:** `EYE_LABELLER_SAM_HELA_URL=<url>` before launching.
 
-1. **In-app setting**: open **I/O → Output settings… → SAM-HeLa
-   checkpoint → or URL** and paste a public HTTPS URL.
-2. **Environment variable**: `EYE_LABELLER_SAM_HELA_URL=<url>` before
-   launching.
-3. **Compile-time default**: `DEFAULT_SAM_HELA_URL` in
-   `core/model_download.py` — set this before packaging the Tier A
-   bundles so users don't need to configure anything.
+The app downloads on first SAM use, streams into a `.part` sibling
+file, and atomically renames on success (so Ctrl+C never leaves you
+with a half-file). Downloads land under your per-user data dir:
 
-Resolution order: local file path → download URL → friendly error
-asking the user to configure one of the two.
+- macOS: `~/Library/Application Support/EyeDataLabeller/models/checkpoints/sam_hela/best.pt`
+- Linux: `~/.local/share/EyeDataLabeller/models/checkpoints/sam_hela/best.pt`
+- Windows: `%LOCALAPPDATA%\EyeDataLabeller\models\checkpoints\sam_hela\best.pt`
 
-### Where to host
+### Resolution order at runtime
 
-| Host | Pros | Cons |
-| --- | --- | --- |
-| **Hugging Face Hub** (model repo) | Free, versioned, dead-simple HTTPS URL like `https://huggingface.co/<org>/<repo>/resolve/main/best.pt` | None really |
-| **GitHub Release asset** | Free, sits next to the binaries | 2 GB per-asset cap (fine for `best.pt`) |
-| **S3** with presigned URL | You own it | URL expires; bake into the bundle is fragile |
-| Google Drive / Box share link | Easy to grab | `urlretrieve` chokes on their interstitial HTML — needs `gdown` or a workaround |
+1. Configured local file path (settings → env var)
+2. Configured download URL → downloads on first use
+3. Friendly error asking you to configure one of the two
 
-Recommendation: **Hugging Face**.
+---
 
-### Where the file lands on disk
+## Updating
 
-- **Tier A bundles**: under the OS user data root —
-  - macOS: `~/Library/Application Support/EyeDataLabeller/models/checkpoints/sam_hela/best.pt`
-  - Windows: `%LOCALAPPDATA%\EyeDataLabeller\models\checkpoints\sam_hela\best.pt`
-  - Linux: `~/.local/share/EyeDataLabeller/models/checkpoints/sam_hela/best.pt`
-- **Tier B / dev runs**: `<project>/.user_data/models/checkpoints/sam_hela/best.pt`, falling back to the legacy `<project>/models/checkpoints/sam_hela/best.pt` if the file already lives there.
+The installer scripts are idempotent — re-run them after a `git pull`
+to update your env:
 
-Downloads stream into a `.part` sibling and atomically rename on
-success — Ctrl+C / crash mid-download leaves no half-file.
+```bash
+cd Eye_Data_Labeller
+git pull
+deploy/install_mac.command       # or install_linux.sh / install_windows.bat
+```
+
+It detects the existing env and does `conda env update --prune` instead
+of recreating. Takes a couple of minutes if no major deps changed.
 
 ---
 
 ## Troubleshooting
 
-- **"Modules import OK but the app shows a black window."** Likely a
-  GPU/driver issue on Linux + Wayland. Run with
-  `QT_QPA_PLATFORM=xcb python main.py`.
-- **macOS: "is damaged and can't be opened."** Unsigned-bundle
-  Gatekeeper false-positive. Run `xattr -dr com.apple.quarantine
-  EyeDataLabeller.app` once.
-- **Windows: SmartScreen still won't run it.** Right-click → Properties
-  → check *Unblock* at the bottom → OK.
-- **Embedding precompute too slow.** Run with --debug; if you see
-  "Using cpu device", you're on the CPU PyTorch build — see the
-  per-OS GPU notes above.
-- **`No SAM-HeLa checkpoint URL configured`** on first SAM use. Open
-  I/O Settings → paste a download URL.
+### macOS
+
+- **`install_mac.command` won't open ("damaged or can't be opened"):**
+  `xattr -dr com.apple.quarantine install_mac.command` then try again.
+- **App launches but I see nothing:** the launch flow opens a file
+  picker dialog before showing any window. On Mac it can hide behind
+  other apps — check Mission Control / cmd-Tab for `Python` or
+  `python3.12`. Picking a file shows the main window.
+- **SAM is using CPU and is slow:** in a terminal, `conda activate
+  eye-labeller && python -c "import torch; print(torch.backends.mps.is_available())"`.
+  Should print `True`. If `False`, your PyTorch wasn't built with MPS
+  — shouldn't happen on Apple Silicon with conda-forge — re-run the
+  installer to refresh.
+
+### Linux
+
+- **App launches but I see nothing:** same file-picker UX as macOS.
+  The picker should pop up on your active monitor.
+- **Wayland: black window:** `QT_QPA_PLATFORM=xcb eye-labeller` (forces
+  X11 instead of Wayland — Qt6 Wayland support is still patchy).
+- **CUDA install failed:** the installer prints a clear "FAILED" line
+  and falls back to CPU. Run `nvidia-smi` to check your driver. If
+  driver < 550, edit `CUDA_INDEX` in `deploy/install_linux.sh` to
+  `cu121` and re-run.
+
+### Windows
+
+- **SmartScreen won't run the .bat:** right-click the .bat →
+  Properties → check *Unblock* at the bottom → OK.
+- **CUDA install failed:** same as Linux — check `nvidia-smi`, swap
+  `CUDA_INDEX` if driver is older than 550.
+- **"conda not recognized" after install:** the installer scopes
+  Miniforge to itself and doesn't add to PATH globally. Use the
+  Desktop launcher (which activates the env) rather than typing
+  `conda` in a fresh terminal.
+
+### Anywhere
+
+- **`No SAM-HeLa checkpoint URL configured`:** open I/O → Output
+  settings… → SAM-HeLa checkpoint → either Browse… to a local file
+  or paste a download URL.
+- **Embedding precompute too slow:** check your device with
+  `conda activate eye-labeller && python -c "from core.device import
+  describe_device; print(describe_device())"`. Should print `cuda
+  (...)` or `mps (...)`. If `cpu`, the install-time GPU swap didn't
+  take effect.
+
+---
+
+## Standalone bundles (experimental — not currently working)
+
+We've prototyped `.app` / `.exe` / Linux standalone bundles via
+PyInstaller (see `packaging/eye_labeller.spec`) but haven't gotten
+them to launch reliably. The core blocker is conda-forge's opencv +
+PyTorch using build-time paths that PyInstaller doesn't translate
+cleanly. The conda-env install path above is what we currently
+support.
+
+If you want to revisit Tier A bundling, the relevant prior art is in
+the git history: tags `v0.1.0` through `v0.1.9`, with the cv2 saga
+documented in commit messages on `main`.

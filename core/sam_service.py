@@ -134,6 +134,12 @@ class SamService:
         self.model_type = model_type
         # None means: let the user pick later or fall back to default_sam_hela_path().
         self.checkpoint_path = checkpoint_path
+        # Device: explicit override > auto-detected best (cuda > mps > cpu).
+        # The auto-detect lives in core.device so other model-loading code
+        # paths can share it. Env var EYE_LABELLER_DEVICE forces a value.
+        if device is None:
+            from core.device import pick_best_device
+            device = pick_best_device()
         self.device = device
         self._predictor = None  # lazy
         self._state = None      # decoder_state + image_encoder weights — needed

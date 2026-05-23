@@ -3,15 +3,22 @@
 #
 # Steps:
 #   1. Install Miniforge into ~/miniforge3 if missing.
-#   2. Create / update the `eye-labeller` conda env from environment.yml.
-#   3. Drop a launcher script at ~/Desktop/EyeDataLabeller.sh (if a
+#   2. Create / update the `eye-labeller` conda env from environment.yml
+#      (ships CPU PyTorch as the baseline — same on every platform).
+#   3. Detect NVIDIA GPU via nvidia-smi; if present, swap PyTorch for
+#      the CUDA-enabled pip wheel.
+#   4. Drop a launcher script at ~/Desktop/EyeDataLabeller.sh (if a
 #      Desktop folder exists) and a CLI shim at ~/.local/bin/eye-labeller.
 #
-# For NVIDIA users: after install, run
-#     conda activate eye-labeller
-#     pip uninstall torch torchvision
-#     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-# to swap in the CUDA-enabled PyTorch wheels.
+# CUDA WHEEL VERSION:
+#   We default to cu124 (CUDA 12.4 runtime) — matches PyTorch's
+#   recommended default and works with any NVIDIA driver >=550.
+#   If your driver is older (RHEL/CentOS labs sometimes have 525),
+#   edit CUDA_INDEX below to cu121 instead. Check your driver with
+#   `nvidia-smi` and look at the "Driver Version:" line. Mapping:
+#     driver >=550 → cu124
+#     driver >=525 → cu121
+#     driver <525  → talk to IT, your machine is overdue for updates.
 
 set -euo pipefail
 
@@ -21,6 +28,9 @@ MINIFORGE_DIR="$HOME/miniforge3"
 ENV_NAME="eye-labeller"
 DESKTOP_LAUNCHER="$HOME/Desktop/EyeDataLabeller.sh"
 CLI_SHIM="$HOME/.local/bin/eye-labeller"
+
+# CUDA wheel index — change to cu121 for older drivers (see header).
+CUDA_INDEX="https://download.pytorch.org/whl/cu124"
 
 say()  { printf "\033[1;36m[install]\033[0m %s\n" "$*"; }
 fail() { printf "\033[1;31m[install] FAILED:\033[0m %s\n" "$*" >&2; exit 1; }
@@ -52,7 +62,27 @@ else
     conda env create -n "$ENV_NAME" -f "$ENV_YML"
 fi
 
-# ---- 3. Launchers ---------------------------------------------------
+# ---- 3. GPU detection + CUDA PyTorch swap ---------------------------
+# env.yml ships CPU PyTorch as the baseline so every platform has the
+# same starting point. On Linux + NVIDIA we swap to the CUDA wheel.
+# --force-reinstall to overwrite conda's CPU torch; --no-deps so we
+# don't disturb numpy / scipy / BLAS pin / etc.
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+    driver_ver=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || echo "?")
+    gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "NVIDIA GPU")
+    say "NVIDIA GPU detected: $gpu_name  (driver $driver_ver)"
+    say "Swapping to CUDA-enabled PyTorch from $CUDA_INDEX"
+    conda activate "$ENV_NAME"
+    pip install --force-reinstall --no-deps \
+        torch torchvision --index-url "$CUDA_INDEX" || \
+        say "(CUDA PyTorch install FAILED — app will fall back to CPU. Check driver/CUDA compatibility per the header notes in this script.)"
+    conda deactivate
+else
+    say "No NVIDIA GPU detected — keeping CPU PyTorch."
+    say "  (App will use CPU for SAM inference. Slower but works.)"
+fi
+
+# ---- 4. Launchers ---------------------------------------------------
 if [ -d "$HOME/Desktop" ]; then
     say "Writing desktop launcher to $DESKTOP_LAUNCHER"
     cat >"$DESKTOP_LAUNCHER" <<EOF
@@ -76,7 +106,7 @@ exec python main.py "\$@"
 EOF
 chmod +x "$CLI_SHIM"
 
-# ---- 4. Optional SAM-HeLa checkpoint path ---------------------------
+# ---- 5. Optional SAM-HeLa checkpoint path ---------------------------
 echo ""
 say "Optional: if you already have sam_hela/best.pt on disk, point the"
 say "app at it now. Press Enter to skip — you can set it later via the"

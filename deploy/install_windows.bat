@@ -5,17 +5,16 @@ REM
 REM  Steps:
 REM    1. Download Miniforge into %USERPROFILE%\miniforge3 if missing.
 REM    2. Create / update the `eye-labeller` conda env from
-REM       environment.yml in the project root.
-REM    3. Drop a launcher at the user's Desktop:
-REM       %USERPROFILE%\Desktop\EyeDataLabeller.bat
+REM       environment.yml (CPU PyTorch baseline -- same on every OS).
+REM    3. Detect NVIDIA GPU via nvidia-smi.exe; if present, swap to
+REM       the CUDA-enabled pip wheel of PyTorch.
+REM    4. Drop a launcher at %USERPROFILE%\Desktop\EyeDataLabeller.bat.
 REM
-REM  NVIDIA-GPU users: after this finishes, open the env and replace
-REM  the PyTorch wheels with CUDA-enabled ones:
-REM
-REM       conda activate eye-labeller
-REM       pip uninstall torch torchvision
-REM       pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-REM
+REM  CUDA WHEEL VERSION:
+REM    Default cu124 (CUDA 12.4) works with NVIDIA driver >=550.
+REM    For older drivers, edit CUDA_INDEX below to cu121 (driver
+REM    >=525). Open Command Prompt and run `nvidia-smi` to see your
+REM    driver version on the top line of the output.
 REM ==================================================================
 
 setlocal enabledelayedexpansion
@@ -25,6 +24,9 @@ for %%i in ("%SCRIPT_DIR%..") do set "PROJECT_ROOT=%%~fi"
 set "MINIFORGE_DIR=%USERPROFILE%\miniforge3"
 set "ENV_NAME=eye-labeller"
 set "DESKTOP_LAUNCHER=%USERPROFILE%\Desktop\EyeDataLabeller.bat"
+
+REM CUDA wheel index. Change to cu121 for older drivers (see header).
+set "CUDA_INDEX=https://download.pytorch.org/whl/cu124"
 
 echo [install] PROJECT_ROOT = %PROJECT_ROOT%
 echo [install] MINIFORGE_DIR = %MINIFORGE_DIR%
@@ -60,7 +62,33 @@ if errorlevel 1 (
     call conda env update -n "%ENV_NAME%" -f "%PROJECT_ROOT%\environment.yml" --prune || goto :fail
 )
 
-REM ---- 3. Desktop launcher ----------------------------------------
+REM ---- 3. GPU detection + CUDA PyTorch swap -----------------------
+REM env.yml ships CPU PyTorch as the baseline so every platform starts
+REM the same. On Windows + NVIDIA we swap to the CUDA wheel.
+REM --force-reinstall overwrites conda's CPU torch; --no-deps avoids
+REM disturbing numpy / scipy.
+where nvidia-smi >nul 2>&1
+if errorlevel 1 (
+    echo [install] No NVIDIA GPU detected -- keeping CPU PyTorch.
+    echo [install]   App will run on CPU. Slower than GPU but works.
+) else (
+    nvidia-smi >nul 2>&1
+    if errorlevel 1 (
+        echo [install] nvidia-smi present but failed -- driver issue?
+        echo [install] Skipping CUDA swap; app will use CPU.
+    ) else (
+        echo [install] NVIDIA GPU detected -- swapping to CUDA PyTorch
+        echo [install]   Using wheel index %CUDA_INDEX%
+        call conda activate "%ENV_NAME%"
+        pip install --force-reinstall --no-deps torch torchvision --index-url %CUDA_INDEX% || (
+            echo [install] CUDA PyTorch install FAILED -- app will fall back to CPU.
+            echo [install] Check driver/CUDA compatibility per the header notes.
+        )
+        call conda deactivate
+    )
+)
+
+REM ---- 4. Desktop launcher ----------------------------------------
 echo [install] Writing launcher to %DESKTOP_LAUNCHER%
 (
     echo @echo off
@@ -70,7 +98,7 @@ echo [install] Writing launcher to %DESKTOP_LAUNCHER%
     echo python main.py %%*
 ) > "%DESKTOP_LAUNCHER%"
 
-REM ---- 4. Optional SAM-HeLa checkpoint path -----------------------
+REM ---- 5. Optional SAM-HeLa checkpoint path -----------------------
 echo.
 echo [install] Optional: if you already have sam_hela\best.pt on disk,
 echo [install] you can point the app at it now. Press Enter to skip --
