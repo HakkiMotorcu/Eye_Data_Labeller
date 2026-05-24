@@ -7,6 +7,25 @@ if '--debug' in sys.argv:
     os.environ['EYE_LABELLER_DEBUG'] = '1'
     sys.argv.remove('--debug')
 
+# Point Qt at PyQt6's bundled plugins BEFORE importing any Qt module.
+# Why: conda-forge envs often have a qt.conf file (from a Qt5 dep
+# pulled in transitively) that points the Qt prefix at the env root,
+# which then sends Qt looking for plugins in the wrong place. PyQt6
+# itself ships its plugins inside its own site-packages dir; that's
+# the path we want. Overriding the env var here trumps qt.conf and
+# trumps any QT_QPA_PLATFORM_PLUGIN_PATH the user has set globally.
+try:
+    import PyQt6 as _pyqt6
+    _plugins = os.path.join(os.path.dirname(_pyqt6.__file__), 'Qt6', 'plugins')
+    if os.path.isdir(_plugins):
+        os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = os.path.join(
+            _plugins, 'platforms')
+        os.environ['QT_PLUGIN_PATH'] = _plugins
+except Exception:
+    # If PyQt6 isn't importable at all, the next import will produce
+    # a clearer error than anything we could craft here.
+    pass
+
 from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QPainterPath, QColor, QPen
 from PyQt6.QtCore import Qt, QRectF

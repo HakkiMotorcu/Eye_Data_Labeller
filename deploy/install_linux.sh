@@ -35,20 +35,30 @@ CUDA_INDEX="https://download.pytorch.org/whl/cu124"
 say()  { printf "\033[1;36m[install]\033[0m %s\n" "$*"; }
 fail() { printf "\033[1;31m[install] FAILED:\033[0m %s\n" "$*" >&2; exit 1; }
 
-# ---- 1. Miniforge ---------------------------------------------------
-if [ ! -x "$MINIFORGE_DIR/bin/conda" ]; then
-    say "Installing Miniforge into $MINIFORGE_DIR"
+# ---- 1. Conda (Miniforge if missing, otherwise reuse existing) ------
+# Three cases: our managed Miniforge / some other existing conda /
+# nothing -- install Miniforge. See install_mac.command for context.
+if [ -x "$MINIFORGE_DIR/bin/conda" ]; then
+    say "Reusing Miniforge at $MINIFORGE_DIR"
+    CONDA_SH="$MINIFORGE_DIR/etc/profile.d/conda.sh"
+elif command -v conda >/dev/null 2>&1; then
+    conda_bin="$(command -v conda)"
+    existing_prefix="$(cd "$(dirname "$conda_bin")/.." && pwd)"
+    say "Reusing existing conda at $existing_prefix (skipping Miniforge install)"
+    CONDA_SH="$existing_prefix/etc/profile.d/conda.sh"
+    [ -f "$CONDA_SH" ] || fail "Found 'conda' on PATH but couldn't locate conda.sh at $CONDA_SH"
+else
+    say "No conda found — installing Miniforge into $MINIFORGE_DIR"
     url="https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh"
     tmpfile="$(mktemp -t miniforge.XXXXXX.sh)"
     curl -fL "$url" -o "$tmpfile" || fail "Download of Miniforge failed"
     bash "$tmpfile" -b -p "$MINIFORGE_DIR" || fail "Miniforge install failed"
     rm -f "$tmpfile"
-else
-    say "Miniforge already at $MINIFORGE_DIR — reusing it."
+    CONDA_SH="$MINIFORGE_DIR/etc/profile.d/conda.sh"
 fi
 
 # shellcheck source=/dev/null
-source "$MINIFORGE_DIR/etc/profile.d/conda.sh"
+source "$CONDA_SH"
 
 # ---- 2. Conda env ---------------------------------------------------
 ENV_YML="$PROJECT_ROOT/environment.yml"
@@ -87,7 +97,11 @@ if [ -d "$HOME/Desktop" ]; then
     say "Writing desktop launcher to $DESKTOP_LAUNCHER"
     cat >"$DESKTOP_LAUNCHER" <<EOF
 #!/usr/bin/env bash
-source "$MINIFORGE_DIR/etc/profile.d/conda.sh"
+# Clear any Qt env vars from the user's shell profile so PyQt6 finds
+# plugins in OUR env, not whatever path someone hardcoded elsewhere.
+unset QT_QPA_PLATFORM_PLUGIN_PATH
+unset QT_PLUGIN_PATH
+source "$CONDA_SH"
 conda activate $ENV_NAME
 cd "$PROJECT_ROOT"
 exec python main.py "\$@"
@@ -99,7 +113,11 @@ mkdir -p "$(dirname "$CLI_SHIM")"
 say "Writing CLI shim to $CLI_SHIM"
 cat >"$CLI_SHIM" <<EOF
 #!/usr/bin/env bash
-source "$MINIFORGE_DIR/etc/profile.d/conda.sh"
+# Clear any Qt env vars from the user's shell profile so PyQt6 finds
+# plugins in OUR env, not whatever path someone hardcoded elsewhere.
+unset QT_QPA_PLATFORM_PLUGIN_PATH
+unset QT_PLUGIN_PATH
+source "$CONDA_SH"
 conda activate $ENV_NAME
 cd "$PROJECT_ROOT"
 exec python main.py "\$@"
