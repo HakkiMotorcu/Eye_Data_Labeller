@@ -93,5 +93,12 @@ dependencies:
       - pyqtgraph
       - qtawesome
       - pyqtdarktheme
+      # opencv-python-headless — we DO list it here explicitly. Earlier
+      # versions of this file relied on micro_sam pulling opencv in
+      # transitively, but that proved inconsistent (worked on GH Linux
+      # runner, failed on local Mac install). Headless variant has no
+      # GTK/Qt GUI built-in; cv2 GUI features aren't used (we have
+      # PyQt6) and would conflict with our Qt bindings.
+      - opencv-python-headless
       # MobileSAM (vit_t support) — same as upstream micro-sam env
       - git+https://github.com/ChaoningZhang/MobileSAM.git
