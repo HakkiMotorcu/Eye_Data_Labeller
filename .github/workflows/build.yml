@@ -1,0 +1,220 @@
+name: Build standalone bundles
+
+# Triggers:
+#   - push of a tag like v1.2.3 -> build + attach to a GitHub Release
+#   - manual run via the Actions UI ("workflow_dispatch")
+#   - PR to main -> build only (no Release), to catch packaging regressions
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write   # needed to attach artifacts to a Release on tag push
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            label: macOS-arm64
+            artifact: EyeDataLabeller-macos-arm64.zip
+          - os: windows-latest
+            label: Windows-x86_64
+            artifact: EyeDataLabeller-windows-x86_64.zip
+          - os: ubuntu-latest
+            label: Linux-x86_64
+            artifact: EyeDataLabeller-linux-x86_64.zip
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # We use micromamba (not setup-miniconda) because the Ubuntu
+      # runner repeatedly died with "received a shutdown signal" mid-
+      # solve — the classic conda solver's memory footprint on a
+      # large env (PyTorch + micro-sam + scientific stack) pushes a
+      # 7 GB runner over the edge. Micromamba uses libmamba's C++
+      # solver, which is ~5x faster and dramatically lighter.
+      # `init-shell: bash` makes the env auto-activate in subsequent
+      # `bash -el {0}` steps (the `-e` makes the script fail-fast).
+      - name: Set up micromamba + eye-labeller env
+        uses: mamba-org/setup-micromamba@v1
+        with:
+          environment-file: environment.yml
+          environment-name: eye-labeller
+          # init-shell only accepts ONE shell name (the action's schema
+          # validates the raw input as a single enum — no whitespace,
+          # newline, or comma separation works). Use bash for build
+          # steps via `shell: bash -el {0}`.
+          init-shell: bash
+          # post-cleanup defaults to 'shell-init' which tries to remove
+          # micromamba hooks from the shell profile after the job ends.
+          # On Windows it fails ("Could not find micromamba activate
+          # eye-labeller in C:\Users\runneradmin\.bash_profile") and
+          # tanks the whole job with exit code 1 EVEN IF the build
+          # succeeded — because Git Bash's .bash_profile doesn't get
+          # created on the runner before the post step runs. Setting
+          # to 'none' skips the cleanup; this is cosmetic-only on
+          # ephemeral runners that are destroyed anyway.
+          post-cleanup: none
+          cache-environment: true
+
+      # macOS-only: force the BLAS/LAPACK stack to OpenBLAS. We can't
+      # put this in environment.yml because the openblas constraint
+      # makes Windows unsolvable (MKL-based build family conflicts).
+      # Why we need it on Mac: numpy 2.x links against LAPACK
+      # symbols (notably _ctrsyl3_) that Apple's Accelerate framework
+      # doesn't export. Inside a live conda env the dyld lookup
+      # happens to find them; inside a PyInstaller .app the layout
+      # shifts and numpy crashes at import with:
+      #   Symbol not found: _ctrsyl3_
+      #     Referenced from: liblapacke-netlib.3.11.0.dylib
+      #     Expected in:     libblas_reexport.dylib
+      # micromamba install with the constraint forces every BLAS
+      # consumer to use the OpenBLAS variant, which has every symbol.
+      - name: Force OpenBLAS on macOS (Accelerate symbol gap)
+        if: runner.os == 'macOS'
+        shell: bash -el {0}
+        run: |
+          micromamba install -n eye-labeller -y -c conda-forge \
+            'libblas=*=*openblas' 'libcblas=*=*openblas' 'liblapack=*=*openblas'
+
+      # PyInstaller has to live in the same env as the app's deps so
+      # it can introspect them. Pin to a known-good major.
+      - name: Install PyInstaller
+        shell: bash -el {0}
+        run: |
+          pip install "pyinstaller>=6,<7"
+
+      # The conda-forge opencv package patches cv2/__init__.py with
+      # absolute paths inside the conda env prefix (e.g.
+      # /Users/runner/micromamba/envs/eye-labeller/lib/python3.12/
+      # site-packages/cv2/python-3.12). Those paths get baked into the
+      # bundled cv2 config files and crash on the user's machine with:
+      #
+      #   ImportError: ERROR: recursion is detected during loading of
+      #   "cv2" binary extensions. Check OpenCV installation.
+      #
+      # We can't just remove `opencv` from environment.yml — micro_sam
+      # depends on it transitively, so conda's solver pulls it in
+      # anyway. And pip in the env file runs AFTER conda, so a regular
+      # `opencv-python-headless` pip line is silently skipped (cv2 is
+      # "already installed"). Solution: force-reinstall pip's headless
+      # variant after env setup so the bundle picks it up. --no-deps
+      # so we don't reinstall numpy (would clobber the BLAS pin).
+      # Code grep confirms we don't use any cv2 GUI features
+      # (imshow / namedWindow / waitKey / etc.) so headless is safe.
+      - name: Patch cv2 config files to use bundle-safe relative paths
+        shell: bash -el {0}
+        run: |
+          # conda-forge's opencv-python-headless ships config.py /
+          # config-<pyver>.py with the conda env's ABSOLUTE PATH baked
+          # in -- those paths get into the PyInstaller bundle and
+          # crash on the user's machine with:
+          #   ImportError: ERROR: recursion is detected during loading
+          #   of "cv2" binary extensions. Check OpenCV installation.
+          #
+          # First tried `pip install --ignore-installed
+          # opencv-python-headless` (v0.1.7) to overlay pip's wheel
+          # files, but pip's wheel uses a flat cv2/ layout and doesn't
+          # ship config*.py at all -- conda's broken ones stayed put.
+          #
+          # Final fix: overwrite the config files in-place with paths
+          # computed at runtime from __file__. Works both inside the
+          # live env (LOADER_DIR resolves to the env's cv2/) and inside
+          # a PyInstaller bundle (LOADER_DIR resolves to the bundle's
+          # cv2/). Single source of truth, no surprise.
+          CV2_DIR=$(python -c "import cv2, os; print(os.path.dirname(cv2.__file__))")
+          PY_VER=$(python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+          echo "Patching $CV2_DIR/config*.py for Python $PY_VER"
+
+          # config.py — keep BINARIES_PATHS empty; system-default lib
+          # dirs and PyInstaller's @rpath rewrites handle .dylib/.so
+          # lookup. The conda version pointed BINARIES_PATHS at the
+          # env's lib/ dir which doesn't exist in the bundle.
+          cat > "$CV2_DIR/config.py" <<'EOF'
+          import os
+          BINARIES_PATHS = []
+          EOF
+
+          # config-<pyver>.py — point PYTHON_EXTENSIONS_PATHS at the
+          # python-<pyver>/ subdir RELATIVE to where this config file
+          # lives. __file__ resolves correctly in both env and bundle.
+          cat > "$CV2_DIR/config-${PY_VER}.py" <<EOF
+          import os
+          PYTHON_EXTENSIONS_PATHS = [
+              os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           'python-${PY_VER}')
+          ] + PYTHON_EXTENSIONS_PATHS
+          EOF
+
+          # Verify the new configs are bundle-safe AND cv2 still loads.
+          python - <<'PY'
+          import pathlib, sys
+          import cv2
+          cv2_dir = pathlib.Path(cv2.__file__).parent
+          for cfg in ('config.py', f'config-{sys.version_info.major}.{sys.version_info.minor}.py'):
+              p = cv2_dir / cfg
+              text = p.read_text()
+              print(f'--- {cfg} ---'); print(text)
+              for bad in ('/Users/runner/', '/home/runner/', 'runneradmin'):
+                  if bad in text:
+                      raise SystemExit(f'FAIL: {cfg} still contains {bad!r}')
+          print(f'cv2 OK: {cv2.__version__} at {cv2.__file__}')
+          PY
+
+      - name: Build with PyInstaller
+        shell: bash -el {0}
+        run: |
+          pyinstaller packaging/eye_labeller.spec --clean --noconfirm
+
+      # macOS: turn the COLLECT folder into a .app + a .dmg ready to
+      # mount. Windows / Linux: zip the COLLECT folder as-is.
+      - name: Package macOS artifact
+        if: runner.os == 'macOS'
+        shell: bash -el {0}
+        run: |
+          cd dist
+          # PyInstaller emits both EyeDataLabeller/ and EyeDataLabeller.app
+          if [ -d EyeDataLabeller.app ]; then
+            zip -ry ../${{ matrix.artifact }} EyeDataLabeller.app
+          else
+            zip -ry ../${{ matrix.artifact }} EyeDataLabeller
+          fi
+
+      - name: Package Windows artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\EyeDataLabeller -DestinationPath ${{ matrix.artifact }}
+
+      - name: Package Linux artifact
+        if: runner.os == 'Linux'
+        shell: bash -el {0}
+        run: |
+          cd dist
+          zip -ry ../${{ matrix.artifact }} EyeDataLabeller
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+
+      # Attach to a Release only when this run was triggered by a tag.
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -187,15 +187,37 @@ of recreating. Takes a couple of minutes if no major deps changed.
 
 ---
 
-## Standalone bundles (experimental — not currently working)
+## Standalone bundles (alternative install)
 
-We've prototyped `.app` / `.exe` / Linux standalone bundles via
-PyInstaller (see `packaging/eye_labeller.spec`) but haven't gotten
-them to launch reliably. The core blocker is conda-forge's opencv +
-PyTorch using build-time paths that PyInstaller doesn't translate
-cleanly. The conda-env install path above is what we currently
-support.
+For collaborators who don't want to touch a terminal at all, we
+also ship `.app` / `.exe` / Linux standalone bundles via PyInstaller.
+Built automatically by `.github/workflows/build.yml` on every tag
+push (`git tag vX.Y.Z && git push --tags`) and attached to the
+matching GitHub Release.
 
-If you want to revisit Tier A bundling, the relevant prior art is in
-the git history: tags `v0.1.0` through `v0.1.9`, with the cv2 saga
-documented in commit messages on `main`.
+**Status (as of v0.2.0):**
+
+| Platform | Status |
+| --- | --- |
+| macOS Apple Silicon | ✓ Verified working |
+| Windows x86_64 | Builds successfully — launch behavior unverified by us, needs a Windows collaborator |
+| Linux x86_64 | Same — builds, untested launch |
+
+### Downloading a bundle
+
+1. Go to the [Releases page](https://github.com/HakkiMotorcu/Eye_Data_Labeller/releases).
+2. Download the zip for your platform.
+3. Unzip → drag `EyeDataLabeller.app` into Applications (mac) /
+   unzip anywhere (Win/Linux).
+4. First launch: macOS Gatekeeper will warn — **right-click → Open**
+   to bypass. On Windows: SmartScreen → *More info* → *Run anyway*.
+
+Bundle limitations vs. Tier B install:
+- **GPU support is whatever PyTorch's CPU wheel includes.** No CUDA
+  in bundles (Win/Linux). On macOS, MPS works (it's runtime-detected,
+  no special build needed).
+- **Model weights (`best.pt`, ~400 MB) are NOT in the bundle.** First
+  launch you'll get an error pointing you to configure either a local
+  file path or a download URL (same UI as the Tier B install).
+- **Larger disk footprint** (~600 MB unzipped vs. Tier B's ~3.5 GB
+  shared conda env — but the bundle is fully self-contained).
