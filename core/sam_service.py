@@ -179,36 +179,61 @@ class SamService:
             log('sam_service', 'load: already loaded', model_type=self.model_type)
             return self._predictor
         if self.checkpoint_path and not os.path.exists(self.checkpoint_path):
-            # Auto-download the fine-tuned checkpoint on first use, if the
-            # deployer configured a URL. The downloader is in its own
-            # module so headless callers can opt out of the Qt progress
-            # dialog by passing qt_parent=None.
+            # Checkpoint missing. Resolution attempts in order:
+            #   1. POPUP — ask the user to pick the file or its folder.
+            #      Works the same way in Tier A bundles, Tier B installs,
+            #      and dev runs. The popup persists the choice to
+            #      QSettings so it never asks again. This is the
+            #      primary path; we prefer it over auto-download
+            #      because (a) most labs hand the file around on
+            #      Box / USB rather than a public URL, (b) it works
+            #      offline, (c) it gives the user explicit control.
+            #   2. AUTO-DOWNLOAD — fall back to the configured URL
+            #      (env var / settings / DEFAULT_SAM_HELA_URL) if the
+            #      popup was cancelled. Useful once a lab uploads
+            #      best.pt to e.g. Hugging Face.
+            #   3. FileNotFoundError — surface a clear message so the
+            #      caller (typically tool_controller) can show a
+            #      QMessageBox with what went wrong.
+            from core import model_download
+            qt_parent = None
             try:
-                from core import model_download
-                qt_parent = None
+                from PyQt6.QtWidgets import QApplication
+                app = QApplication.instance()
+                if app is not None:
+                    qt_parent = app.activeWindow()
+            except Exception:
+                pass
+
+            log('sam_service', 'checkpoint missing; prompting user',
+                target=self.checkpoint_path)
+            picked = model_download.prompt_for_local_path(qt_parent)
+            if picked and os.path.exists(picked):
+                log('sam_service', 'user picked checkpoint', path=picked)
+                self.checkpoint_path = picked
+            else:
+                # Popup cancelled or no Qt available — try URL download.
                 try:
-                    from PyQt6.QtWidgets import QApplication
-                    app = QApplication.instance()
-                    if app is not None:
-                        qt_parent = app.activeWindow()
-                except Exception:
-                    pass
-                log('sam_service', 'checkpoint missing; attempting download',
-                    target=self.checkpoint_path)
-                model_download.ensure_sam_hela_checkpoint(
-                    self.checkpoint_path, qt_parent=qt_parent)
-            except model_download.MissingModelURL as e:
-                raise FileNotFoundError(
-                    f"SAM checkpoint not found at:\n  {self.checkpoint_path}\n\n"
-                    f"{e}") from e
-            except InterruptedError:
-                raise FileNotFoundError(
-                    f"Download of SAM checkpoint was cancelled. "
-                    f"Try again — or drop the file at:\n  {self.checkpoint_path}")
-            except Exception as e:
-                raise FileNotFoundError(
-                    f"Could not download SAM checkpoint:\n  {self.checkpoint_path}\n"
-                    f"({type(e).__name__}: {e})") from e
+                    log('sam_service', 'popup cancelled; trying download',
+                        target=self.checkpoint_path)
+                    model_download.ensure_sam_hela_checkpoint(
+                        self.checkpoint_path, qt_parent=qt_parent)
+                except model_download.MissingModelURL as e:
+                    raise FileNotFoundError(
+                        f"SAM checkpoint not found at:\n"
+                        f"  {self.checkpoint_path}\n\n"
+                        f"Either pick the file when prompted, configure a "
+                        f"download URL in I/O Settings, or drop best.pt "
+                        f"at the path above.\n\n{e}") from e
+                except InterruptedError:
+                    raise FileNotFoundError(
+                        f"Download of SAM checkpoint was cancelled. "
+                        f"Try again — or pick the file when prompted.")
+                except Exception as e:
+                    raise FileNotFoundError(
+                        f"Could not download SAM checkpoint:\n"
+                        f"  {self.checkpoint_path}\n"
+                        f"({type(e).__name__}: {e})") from e
 
         kwargs = dict(model_type=self.model_type)
         if self.checkpoint_path:

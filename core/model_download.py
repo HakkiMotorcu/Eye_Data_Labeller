@@ -199,3 +199,118 @@ def ensure_sam_hela_checkpoint(target_path: str, *,
         expected_sha256=expected_sha256,
         qt_parent=qt_parent,
         label="sam_hela/best.pt")
+
+
+def prompt_for_local_path(parent=None) -> str:
+    """Pop up a dialog asking the user where the SAM-HeLa best.pt lives.
+
+    Accepts EITHER:
+      - a .pt / .pth file directly (used as-is), OR
+      - a folder (scanned for ``best.pt`` → ``best*.pt`` → ``*.pt``;
+        if multiple matches, a follow-up picker lets the user choose).
+
+    On success, persists the resolved file path to ``QSettings`` under
+    ``LOCAL_PATH_SETTINGS_KEY`` so future launches find it without
+    re-prompting. Returns the path. Returns ``""`` on cancel.
+
+    Requires an active ``QApplication`` (i.e. there must be a running
+    Qt event loop, since the dialog is modal). Returns ``""`` if Qt
+    isn't available so headless callers can fall back to other paths.
+    """
+    try:
+        from PyQt6.QtWidgets import (
+            QApplication, QDialog, QDialogButtonBox, QFileDialog,
+            QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout,
+        )
+        from PyQt6.QtCore import QSettings
+    except Exception:
+        return ""
+
+    if QApplication.instance() is None:
+        return ""
+
+    import glob as _glob
+
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("SAM-HeLa checkpoint needed")
+    dlg.setModal(True)
+    dlg.resize(520, 180)
+
+    msg = QLabel(
+        "<b>SAM needs the fine-tuned checkpoint (<code>best.pt</code>) "
+        "to segment cells.</b><br><br>"
+        "Pick the <b>file</b> directly, OR pick a <b>folder</b> "
+        "that contains it. Your choice is remembered across launches "
+        "— you only do this once."
+    )
+    msg.setWordWrap(True)
+
+    btn_file = QPushButton("Pick file (best.pt)…")
+    btn_folder = QPushButton("Pick folder…")
+    btn_cancel = QPushButton("Cancel")
+    btn_cancel.setAutoDefault(False)
+
+    chosen: list[str] = [""]
+
+    def _accept_path(path: str):
+        chosen[0] = path
+        dlg.accept()
+
+    def pick_file():
+        path, _ = QFileDialog.getOpenFileName(
+            dlg, "Pick SAM-HeLa best.pt", "",
+            "PyTorch checkpoint (*.pt *.pth);;All files (*)")
+        if not path:
+            return
+        if not os.path.isfile(path):
+            QMessageBox.warning(dlg, "Not a file", f"Not a regular file:\n{path}")
+            return
+        _accept_path(path)
+
+    def pick_folder():
+        folder = QFileDialog.getExistingDirectory(
+            dlg, "Pick a folder containing best.pt", "")
+        if not folder:
+            return
+        # Search priority: exact `best.pt` → `best*.pt` → any `*.pt` / `*.pth`
+        matches: list[str] = []
+        for pattern in ("best.pt", "best*.pt", "*.pt", "*.pth"):
+            matches = sorted(_glob.glob(os.path.join(folder, pattern)))
+            if matches:
+                break
+        if not matches:
+            QMessageBox.warning(
+                dlg, "No checkpoint found",
+                f"Couldn't find a .pt or .pth file in:\n{folder}\n\n"
+                "Pick a different folder, or use 'Pick file' instead.")
+            return
+        if len(matches) == 1:
+            _accept_path(matches[0])
+            return
+        # Multiple .pt files — let the user pick one explicitly.
+        path, _ = QFileDialog.getOpenFileName(
+            dlg, "Multiple checkpoints found — pick one", folder,
+            "PyTorch checkpoint (*.pt *.pth)")
+        if path:
+            _accept_path(path)
+
+    btn_file.clicked.connect(pick_file)
+    btn_folder.clicked.connect(pick_folder)
+    btn_cancel.clicked.connect(dlg.reject)
+
+    layout = QVBoxLayout(dlg)
+    layout.addWidget(msg)
+    layout.addStretch(1)
+    row = QHBoxLayout()
+    row.addWidget(btn_file)
+    row.addWidget(btn_folder)
+    row.addStretch(1)
+    row.addWidget(btn_cancel)
+    layout.addLayout(row)
+
+    if dlg.exec() == QDialog.DialogCode.Accepted and chosen[0]:
+        # Persist for next launch + so the I/O Settings dialog shows it.
+        QSettings().setValue(LOCAL_PATH_SETTINGS_KEY, chosen[0])
+        QSettings().sync()
+        return chosen[0]
+    return ""
