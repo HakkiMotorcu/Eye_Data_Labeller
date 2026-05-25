@@ -80,15 +80,31 @@ auto-swap behavior as Linux.
 
 ## SAM-HeLa model weights (`best.pt`)
 
-The ~400 MB checkpoint isn't bundled with the app. Three ways to get
-the app to find it:
+The ~400 MB checkpoint isn't bundled with the app (git doesn't handle
+large binaries well). The app needs to find it before SAM works.
 
-### Easiest: point at an existing file
+### Easiest: drop the file in the magic folder
 
-If a colleague has handed you the `best.pt` (USB / Box / Drive / network
-share), you don't need to copy it anywhere. Just tell the app where it is:
+After cloning the repo, drop your `best.pt` here:
 
-- **At install time:** every installer prompts at the end —
+```
+models/checkpoints/sam_hela/best.pt
+```
+
+(The folder already exists with a `README.md` placeholder telling you
+the same thing.) The app checks this exact path on startup. No
+configuration needed.
+
+If you don't have a `best.pt` yet, ask whoever runs your lab — they
+should have it on a USB / Box / Drive / network share, or hand you a
+`models.zip` containing it.
+
+### Alternative: point at a file somewhere else
+
+If the file lives on a network drive, you want to share it across
+multiple project clones, or it's just somewhere else on disk:
+
+- **At install time:** every installer prompts —
   `Path to best.pt (or empty to skip):`. Paste the full path.
 - **In the app:** I/O → Output settings… → SAM-HeLa checkpoint →
   Local file → Browse… → pick the file.

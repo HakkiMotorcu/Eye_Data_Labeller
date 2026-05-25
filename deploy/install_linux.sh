@@ -127,14 +127,21 @@ chmod +x "$CLI_SHIM"
 # ---- 5. Optional SAM-HeLa checkpoint path ---------------------------
 echo ""
 say "Optional: if you already have sam_hela/best.pt on disk, point the"
-say "app at it now. Press Enter to skip — you can set it later via the"
-say "app's I/O > Output settings… dialog."
+say "app at it now. Press Enter to skip — see hint below if you do."
 printf "  Path to best.pt (or empty to skip): "
 read MODEL_PATH || MODEL_PATH=""
 if [ -n "$MODEL_PATH" ]; then
     conda activate "$ENV_NAME"
     python "$SCRIPT_DIR/configure_model.py" "$MODEL_PATH" || \
         say "(path not saved; you can set it later in the app settings)"
+else
+    DROP_PATH="$PROJECT_ROOT/models/checkpoints/sam_hela/best.pt"
+    echo ""
+    say "Skipped. Easiest way to add it later -- drop the file at:"
+    say "  $DROP_PATH"
+    say "The app checks this exact path on startup; no further config needed."
+    say "Or use the app's I/O > Output settings dialog to point elsewhere."
 fi
 
+echo ""
 say "Done. Launch via the Desktop icon or by running 'eye-labeller'."

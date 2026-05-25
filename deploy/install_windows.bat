@@ -106,15 +106,22 @@ REM ---- 5. Optional SAM-HeLa checkpoint path -----------------------
 echo.
 echo [install] Optional: if you already have sam_hela\best.pt on disk,
 echo [install] you can point the app at it now. Press Enter to skip --
-echo [install] you can configure it later in the app's I/O settings.
+echo [install] see hint below if you do.
 set /p "MODEL_PATH=  Path to best.pt (or empty to skip): "
 if not "%MODEL_PATH%"=="" (
     call conda activate "%ENV_NAME%"
     python "%SCRIPT_DIR%configure_model.py" "%MODEL_PATH%" || (
         echo [install] (path not saved; you can set it later in the app settings)
     )
+) else (
+    echo.
+    echo [install] Skipped. Easiest way to add it later -- drop the file at:
+    echo [install]   %PROJECT_ROOT%\models\checkpoints\sam_hela\best.pt
+    echo [install] The app checks this exact path on startup; no further config needed.
+    echo [install] Or use the app's I/O ^> Output settings dialog to point elsewhere.
 )
 
+echo.
 echo [install] Done. Double-click EyeDataLabeller on your Desktop to launch.
 endlocal
 exit /b 0

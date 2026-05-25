@@ -96,14 +96,21 @@ chmod +x "$DESKTOP_LAUNCHER"
 echo ""
 say "Optional: if you already have sam_hela/best.pt on disk, you can"
 say "point the app at it now so SAM works out of the box."
-say "Press Enter to skip — you can configure it later via the app's"
-say "I/O > Output settings… dialog."
+say "Press Enter to skip — you can configure it later (see below)."
 printf "  Path to best.pt (or empty to skip): "
 read MODEL_PATH || MODEL_PATH=""
 if [ -n "$MODEL_PATH" ]; then
     conda activate "$ENV_NAME"
     python "$SCRIPT_DIR/configure_model.py" "$MODEL_PATH" || \
         say "(path not saved; you can set it later in the app settings)"
+else
+    DROP_PATH="$PROJECT_ROOT/models/checkpoints/sam_hela/best.pt"
+    echo ""
+    say "Skipped. Easiest way to add it later -- just drop the file at:"
+    say "  $DROP_PATH"
+    say "The app checks this exact path on startup; no further config needed."
+    say "Or use the app's I/O > Output settings dialog to point elsewhere."
 fi
 
+echo ""
 say "Done. Double-click EyeDataLabeller on your Desktop to launch."

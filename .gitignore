@@ -25,9 +25,25 @@ Thumbs.db
 # Large vendored micro-sam clone (use the one at /Users/hakkimotorcu/Desktop/micro-sam-master instead)
 micro-sam/
 
-# Model weights and logs (binary, regenerable)
+# Model weights and logs (binary, regenerable). We want the FOLDER
+# structure to stay visible to users who clone the repo (so they see
+# the placeholder README that says "drop best.pt HERE"), BUT we must
+# guarantee that any actual checkpoint dropped into sam_hela/ stays
+# safely ignored -- otherwise a `git add -A` after dropping a 1 GB
+# best.pt will try to commit it and the push will choke.
+#
+# How the rules work:
+#   1. Ignore everything in models/checkpoints/ (default ignore).
+#   2. Un-ignore the dir + sam_hela/ subdir so git descends into them.
+#   3. Re-ignore ALL files in sam_hela/ via the `*` glob.
+#   4. Finally allow the single placeholder README back through.
+# Don't reorder; gitignore evaluates top-to-bottom.
 models/checkpoints/
 models/logs/
+!models/checkpoints/
+!models/checkpoints/sam_hela/
+models/checkpoints/sam_hela/*
+!models/checkpoints/sam_hela/README.md
 
 # Generated outputs
 test_output/
