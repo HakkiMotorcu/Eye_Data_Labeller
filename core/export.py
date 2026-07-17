@@ -128,11 +128,20 @@ def write_bundle(seg, names, out_dir, get_frame, num_frames,
     with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
         wtr = csv.writer(f)
         wtr.writerow(['frame', 'class', 'instance_id', 'name',
-                      'n_pixels', 'x0', 'y0', 'x1', 'y1'])
+                      'track_length', 'n_pixels', 'x0', 'y0', 'x1', 'y1'])
         for ct, _fname in CLASS_FILES:
             layer = seg.get_layer(ct)
             if layer is None or not layer.any():
                 continue
+            # track_length = how many frames each id appears on in this
+            # class (post-tracking, a coalesced cell shares one id, so
+            # this is its track length; untracked ids read as 1).
+            frames_per_id = {}
+            for fi in range(layer.shape[0]):
+                for iid in np.unique(layer[fi]):
+                    if iid:
+                        frames_per_id[int(iid)] = \
+                            frames_per_id.get(int(iid), 0) + 1
             for fi in range(layer.shape[0]):
                 m = layer[fi]
                 ids = np.unique(m)
@@ -143,7 +152,8 @@ def write_bundle(seg, names, out_dir, get_frame, num_frames,
                     name = (names.get((fi, ct, iid))
                             or names.get((0, ct, iid), ''))
                     wtr.writerow([
-                        fi, ct, iid, name, int(ys.size),
+                        fi, ct, iid, name, frames_per_id.get(iid, 1),
+                        int(ys.size),
                         int(xs.min()), int(ys.min()),
                         int(xs.max()) + 1, int(ys.max()) + 1])
     written.append(csv_path)

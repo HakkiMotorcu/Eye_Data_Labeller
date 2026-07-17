@@ -16,11 +16,18 @@
    throw it away. Nothing touches your data until you accept.
 5. **Lock + advance** — when an annotation is final, `Ctrl+L` locks
    it (read-only, won't be deleted) and moves to the next.
-6. **Navigate frames** — `→` / `←` for one frame at a time,
+6. **Track cells** — with a segmentation on multiple frames, the
+   Tracking panel's **Run Tracker** coalesces the same cell across
+   frames into one identity (shared color/name). **Track lengths…**
+   then shows a table: each track's length (how many frames the cell
+   spans), its frame range, and any gaps — sorted longest first, with
+   a summary line (count, longest, median, single-frame tracks). The
+   per-frame `track_length` also lands in the Export Bundle's CSV.
+7. **Navigate frames** — `→` / `←` for one frame at a time,
    `Home` / `End` for first / last, `Ctrl+→` / `Ctrl+←` to jump to
    the next / previous frame with no annotations. The tick bar above
    the timeline shows which frames carry work.
-7. **Save** — `Ctrl+S` writes the segmentation map. Auto-save runs in
+8. **Save** — `Ctrl+S` writes the segmentation map. Auto-save runs in
    the background every 30 sec (configurable in I/O Settings).
 
 ## Working through many files — the Files sidebar

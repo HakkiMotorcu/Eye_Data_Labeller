@@ -165,6 +165,9 @@ class ToolController:
         self.window.combo_tracker.setCurrentText(self.tracker_service.name)
         self.window.combo_tracker.currentTextChanged.connect(self._on_tracker_changed)
         self.window.btn_run_tracker.clicked.connect(self.run_tracking_now)
+        self.window.btn_track_lengths.clicked.connect(self.show_track_lengths)
+        # Frame-span + naming of the last tracker run, for the lengths view.
+        self._last_track_lengths = None
         self._rebuild_tracker_settings()
         self.window.slider_seg_opacity.valueChanged.connect(self._on_seg_opacity_changed)
         # Mirror seg-opacity between the View-panel slider and the Tools
@@ -4043,6 +4046,29 @@ class ToolController:
         for iid in [k for k in seg.instance_colors if k not in used]:
             seg.instance_colors.pop(iid, None)
 
+        # ---- Per-track frame span, for the Track Lengths view ----------
+        frames_by_track = {}
+        for (f, _oid), tid in remap.items():
+            frames_by_track.setdefault(tid, set()).add(int(f))
+        rows = []
+        for tid in unique_tracks:
+            frames = sorted(frames_by_track.get(tid, ()))
+            if not frames:
+                continue
+            new_iid = track_to_new_iid[tid]
+            span = frames[-1] - frames[0] + 1
+            rows.append({
+                'name': track_to_name.get(tid, f"Track_{tid}"),
+                'color': seg.instance_colors.get(new_iid, (200, 200, 200)),
+                'length': len(frames),      # frames the cell actually appears on
+                'first': frames[0],
+                'last': frames[-1],
+                'gaps': span - len(frames),  # missing frames inside the span
+            })
+        rows.sort(key=lambda r: -r['length'])
+        self._last_track_lengths = rows
+        self.window.btn_track_lengths.setEnabled(bool(rows))
+
         # Refresh UI.
         for anno in self.annotations:
             anno.update_visuals()
@@ -4050,6 +4076,51 @@ class ToolController:
         self.window._update_seg_overlay()
         self.state.annotations_changed.emit()
         return len(unique_tracks), n_changed
+
+    def show_track_lengths(self):
+        """Table of the last tracker run's tracks: length, range, gaps."""
+        rows = self._last_track_lengths
+        if not rows:
+            QMessageBox.information(
+                self.window, "Track lengths",
+                "Run the tracker first (Tracking panel → Run Tracker).")
+            return
+        from PyQt6.QtWidgets import (
+            QDialog, QVBoxLayout, QLabel, QTreeWidget, QTreeWidgetItem,
+            QDialogButtonBox)
+        from ui.main_window import make_swatch_icon
+        dlg = QDialog(self.window)
+        dlg.setWindowTitle("Track lengths")
+        dlg.resize(460, 480)
+        lay = QVBoxLayout(dlg)
+        T = self.window.video_data.num_frames if self.window.video_data else 0
+        lengths = [r['length'] for r in rows]
+        summary = (f"{len(rows)} tracks over {T} frames · "
+                   f"longest {max(lengths)} · median "
+                   f"{int(np.median(lengths))} · "
+                   f"{sum(1 for L in lengths if L == 1)} single-frame")
+        lay.addWidget(QLabel(summary))
+        tree = QTreeWidget()
+        tree.setColumnCount(4)
+        tree.setHeaderLabels(["Track", "Length", "Frames", "Gaps"])
+        tree.setRootIsDecorated(False)
+        for r in rows:
+            it = QTreeWidgetItem([
+                r['name'], str(r['length']),
+                f"{r['first']}–{r['last']}",
+                str(r['gaps']) if r['gaps'] else "—"])
+            it.setIcon(0, make_swatch_icon(r['color']))
+            it.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
+            it.setTextAlignment(3, Qt.AlignmentFlag.AlignCenter)
+            tree.addTopLevelItem(it)
+        for c, wdt in ((0, 180), (1, 70), (2, 110), (3, 60)):
+            tree.setColumnWidth(c, wdt)
+        lay.addWidget(tree, stretch=1)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        bb.rejected.connect(dlg.reject)
+        bb.accepted.connect(dlg.accept)
+        lay.addWidget(bb)
+        dlg.show()
 
     # ------------------------------------------------------------------
     def _refresh_sam_status(self):

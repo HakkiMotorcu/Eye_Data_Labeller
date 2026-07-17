@@ -767,6 +767,12 @@ class MainWindow(QMainWindow):
             "Undoable via Cmd+Z.")
         self.btn_run_tracker.setStyleSheet("color: #ffd166; font-weight: bold;")
         run_track_row.addWidget(self.btn_run_tracker)
+        self.btn_track_lengths = QPushButton("Track lengths…")
+        self.btn_track_lengths.setToolTip(
+            "Show each track's length (how many frames the cell spans),\n"
+            "its frame range, and any gaps. Enabled after a tracker run.")
+        self.btn_track_lengths.setEnabled(False)
+        run_track_row.addWidget(self.btn_track_lengths)
         tracking_layout.addLayout(run_track_row)
 
         # Status line
