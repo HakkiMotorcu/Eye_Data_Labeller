@@ -30,17 +30,16 @@ from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QPainterPath, QColor, QPen
 from PyQt6.QtCore import Qt, QRectF, QSettings, QTimer
 from core.volume_data import VideoData
-from core.frame_source import TiffFrameSource
+from core.frame_source import (
+    TiffFrameSource, load_frame_source, VIDEO_EXTS as _VIDEO_EXTS,
+    TIFF_EXTS as _TIFF_EXTS,
+)
 from core.debug import (
     log, is_debug, set_debug, log_startup_banner,
     install_qt_message_handler, SETTING_DEBUG_KEY,
 )
 from ui.main_window import MainWindow
 from controllers.tool_controller import ToolController
-
-
-_VIDEO_EXTS = {'.avi', '.mp4', '.mkv', '.mov'}
-_TIFF_EXTS = {'.tif', '.tiff'}
 
 
 def _selftest():
@@ -106,19 +105,11 @@ def _selftest():
     return 0
 
 
-def load_frame_source(path):
-    """Open a file as the right kind of frame source based on extension."""
-    ext = os.path.splitext(path)[1].lower()
-    if ext in _TIFF_EXTS:
-        return TiffFrameSource(path)
-    if ext in _VIDEO_EXTS:
-        return VideoData(path)
-    raise ValueError(
-        f"Unsupported file type '{ext}'. "
-        f"Accepted: {sorted(_VIDEO_EXTS | _TIFF_EXTS)}")
+# load_frame_source now lives in core.frame_source (imported above) so
+# File>Open, drag-drop, and the session queue can use it without
+# importing this entry-point module.
 
-
-# Must come after load_frame_source is defined — _selftest uses it.
+# Must come after imports are complete — _selftest uses load_frame_source.
 if '--selftest' in sys.argv:
     sys.exit(_selftest())
 

@@ -246,6 +246,12 @@ class ToolController:
         # Mouse events for seg brush painting
         self._connect_brush_events()
 
+        # Native menu bar (File/Edit/View/Help) + status-bar mode chip.
+        self._build_menu_bar()
+        self.window.btn_force_paint.toggled.connect(
+            lambda _checked: self._update_mode_chip())
+        self._update_mode_chip()
+
         # Auto-save timer (every 60 seconds)
         self._autosave_path = None
         self._autosave_timer = QTimer()
@@ -1243,6 +1249,308 @@ class ToolController:
         if self._label_color_mode:
             self.window._update_seg_overlay()
 
+    # ------------------------------------------------------------------
+    # MENU BAR + DISCOVERABILITY
+    # ------------------------------------------------------------------
+    def _build_menu_bar(self):
+        """Native File/Edit/View/Help menu bar.
+
+        Actions that duplicate an already-registered QShortcut show
+        their key as a '\\t' text hint only — registering the same
+        QKeySequence twice makes Qt call it ambiguous and NEITHER
+        binding fires. Only genuinely new keys (Ctrl+O, Ctrl+Q, Ctrl+Y,
+        Z, S, F1) are registered here.
+        """
+        from PyQt6.QtGui import QAction
+        mb = self.window.menuBar()
+        mb.clear()
+
+        m_file = mb.addMenu("&File")
+        act = QAction("&Open Image/Video…", self.window)
+        act.setShortcut(QKeySequence("Ctrl+O"))
+        act.triggered.connect(self.open_file_dialog)
+        m_file.addAction(act)
+        self._menu_recent = m_file.addMenu("Open &Recent")
+        self._menu_recent.aboutToShow.connect(self._populate_recent_menu)
+        m_file.addSeparator()
+        act = QAction("&Save Project\tCtrl+S", self.window)
+        act.triggered.connect(self.save_seg_map)
+        m_file.addAction(act)
+        act = QAction("Load Project &Folder…", self.window)
+        act.triggered.connect(self.load_project_folder)
+        m_file.addAction(act)
+        act = QAction("&Import Annotations…\tCtrl+I", self.window)
+        act.triggered.connect(self.load_annotations)
+        m_file.addAction(act)
+        m_file.addSeparator()
+        act = QAction("I/O && Autosave Settings…", self.window)
+        act.triggered.connect(self.open_io_settings)
+        m_file.addAction(act)
+        m_file.addSeparator()
+        act = QAction("&Quit", self.window)
+        act.setShortcut(QKeySequence("Ctrl+Q"))
+        act.triggered.connect(self.window.close)
+        m_file.addAction(act)
+
+        m_edit = mb.addMenu("&Edit")
+        act = QAction("&Undo\tCtrl+Z", self.window)
+        act.triggered.connect(self.undo)
+        m_edit.addAction(act)
+        act = QAction("&Redo\tCtrl+Shift+Z", self.window)
+        act.setShortcut(QKeySequence("Ctrl+Y"))  # Windows-familiar alias
+        act.triggered.connect(self.redo)
+        m_edit.addAction(act)
+
+        m_view = mb.addMenu("&View")
+        act = QAction("Reset &Zoom\tR", self.window)
+        act.triggered.connect(self.reset_zoom)
+        m_view.addAction(act)
+        act = QAction("Zoom to &Selection", self.window)
+        act.setShortcut(QKeySequence("Z"))
+        act.triggered.connect(self.zoom_to_selection)
+        m_view.addAction(act)
+        act = QAction("Toggle Seg &Overlay", self.window)
+        act.setShortcut(QKeySequence("S"))  # was advertised, never bound
+        act.triggered.connect(self._on_toggle_seg)
+        m_view.addAction(act)
+
+        m_help = mb.addMenu("&Help")
+        act = QAction("&Keyboard Shortcuts", self.window)
+        act.setShortcut(QKeySequence("F1"))
+        act.triggered.connect(self._show_shortcut_help)
+        m_help.addAction(act)
+        act = QAction("Open &Log Folder", self.window)
+        act.triggered.connect(self._open_log_folder)
+        m_help.addAction(act)
+
+    def _populate_recent_menu(self):
+        from PyQt6.QtGui import QAction
+        self._menu_recent.clear()
+        files = self.recent_files()
+        if not files:
+            act = QAction("(no recent files)", self.window)
+            act.setEnabled(False)
+            self._menu_recent.addAction(act)
+            return
+        for p in files:
+            act = QAction(os.path.basename(p), self.window)
+            act.setToolTip(p)
+            act.triggered.connect(lambda _c=False, path=p: self.open_path(path))
+            self._menu_recent.addAction(act)
+
+    def _open_log_folder(self):
+        from PyQt6.QtGui import QDesktopServices
+        from PyQt6.QtCore import QUrl
+        from core import debug as core_debug
+        QDesktopServices.openUrl(QUrl.fromLocalFile(core_debug.log_dir()))
+
+    def _show_shortcut_help(self):
+        """F1 — the USAGE.md shortcut table, in-app."""
+        from PyQt6.QtWidgets import QDialog, QTextBrowser, QVBoxLayout
+        groups = [
+            ("Annotations", [
+                ("A", "Add cell"), ("V", "Add vessel"), ("C", "Add capillary"),
+                ("Delete / Backspace", "Delete selected"),
+                ("N / P", "Next / previous annotation"),
+                ("L / U", "Lock / unlock selected"),
+                ("Ctrl+L", "Lock and advance"),
+                ("H", "Toggle hide for locked"),
+            ]),
+            ("Size presets", [
+                ("1 – 4", "Apply preset"), ("0", "Capture current size"),
+                ("T", "Apply last-used size"),
+            ]),
+            ("Segmentation", [
+                ("Esc", "Select mode"), ("D", "Paint"), ("E", "Erase"),
+                ("Shift+E", "Clear mask of selected"), ("F", "Fill bbox"),
+                ("B", "SAM box prompt"), ("X", "Force paint toggle"),
+                ("S", "Toggle seg overlay"), ("Ctrl+P", "Propagate mask"),
+            ]),
+            ("Navigation & view", [
+                ("← / →", "Prev / next frame"), ("Home / End", "First / last"),
+                ("R", "Reset zoom"), ("Z", "Zoom to selection"),
+            ]),
+            ("File", [
+                ("Ctrl+O", "Open image/video"), ("Ctrl+S", "Save project"),
+                ("Ctrl+I", "Import annotations"),
+                ("Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y", "Undo / redo"),
+            ]),
+        ]
+        rows = []
+        for title, keys in groups:
+            rows.append(
+                f"<tr><td colspan=2 style='padding-top:10px'>"
+                f"<b>{title}</b></td></tr>")
+            for k, desc in keys:
+                rows.append(
+                    f"<tr><td style='padding-right:18px'><code>{k}</code>"
+                    f"</td><td>{desc}</td></tr>")
+        dlg = QDialog(self.window)
+        dlg.setWindowTitle("Keyboard shortcuts")
+        dlg.resize(430, 560)
+        browser = QTextBrowser(dlg)
+        browser.setHtml("<table>" + "".join(rows) + "</table>")
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(browser)
+        dlg.show()
+
+    def _update_mode_chip(self):
+        """Status-bar chip: current tool mode + loud Force-Paint state."""
+        lbl = getattr(self.window, 'lbl_status_mode', None)
+        if lbl is None:
+            return
+        mode = self._seg_edit_mode.upper()
+        force = self.window.btn_force_paint.isChecked()
+        base = "font-family: monospace; font-weight: bold; padding: 0 10px;"
+        if force:
+            lbl.setText(f"MODE: {mode} · FORCE PAINT ON")
+            lbl.setStyleSheet(base + "color: #ff5c5c;")
+        elif mode == 'PAINT':
+            lbl.setText("MODE: PAINT")
+            lbl.setStyleSheet(base + "color: #e9a33a;")
+        elif mode == 'ERASE':
+            lbl.setText("MODE: ERASE")
+            lbl.setStyleSheet(base + "color: #e07be0;")
+        else:
+            lbl.setText("MODE: SELECT")
+            lbl.setStyleSheet(base + "color: #8fb3d9;")
+
+    def zoom_to_selection(self):
+        """Center + zoom the viewport on the selected annotation (Z)."""
+        anno = self.active_annotation
+        if anno is None:
+            return
+        if not anno.is_paint_only:
+            x, y = anno.roi.pos()
+            bw, bh = anno.roi.size()
+            x0, y0, x1, y1 = float(x), float(y), float(x + bw), float(y + bh)
+        else:
+            seg = self.window.seg_data
+            if seg is None or anno.instance_id is None:
+                return
+            layer = seg.get_layer(anno.class_type)
+            fi = self.window._current_frame_idx
+            if layer is None or fi >= layer.shape[0]:
+                return
+            ys, xs = np.nonzero(layer[fi] == anno.instance_id)
+            if ys.size == 0:
+                return
+            scale = self._seg_scale()
+            sx, sy = scale if scale else (1.0, 1.0)
+            # seg -> video coords (inverse of the video->seg factors)
+            x0, x1 = float(xs.min()) / sx, float(xs.max() + 1) / sx
+            y0, y1 = float(ys.min()) / sy, float(ys.max() + 1) / sy
+        pad = max(x1 - x0, y1 - y0) * 0.5 + 10
+        vb = self.window.view_frame.getView()
+        vb.setRange(xRange=(x0 - pad, x1 + pad),
+                    yRange=(y0 - pad, y1 + pad), padding=0)
+
+    # ------------------------------------------------------------------
+    # OPEN FILE IN-APP (File>Open, drag-drop, recent files, queue)
+    # ------------------------------------------------------------------
+    _RECENT_KEY = 'recent/files'
+    _RECENT_MAX = 10
+
+    @log_action('action')
+    def open_path(self, path):
+        """Open a different image/video into the running window.
+
+        The single gateway for File>Open, drag-and-drop, Recent Files,
+        and the session queue. Guards unsaved work, tears the current
+        session down, and rebinds everything the way main.py does at
+        startup. Returns True when the file is now open.
+        """
+        from core.frame_source import load_frame_source, SUPPORTED_EXTS
+        path = os.path.abspath(path)
+        if not os.path.isfile(path):
+            QMessageBox.warning(self.window, "Open",
+                                f"File not found:\n{path}")
+            return False
+        if os.path.splitext(path)[1].lower() not in SUPPORTED_EXTS:
+            QMessageBox.warning(
+                self.window, "Open",
+                f"Unsupported file type:\n{path}\n\n"
+                f"Accepted: {', '.join(sorted(SUPPORTED_EXTS))}")
+            return False
+        if path == self.window._current_file:
+            return True  # already open
+
+        # Same unsaved-work guard as closing the window.
+        if self._seg_dirty_since_save:
+            resp = QMessageBox.question(
+                self.window, "Unsaved changes",
+                "There are unsaved changes (masks / annotations).\n\n"
+                "Save before opening the next file?",
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save)
+            if resp == QMessageBox.StandardButton.Cancel:
+                return False
+            if resp == QMessageBox.StandardButton.Save:
+                self.save_seg_map()
+                if (self._seg_dirty_since_save
+                        and self.window.seg_data is not None):
+                    return False  # save failed; stay on current file
+
+        try:
+            data = load_frame_source(path)
+        except Exception as e:
+            log_error('controller.open', 'load failed', exc=e, path=path)
+            QMessageBox.critical(self.window, "Open failed",
+                                 f"Could not load:\n{path}\n\n"
+                                 f"{type(e).__name__}: {e}")
+            return False
+
+        # Tear down the old session, bind the new source.
+        self._stop_embed_worker(timeout_ms=5000)
+        self._embed_pending_frame = None
+        self._clear_all_annotations()
+        w = self.window
+        w.video_data = data
+        w.seg_data = None
+        w._current_file = path
+        self._mark_seg_clean()          # fresh session starts clean
+        self._ids_anywhere_cache = None
+        w._projection_cache = None
+        w.load_video()
+        w._update_title()
+        self._add_recent_file(path)
+        self.state.image_loaded.emit(int(data.num_frames))
+        # Resume prompt + first-frame embedding, exactly like startup.
+        self.on_image_loaded()
+        return True
+
+    def recent_files(self):
+        """Existing entries of the persisted recent-files list."""
+        from PyQt6.QtCore import QSettings
+        raw = QSettings().value(self._RECENT_KEY, []) or []
+        if isinstance(raw, str):
+            raw = [raw]
+        return [p for p in raw if os.path.isfile(p)]
+
+    def _add_recent_file(self, path):
+        from PyQt6.QtCore import QSettings
+        items = [p for p in self.recent_files() if p != path]
+        items.insert(0, path)
+        QSettings().setValue(self._RECENT_KEY, items[:self._RECENT_MAX])
+
+    def open_file_dialog(self):
+        """File>Open… — remembers the last-used directory."""
+        from PyQt6.QtCore import QSettings
+        start = str(QSettings().value('recent/last_dir', '')) or (
+            os.path.dirname(self.window._current_file)
+            if self.window._current_file else os.path.expanduser('~'))
+        path, _ = QFileDialog.getOpenFileName(
+            self.window, "Open Image or Video", start,
+            "All supported (*.tif *.tiff *.avi *.mp4 *.mkv *.mov);;"
+            "TIFF (*.tif *.tiff);;Video (*.avi *.mp4 *.mkv *.mov);;"
+            "All Files (*)")
+        if not path:
+            return
+        QSettings().setValue('recent/last_dir', os.path.dirname(path))
+        self.open_path(path)
+
     def _alloc_instance_id(self, class_type='cell'):
         """next_instance_id with the exhaustion error surfaced as a
         dialog instead of an exception escaping a Qt slot.
@@ -1788,6 +2096,7 @@ class ToolController:
         self._seg_edit_mode = new_mode
         self._set_roi_interactivity(new_mode == 'select')
         self._update_brush_cursor_visibility()
+        self._update_mode_chip()
 
     @log_action('action')
     def _set_seg_mode(self, mode):
@@ -1802,6 +2111,7 @@ class ToolController:
             btns[mode].setChecked(True)
         self._set_roi_interactivity(mode == 'select')
         self._update_brush_cursor_visibility()
+        self._update_mode_chip()
 
     def _set_roi_interactivity(self, enabled):
         """Enable/disable ROI dragging for current frame's annotations."""

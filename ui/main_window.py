@@ -141,6 +141,7 @@ class MainWindow(QMainWindow):
     def __init__(self, video_data=None):
         super().__init__()
         self.resize(1500, 900)
+        self.setAcceptDrops(True)  # drop a .tif/.avi to open it
         self.video_data = video_data
         self.seg_data = None
         self._current_file = None
@@ -1246,11 +1247,18 @@ class MainWindow(QMainWindow):
         self.lbl_status_frame = QLabel("Frame: — / —")
         self.lbl_status_coords = QLabel("(—, —)")
         self.lbl_status_value = QLabel("val: —")
+        # Always-visible tool-mode chip — the active seg-edit mode and
+        # the destructive Force-Paint toggle used to be visible only
+        # inside a collapsible mid-sidebar panel.
+        self.lbl_status_mode = QLabel("MODE: SELECT")
         for w in (self.lbl_status_image, self.lbl_status_frame,
                   self.lbl_status_coords, self.lbl_status_value):
             w.setStyleSheet("font-family: monospace; color: #bbb; padding: 0 10px;")
+        self.lbl_status_mode.setStyleSheet(
+            "font-family: monospace; color: #bbb; padding: 0 10px;")
         # Add a leading info label on the left, others on the right
         sb.addWidget(self.lbl_status_image)
+        sb.addWidget(self.lbl_status_mode)
         sb.addPermanentWidget(self.lbl_status_frame)
         sb.addPermanentWidget(self.lbl_status_coords)
         sb.addPermanentWidget(self.lbl_status_value)
@@ -1904,6 +1912,30 @@ class MainWindow(QMainWindow):
         if ctrl is not None and getattr(ctrl, '_seg_dirty_since_save', False):
             base += "  \u2022"  # unsaved-changes marker
         self.setWindowTitle(base)
+
+    # --- drag & drop: drop a .tif/.avi onto the window to open it ----
+    def dragEnterEvent(self, event):
+        from core.frame_source import SUPPORTED_EXTS
+        md = event.mimeData()
+        if md.hasUrls():
+            for url in md.urls():
+                p = url.toLocalFile()
+                if p and os.path.splitext(p)[1].lower() in SUPPORTED_EXTS:
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+
+    def dropEvent(self, event):
+        from core.frame_source import SUPPORTED_EXTS
+        ctrl = getattr(self, '_controller', None)
+        if ctrl is None:
+            return
+        for url in event.mimeData().urls():
+            p = url.toLocalFile()
+            if p and os.path.splitext(p)[1].lower() in SUPPORTED_EXTS:
+                ctrl.open_path(p)
+                event.acceptProposedAction()
+                return
 
     def closeEvent(self, event):
         """Guard the close button: unsaved work gets a Save / Discard /
