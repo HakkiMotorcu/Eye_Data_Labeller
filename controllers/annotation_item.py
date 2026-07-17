@@ -212,7 +212,10 @@ class Annotation2D(QObject):
             self.sig_updated.emit(self)
 
     def _on_drag_start(self, *args):
-        self.controller._geometry_snapshot = ToolController._snap_geometry(self)
+        # _snap_geometry is a staticmethod on the controller class;
+        # resolve it through the instance so this module needs no
+        # (circular) ToolController import.
+        self.controller._geometry_snapshot = self.controller._snap_geometry(self)
 
     def _on_drag_end(self, *args):
         if self.is_locked:
@@ -224,7 +227,7 @@ class Annotation2D(QObject):
         old = self.controller._geometry_snapshot
         if old is None:
             return
-        new = ToolController._snap_geometry(self)
+        new = self.controller._snap_geometry(self)
         self.controller._geometry_snapshot = None
 
         # Nothing actually changed

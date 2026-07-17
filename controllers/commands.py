@@ -50,6 +50,11 @@ class UndoStack:
         if not self._undo:
             return
         cmd = self._undo.pop()
+        # Notify BEFORE running the command too: commands mutate seg
+        # pixels and then rebuild the annotation list from inside
+        # undo()/redo(), and that rebuild must not read caches (e.g.
+        # the anywhere-ids sets) that still reflect the pre-undo state.
+        self._notify()
         cmd.undo()
         self._redo.append(cmd)
         self._notify()
@@ -58,6 +63,7 @@ class UndoStack:
         if not self._redo:
             return
         cmd = self._redo.pop()
+        self._notify()
         cmd.redo()
         self._undo.append(cmd)
         self._notify()

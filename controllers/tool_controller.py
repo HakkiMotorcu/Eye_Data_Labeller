@@ -318,7 +318,6 @@ class ToolController:
                 layer = seg.get_layer(ct)
                 if layer is not None and frame_idx < layer.shape[0]:
                     ids_here[ct] = set(np.unique(layer[frame_idx]).tolist())
-        ids_anywhere = self._anywhere_ids() if seg is not None else {}
         for anno in self.annotations:
             if anno.frame_idx == frame_idx:
                 # Hidden / class-filtered annotations still get their ROI
@@ -348,7 +347,7 @@ class ToolController:
                         and anno.instance_id is not None):
                     iid = int(anno.instance_id)
                     if iid not in ids_here.get(anno.class_type, ()):
-                        if iid in ids_anywhere.get(anno.class_type, ()):
+                        if iid in self._anywhere_ids_for(anno.class_type):
                             continue  # phantom on this frame
                 visible_annos.append(anno)
                 cls = class_labels.get(anno.class_type, anno.class_type)
@@ -539,27 +538,31 @@ class ToolController:
         self._ids_anywhere_cache = None
         self._refresh_save_status()
 
-    def _anywhere_ids(self):
-        """Per-class sets of instance ids present ANYWHERE in the stack.
+    def _anywhere_ids_for(self, class_type):
+        """Ids present ANYWHERE in the stack for one class.
 
-        One full-volume pass per class, cached until the seg is next
-        dirtied. Replaces the per-annotation ``np.any(layer == iid)``
-        full-stack scans that made frame navigation degrade badly once
-        vessels/capillaries were propagated across many frames.
+        Computed lazily per class on first phantom lookup and cached
+        until the seg is next dirtied. Replaces the per-annotation
+        ``np.any(layer == iid)`` full-stack scans that made frame
+        navigation degrade once vessels/capillaries were propagated
+        across many frames. Laziness matters: only paint-only phantom
+        checks consult this, so cell painting/brushing never triggers
+        a full-volume pass at all, and a class is only scanned when a
+        phantom row of that class actually needs the answer.
         """
         seg = self.window.seg_data
         if seg is None:
-            return {}
-        cached = getattr(self, '_ids_anywhere_cache', None)
-        if cached is not None and cached[0] is seg:
-            return cached[1]
-        result = {}
-        for ct in ('cell', 'vessel', 'capillary'):
-            layer = seg.get_layer(ct)
-            result[ct] = (set(np.unique(layer).tolist()) - {0}
-                          if layer is not None else set())
-        self._ids_anywhere_cache = (seg, result)
-        return result
+            return set()
+        cache = getattr(self, '_ids_anywhere_cache', None)
+        if cache is None or cache[0] is not seg:
+            cache = (seg, {})
+            self._ids_anywhere_cache = cache
+        per_class = cache[1]
+        if class_type not in per_class:
+            layer = seg.get_layer(class_type)
+            per_class[class_type] = (set(np.unique(layer).tolist()) - {0}
+                                     if layer is not None else set())
+        return per_class[class_type]
 
     def _mark_seg_clean(self):
         self._seg_dirty_since_save = False
@@ -807,7 +810,9 @@ class ToolController:
             instance_id = None
             color = None
             if seg is not None:
-                instance_id = seg.next_instance_id()
+                instance_id = self._alloc_instance_id()
+                if instance_id is None:
+                    return  # id space exhausted — dialog already shown
                 color = seg.register_instance_color(instance_id)
                 self.anno_counter = max(self.anno_counter, instance_id)
             n, name = self._next_available_name('Cell')
@@ -890,7 +895,9 @@ class ToolController:
             # register the color in that class's color table — otherwise
             # vessel/capillary IDs collide with cells and the overlay
             # falls back to the generic palette (looks wrong).
-            instance_id = seg.next_instance_id(class_type=class_type)
+            instance_id = self._alloc_instance_id(class_type)
+            if instance_id is None:
+                return  # id space exhausted — dialog already shown
             color = seg.register_instance_color(
                 instance_id, color=default_color, class_type=class_type)
             self.anno_counter = max(self.anno_counter, instance_id)
@@ -1235,6 +1242,30 @@ class ToolController:
         self._refresh_list_colors()
         if self._label_color_mode:
             self.window._update_seg_overlay()
+
+    def _alloc_instance_id(self, class_type='cell'):
+        """next_instance_id with the exhaustion error surfaced as a
+        dialog instead of an exception escaping a Qt slot.
+
+        Ids live in uint16 (ceiling 65535, stride 4) and are never
+        reclaimed within a session, so a very long session or repeated
+        tracking runs CAN exhaust them — next_instance_id then raises,
+        and an exception leaving a Qt slot aborts the whole app.
+        Returns None on exhaustion; callers bail out gracefully.
+        """
+        seg = self.window.seg_data
+        try:
+            return seg.next_instance_id(class_type=class_type)
+        except ValueError as e:
+            log_error('controller', 'instance-id space exhausted',
+                      exc=e, class_type=class_type)
+            QMessageBox.warning(
+                self.window, "Instance limit reached",
+                f"No more instance ids available for '{class_type}' "
+                f"(65535 ceiling).\n\nSave your work, then reload the "
+                f"project — reloading compacts the id space. Running "
+                f"the tracker repeatedly is the usual cause.")
+            return None
 
     @staticmethod
     def _item_anno(item):
@@ -1962,7 +1993,9 @@ class ToolController:
         # Assign an instance ID if the annotation doesn't have one — pulled
         # from the annotation's own class layer namespace.
         if anno.instance_id is None:
-            new_id = seg.next_instance_id(class_type=anno.class_type)
+            new_id = self._alloc_instance_id(anno.class_type)
+            if new_id is None:
+                return  # id space exhausted — dialog already shown
             anno.instance_id = new_id
             color = seg.register_instance_color(new_id, class_type=anno.class_type)
             anno.color = color
@@ -3079,12 +3112,36 @@ class ToolController:
         }
 
         # ---- Allocate a fresh instance_id per track --------------------
+        # Two-pass: allocate EVERYTHING first, then register colors —
+        # if the id space exhausts halfway we bail out before any
+        # shared state was touched (a mid-loop raise used to leave the
+        # color table polluted with no undo entry).
         unique_tracks = sorted({tid for tid in remap.values()})
         track_to_new_iid = {}
+        base = None
         for tid in unique_tracks:
-            new_iid = seg.next_instance_id()
-            seg.register_instance_color(new_iid)
-            track_to_new_iid[tid] = new_iid
+            try:
+                nid = (seg.next_instance_id() if base is None
+                       else base + seg.STAIR_QUANT)
+            except ValueError as e:
+                log_error('controller.track', 'id space exhausted', exc=e)
+                QMessageBox.warning(
+                    self.window, "Instance limit reached",
+                    "Tracking needs more instance ids than remain "
+                    "(65535 ceiling). Save and reload the project to "
+                    "compact the id space, then re-run the tracker.")
+                return 0, 0
+            if nid > 65535:
+                QMessageBox.warning(
+                    self.window, "Instance limit reached",
+                    "Tracking needs more instance ids than remain "
+                    "(65535 ceiling). Save and reload the project to "
+                    "compact the id space, then re-run the tracker.")
+                return 0, 0
+            base = nid
+            track_to_new_iid[tid] = nid
+        for tid, nid in track_to_new_iid.items():
+            seg.register_instance_color(nid)
 
         # ---- Pick the representative name for each track ---------------
         # First (frame, orig_id) pair for a given track determines its name.
@@ -3137,6 +3194,17 @@ class ToolController:
             'annos': [(a, a.instance_id, a.name, a.color) for a in self.annotations],
         }
         self._undo_stack.push(TrackingCmd(self, before, after))
+
+        # Prune colour-table entries no longer referenced by pixels or
+        # annotations. next_instance_id takes max(layer, colors), so
+        # stale entries ratchet the allocator floor up by 4 per track
+        # per run — repeated tracking would exhaust the uint16 space.
+        # (Undo restores the full pre-remap dict from its snapshot.)
+        used = set(np.unique(seg.masks).tolist())
+        used.update(int(a.instance_id) for a in self.annotations
+                    if a.instance_id is not None and a.class_type == 'cell')
+        for iid in [k for k in seg.instance_colors if k not in used]:
+            seg.instance_colors.pop(iid, None)
 
         # Refresh UI.
         for anno in self.annotations:
