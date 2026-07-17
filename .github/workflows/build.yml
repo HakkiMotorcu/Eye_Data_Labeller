@@ -172,16 +172,10 @@ jobs:
         run: |
           pip install --force-reinstall --no-deps pillow
 
-      # Sanity check: the pinned env should import PyQt6 as-created (a
-      # plain `conda env create` launches it fine on real Windows
-      # machines). If this ever fails, the env — not our code — is the
-      # problem; earlier we force-manipulated Qt here and it only made
-      # things worse, so the fix is to keep the env clean, not to
-      # surgically rewrite it.
-      - name: Sanity-check PyQt6 import
-        shell: bash -el {0}
-        run: |
-          python -c "from PyQt6.QtWidgets import QApplication; import PyQt6.QtCore as c; print('PyQt6 OK, Qt', c.QT_VERSION_STR)"
+      # NOTE: PyQt6 import is validated by the source-tree selftest
+      # below (after the Linux GL libs are installed). We no longer
+      # surgically rewrite Qt on Windows — a plain `conda env create`
+      # launches PyQt6 fine on real machines; keep the env clean.
 
       - name: Patch cv2 config files to use bundle-safe relative paths
         shell: bash -el {0}
