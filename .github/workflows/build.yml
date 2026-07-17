@@ -115,6 +115,47 @@ jobs:
       # so we don't reinstall numpy (would clobber the BLAS pin).
       # Code grep confirms we don't use any cv2 GUI features
       # (imshow / namedWindow / waitKey / etc.) so headless is safe.
+      # July 2026 re-solve left cv2 split across two half-installed
+      # flavors: conda's py-opencv (transitive via micro_sam) AND pip's
+      # opencv-python-headless from environment.yml. The cv2/ package
+      # dir shadows any bare cv2*.so beside it, so the loader finds no
+      # native module anywhere and dies with 'recursion is detected' —
+      # no config patching can fix a shadowing conflict. The old
+      # workflow force-replaced conda's cv2 for exactly this reason;
+      # that step was dropped when patching alone happened to suffice
+      # with May's package set. Reinstated, decisively: remove every
+      # cv2 flavor, then install exactly one (pip headless, --no-deps
+      # so numpy/BLAS stay untouched).
+      - name: Force a single cv2 (pip opencv-python-headless)
+        shell: bash -el {0}
+        run: |
+          micromamba remove -n eye-labeller -y --force \
+            opencv py-opencv libopencv 2>/dev/null || true
+          pip uninstall -y opencv-python opencv-python-headless \
+            opencv-contrib-python opencv-contrib-python-headless \
+            2>/dev/null || true
+          # Scrub any orphaned leftovers of either layout.
+          python - <<'PY'
+          import glob, os, shutil, sysconfig
+          sp = sysconfig.get_paths()['purelib']
+          for pat in ('cv2', 'cv2.*', 'opencv_python*', 'opencv-python*'):
+              for p in glob.glob(os.path.join(sp, pat)):
+                  (shutil.rmtree if os.path.isdir(p) else os.remove)(p)
+                  print('removed leftover:', p)
+          PY
+          pip install --no-deps opencv-python-headless
+          # Diagnostic ground truth for any future drift: what does the
+          # cv2 install actually look like now?
+          python - <<'PY'
+          import glob, os, sysconfig
+          sp = sysconfig.get_paths()['purelib']
+          for p in sorted(glob.glob(os.path.join(sp, 'cv2*'))):
+              print(p)
+              if os.path.isdir(p):
+                  for q in sorted(os.listdir(p))[:25]:
+                      print('   ', q)
+          PY
+
       - name: Patch cv2 config files to use bundle-safe relative paths
         shell: bash -el {0}
         run: |
