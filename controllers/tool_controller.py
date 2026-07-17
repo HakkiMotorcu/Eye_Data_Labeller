@@ -743,6 +743,11 @@ class ToolController:
         # Embedding precompute worker (only one alive at a time — SAM
         # predictor isn't thread-safe).
         self._embed_worker = None
+        # True once the user cancelled the missing-best.pt prompt this
+        # session — background precompute then stays quiet instead of
+        # re-prompting on every frame change. Explicit SAM use (B key)
+        # still prompts via SamService.load() on the main thread.
+        self._sam_ckpt_prompt_declined = False
         # Frame queued by _on_frame_changed_embed while a worker is busy.
         # Picked up in _on_embed_finished_ok so we never block the UI
         # thread waiting for an in-flight compute.
@@ -2959,6 +2964,8 @@ class ToolController:
         else:
             ckpt = None
         self.sam_service = SamService(model_type=model_type, checkpoint_path=ckpt)
+        # New service, new chance to resolve the checkpoint interactively.
+        self._sam_ckpt_prompt_declined = False
         self._refresh_sam_status()
         # If we have an image loaded, kick off precompute for the current
         # frame with the new model (the previous model's embeddings are
@@ -3015,6 +3022,27 @@ class ToolController:
             return
         if self.window.video_data is None or self.window._current_file is None:
             return
+        # Resolve a missing best.pt HERE, on the GUI thread, before the
+        # worker exists. The worker thread must never be the one to
+        # discover the file is absent — Qt forbids dialogs off the main
+        # thread (this froze first launches on fresh machines). Silent
+        # background precompute never prompts; the explicit paths
+        # (open, model swap, Precompute All) prompt at most once per
+        # session.
+        svc = self.sam_service
+        if svc.checkpoint_path and not os.path.exists(svc.checkpoint_path):
+            if not interactive or self._sam_ckpt_prompt_declined:
+                return
+            try:
+                svc.ensure_checkpoint_ready(self.window)
+            except FileNotFoundError as e:
+                self._sam_ckpt_prompt_declined = True
+                log_error('controller.sam',
+                          'checkpoint unresolved — precompute skipped', exc=e)
+                self.window.lbl_sam_status.setText(
+                    "SAM checkpoint needed — pick best.pt in I/O Settings "
+                    "(SAM Box will ask again).")
+                return
         frames = self._frames_to_compute(frame_indices)
         if not frames:
             return  # everything already cached

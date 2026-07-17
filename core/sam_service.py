@@ -89,6 +89,23 @@ class EmbeddingPrecomputeWorker(QThread):
         self.finished_ok.emit()
 
 
+def _on_gui_thread():
+    """True iff we're running on the Qt GUI (main) thread.
+
+    Qt only allows creating widgets/dialogs there. The embedding worker
+    calls back into ``SamService.load()`` from its own QThread, so the
+    load path must know where it is before it may open any dialog.
+    """
+    try:
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app is None:
+            return False
+        return QThread.currentThread() is app.thread()
+    except Exception:
+        return False
+
+
 def default_sam_hela_path():
     """Where the fine-tuned SAM-HeLa checkpoint should live on disk.
 
@@ -179,61 +196,21 @@ class SamService:
             log('sam_service', 'load: already loaded', model_type=self.model_type)
             return self._predictor
         if self.checkpoint_path and not os.path.exists(self.checkpoint_path):
-            # Checkpoint missing. Resolution attempts in order:
-            #   1. POPUP — ask the user to pick the file or its folder.
-            #      Works the same way in Tier A bundles, Tier B installs,
-            #      and dev runs. The popup persists the choice to
-            #      QSettings so it never asks again. This is the
-            #      primary path; we prefer it over auto-download
-            #      because (a) most labs hand the file around on
-            #      Box / USB rather than a public URL, (b) it works
-            #      offline, (c) it gives the user explicit control.
-            #   2. AUTO-DOWNLOAD — fall back to the configured URL
-            #      (env var / settings / DEFAULT_SAM_HELA_URL) if the
-            #      popup was cancelled. Useful once a lab uploads
-            #      best.pt to e.g. Hugging Face.
-            #   3. FileNotFoundError — surface a clear message so the
-            #      caller (typically tool_controller) can show a
-            #      QMessageBox with what went wrong.
-            from core import model_download
-            qt_parent = None
-            try:
-                from PyQt6.QtWidgets import QApplication
-                app = QApplication.instance()
-                if app is not None:
-                    qt_parent = app.activeWindow()
-            except Exception:
-                pass
-
-            log('sam_service', 'checkpoint missing; prompting user',
-                target=self.checkpoint_path)
-            picked = model_download.prompt_for_local_path(qt_parent)
-            if picked and os.path.exists(picked):
-                log('sam_service', 'user picked checkpoint', path=picked)
-                self.checkpoint_path = picked
-            else:
-                # Popup cancelled or no Qt available — try URL download.
-                try:
-                    log('sam_service', 'popup cancelled; trying download',
-                        target=self.checkpoint_path)
-                    model_download.ensure_sam_hela_checkpoint(
-                        self.checkpoint_path, qt_parent=qt_parent)
-                except model_download.MissingModelURL as e:
-                    raise FileNotFoundError(
-                        f"SAM checkpoint not found at:\n"
-                        f"  {self.checkpoint_path}\n\n"
-                        f"Either pick the file when prompted, configure a "
-                        f"download URL in I/O Settings, or drop best.pt "
-                        f"at the path above.\n\n{e}") from e
-                except InterruptedError:
-                    raise FileNotFoundError(
-                        f"Download of SAM checkpoint was cancelled. "
-                        f"Try again — or pick the file when prompted.")
-                except Exception as e:
-                    raise FileNotFoundError(
-                        f"Could not download SAM checkpoint:\n"
-                        f"  {self.checkpoint_path}\n"
-                        f"({type(e).__name__}: {e})") from e
+            # Checkpoint missing. Resolution opens dialogs, and Qt only
+            # allows widgets on the GUI thread — the embedding worker
+            # calls load() from its own QThread, and creating a dialog
+            # there crashes/hangs (this froze a collaborator's first
+            # launch on Windows). Off the GUI thread we hard-fail; the
+            # controller resolves the file up front on the main thread
+            # via ensure_checkpoint_ready() before starting workers.
+            if not _on_gui_thread():
+                raise FileNotFoundError(
+                    f"SAM checkpoint not found at:\n  {self.checkpoint_path}\n"
+                    f"A background task tried to load SAM before the "
+                    f"checkpoint was resolved. Pick best.pt via I/O "
+                    f"Settings (or the prompt on the main screen), then "
+                    f"retry.")
+            self.ensure_checkpoint_ready()
 
         kwargs = dict(model_type=self.model_type)
         if self.checkpoint_path:
@@ -256,6 +233,73 @@ class SamService:
             state_keys=list(self._state.keys()) if isinstance(self._state, dict) else type(self._state).__name__,
             has_decoder=has_decoder)
         return self._predictor
+
+    def ensure_checkpoint_ready(self, qt_parent=None):
+        """Interactively resolve a missing checkpoint. GUI THREAD ONLY.
+
+        Returns True once ``checkpoint_path`` exists (or none is
+        configured, e.g. registry models). Resolution attempts in order:
+
+          1. POPUP — ask the user to pick the file or its folder.
+             Works the same way in Tier A bundles, Tier B installs,
+             and dev runs. The popup persists the choice to QSettings
+             so it never asks again. This is the primary path; we
+             prefer it over auto-download because (a) most labs hand
+             the file around on Box / USB rather than a public URL,
+             (b) it works offline, (c) it gives the user explicit
+             control.
+          2. AUTO-DOWNLOAD — fall back to the configured URL
+             (env var / settings / DEFAULT_SAM_HELA_URL) if the
+             popup was cancelled. Useful once a lab uploads best.pt
+             to e.g. Hugging Face.
+          3. FileNotFoundError — surface a clear message so the
+             caller (typically tool_controller) can show a
+             QMessageBox / status text with what went wrong.
+        """
+        if not self.checkpoint_path or os.path.exists(self.checkpoint_path):
+            return True
+
+        from core import model_download
+        if qt_parent is None:
+            try:
+                from PyQt6.QtWidgets import QApplication
+                app = QApplication.instance()
+                if app is not None:
+                    qt_parent = app.activeWindow()
+            except Exception:
+                pass
+
+        log('sam_service', 'checkpoint missing; prompting user',
+            target=self.checkpoint_path)
+        picked = model_download.prompt_for_local_path(qt_parent)
+        if picked and os.path.exists(picked):
+            log('sam_service', 'user picked checkpoint', path=picked)
+            self.checkpoint_path = picked
+            return True
+
+        # Popup cancelled or no Qt available — try URL download.
+        try:
+            log('sam_service', 'popup cancelled; trying download',
+                target=self.checkpoint_path)
+            model_download.ensure_sam_hela_checkpoint(
+                self.checkpoint_path, qt_parent=qt_parent)
+            return True
+        except model_download.MissingModelURL as e:
+            raise FileNotFoundError(
+                f"SAM checkpoint not found at:\n"
+                f"  {self.checkpoint_path}\n\n"
+                f"Either pick the file when prompted, configure a "
+                f"download URL in I/O Settings, or drop best.pt "
+                f"at the path above.\n\n{e}") from e
+        except InterruptedError:
+            raise FileNotFoundError(
+                f"Download of SAM checkpoint was cancelled. "
+                f"Try again — or pick the file when prompted.")
+        except Exception as e:
+            raise FileNotFoundError(
+                f"Could not download SAM checkpoint:\n"
+                f"  {self.checkpoint_path}\n"
+                f"({type(e).__name__}: {e})") from e
 
     def unload(self):
         """Drop the predictor + state so the user can switch models cleanly."""
