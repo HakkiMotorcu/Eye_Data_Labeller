@@ -770,6 +770,17 @@ class ToolController:
         self._brush_snapshot_class = None # class layer that snapshot came from
         # Auto-save dirty tracking for smart-mode mask flushing.
         self._seg_dirty_since_save = False
+        # (out_folder, class_type) pairs whose mask file THIS session
+        # has loaded or written. Only owned files may be retired when
+        # their layer empties — every fresh seg_data allocates all
+        # three layers as zeros, so "allocated but empty" alone cannot
+        # distinguish "user erased everything" from "class never
+        # touched this session" (a Start-fresh session must never
+        # touch the previous session's files).
+        self._mask_files_owned = set()
+        # Set by MainWindow.closeEvent so no new embed work starts
+        # while the app is tearing down.
+        self._shutting_down = False
         import time as _time_mod
         self._last_mask_save_ts = _time_mod.monotonic()
         self._last_save_at = None  # wall-clock ts of last explicit save
@@ -788,11 +799,6 @@ class ToolController:
         # Embedding precompute worker (only one alive at a time — SAM
         # predictor isn't thread-safe).
         self._embed_worker = None
-        # True once the user cancelled the missing-best.pt prompt this
-        # session — background precompute then stays quiet instead of
-        # re-prompting on every frame change. Explicit SAM use (B key)
-        # still prompts via SamService.load() on the main thread.
-        self._sam_ckpt_prompt_declined = False
         # Frame queued by _on_frame_changed_embed while a worker is busy.
         # Picked up in _on_embed_finished_ok so we never block the UI
         # thread waiting for an in-flight compute.
@@ -2103,16 +2109,29 @@ class ToolController:
 
     @log_action('action')
     def lock_all(self):
+        changed = False
         for anno in self._get_frame_annotations():
+            if not anno.is_locked:
+                changed = True
             anno.set_locked(True)
+        if changed:
+            # Lock state persists in Meta.json — it's unsaved work.
+            # These loops bypass the undo stack (no LockCmd), so the
+            # on_change dirty hook doesn't fire; mark explicitly.
+            self._mark_seg_dirty()
         self._refresh_list_colors()
         self._update_stats()
 
     @log_action('action')
     def unlock_all(self):
+        changed = False
         for anno in self._get_frame_annotations():
+            if anno.is_locked:
+                changed = True
             anno.set_locked(False)
             anno.set_visible(True)
+        if changed:
+            self._mark_seg_dirty()
         self._refresh_list_colors()
         self._update_stats()
 
@@ -2607,12 +2626,18 @@ class ToolController:
         # Snapshot around the fill so it's undoable — with Force Paint
         # on, F overwrites other instances' pixels inside the box, and
         # an un-undoable stray keypress there is a destructive trap.
+        # get_layer can return None before fill_bbox lazily allocates
+        # the layer; an all-zero snapshot is the correct "before".
         layer = seg.get_layer(anno.class_type)
-        before_frame = layer[anno.frame_idx].copy()
+        before_frame = (layer[anno.frame_idx].copy()
+                        if layer is not None else None)
         seg.fill_bbox(anno.frame_idx, anno.instance_id,
                       x * sx, y * sy, w * sx, h * sy,
                       force=force, class_type=anno.class_type)
+        layer = seg.get_layer(anno.class_type)
         after_frame = layer[anno.frame_idx].copy()
+        if before_frame is None:
+            before_frame = np.zeros_like(after_frame)
         geom = ToolController._snap_geometry(anno)
         self._undo_stack.push(
             SamBoxPromptCmd(self, anno.frame_idx, int(anno.instance_id),
@@ -2656,19 +2681,22 @@ class ToolController:
                 layer = seg.get_layer(ct)
                 target = os.path.join(out_folder, fname)
                 if layer is None or not layer.any():
-                    # A layer that exists but is now empty means the user
-                    # erased everything — a stale mask file left behind
-                    # would resurrect the deleted annotations on the next
-                    # load. Delete the file (and its .bak) instead of
-                    # skipping it.
-                    if layer is not None and os.path.exists(target):
-                        os.remove(target)
-                        bak = target + '.bak'
-                        if os.path.exists(bak):
-                            os.remove(bak)
+                    # Retire the file ONLY if this session owns it
+                    # (loaded or wrote it) — then an empty layer really
+                    # means "user erased everything", and leaving the
+                    # file would resurrect the erased annotations on
+                    # the next load. Unowned files belong to a previous
+                    # session ("Start fresh" promises to leave them
+                    # alone). Retire = rename onto .bak, never hard
+                    # delete: one recovery copy always survives.
+                    if ((out_folder, ct) in self._mask_files_owned
+                            and os.path.exists(target)):
+                        os.replace(target, target + '.bak')
+                        self._mask_files_owned.discard((out_folder, ct))
                         removed.append(target)
                     continue
                 project_io.atomic_write_tif(target, layer)
+                self._mask_files_owned.add((out_folder, ct))
                 written.append(target)
 
             meta_path = os.path.join(out_folder, project_io.FILE_META)
@@ -2691,16 +2719,21 @@ class ToolController:
         self._mark_seg_clean()
 
         if not written:
+            extra = ""
+            if removed:
+                extra = "\nRetired to .bak (layer now empty):\n" + "\n".join(
+                    f"  {os.path.basename(p)}" for p in removed)
             QMessageBox.information(
                 self.window, "Save Seg",
                 f"No mask layers had pixels — wrote only Meta.json + "
-                f"project.json:\n{out_folder}")
+                f"project.json:\n{out_folder}{extra}")
             return
 
         lines = "\n".join(f"  {os.path.basename(p)}" for p in written)
         if removed:
             lines += "\n" + "\n".join(
-                f"  (removed emptied {os.path.basename(p)})" for p in removed)
+                f"  (retired emptied {os.path.basename(p)} to .bak)"
+                for p in removed)
         QMessageBox.information(
             self.window, "Save Seg",
             f"Saved into {out_folder}:\n{lines}\n"
@@ -3083,8 +3116,6 @@ class ToolController:
         else:
             ckpt = None
         self.sam_service = SamService(model_type=model_type, checkpoint_path=ckpt)
-        # New service, new chance to resolve the checkpoint interactively.
-        self._sam_ckpt_prompt_declined = False
         self._refresh_sam_status()
         # If we have an image loaded, kick off precompute for the current
         # frame with the new model (the previous model's embeddings are
@@ -3139,23 +3170,25 @@ class ToolController:
         """
         if not SamService.available():
             return
+        if getattr(self, '_shutting_down', False):
+            return  # window is closing — no new background work
         if self.window.video_data is None or self.window._current_file is None:
             return
         # Resolve a missing best.pt HERE, on the GUI thread, before the
         # worker exists. The worker thread must never be the one to
         # discover the file is absent — Qt forbids dialogs off the main
         # thread (this froze first launches on fresh machines). Silent
-        # background precompute never prompts; the explicit paths
-        # (open, model swap, Precompute All) prompt at most once per
-        # session.
+        # background precompute (frame scrubbing) never prompts; every
+        # EXPLICIT path (open, model swap, Precompute All) is a fresh
+        # chance to resolve, so declining once doesn't dead-end the
+        # Precompute button for the whole session.
         svc = self.sam_service
         if svc.checkpoint_path and not os.path.exists(svc.checkpoint_path):
-            if not interactive or self._sam_ckpt_prompt_declined:
+            if not interactive:
                 return
             try:
                 svc.ensure_checkpoint_ready(self.window)
             except FileNotFoundError as e:
-                self._sam_ckpt_prompt_declined = True
                 log_error('controller.sam',
                           'checkpoint unresolved — precompute skipped', exc=e)
                 self.window.lbl_sam_status.setText(
@@ -3382,6 +3415,11 @@ class ToolController:
 
         self.window.seg_data = seg
         self.window._seg_visible = True
+        # This session now owns the mask files it just loaded — if the
+        # user later erases a whole class and saves, ITS file may be
+        # retired (renamed to .bak). Files never loaded stay untouchable.
+        for ct in layers:
+            self._mask_files_owned.add((out_folder, ct))
         self._clear_all_annotations()
 
         # Rebuild annotations from each layer the same way load_segmentation
@@ -4779,6 +4817,13 @@ class ToolController:
                 {"annotations": rows, "schema": 2},
                 keep_backup=False)
             self._autosave_path = autosave_path
+            # In light mode the JSON snapshot IS the whole autosave —
+            # a success clears a stale FAILED banner. (Smart mode only
+            # clears via a successful mask flush / explicit save.)
+            if (getattr(self, '_autosave_failed', False)
+                    and self._autosave_mode() != project_io.AUTOSAVE_SMART):
+                self._autosave_failed = False
+                self._refresh_save_status()
         except Exception as e:
             log_error('controller.autosave', f'light snapshot failed: {e}')
             self._autosave_failed = True
@@ -4807,16 +4852,17 @@ class ToolController:
                 layer = seg.get_layer(ct)
                 target = os.path.join(out_folder, fname)
                 if layer is None or not layer.any():
-                    # Same rule as save_seg_map: an emptied (but
-                    # existing) layer deletes its stale mask file so
-                    # erased annotations can't resurrect on reload.
-                    if layer is not None and os.path.exists(target):
-                        os.remove(target)
-                        bak = target + '.bak'
-                        if os.path.exists(bak):
-                            os.remove(bak)
+                    # Same rule as save_seg_map: only session-owned
+                    # files may be retired, and retiring renames onto
+                    # .bak instead of deleting — autosave must never
+                    # be able to destroy a prior session's data.
+                    if ((out_folder, ct) in self._mask_files_owned
+                            and os.path.exists(target)):
+                        os.replace(target, target + '.bak')
+                        self._mask_files_owned.discard((out_folder, ct))
                     continue
                 project_io.atomic_write_tif(target, layer)
+                self._mask_files_owned.add((out_folder, ct))
             sidecar.save_meta(
                 sidecar.collect_meta_from_annotations(self.annotations),
                 os.path.join(out_folder, project_io.FILE_META))

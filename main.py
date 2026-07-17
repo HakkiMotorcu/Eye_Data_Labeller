@@ -28,7 +28,7 @@ except Exception:
 
 from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QPainterPath, QColor, QPen
-from PyQt6.QtCore import Qt, QRectF, QSettings
+from PyQt6.QtCore import Qt, QRectF, QSettings, QTimer
 from core.volume_data import VideoData
 from core.frame_source import TiffFrameSource
 from core.debug import (
@@ -56,13 +56,17 @@ def _selftest():
     import tempfile
     print(f"selftest: python {sys.version.split()[0]} "
           f"on {platform.platform()} frozen={getattr(sys, 'frozen', False)}")
-    for mod in ('numpy', 'cv2', 'torch', 'tifffile', 'zarr',
-                'pyqtgraph', 'micro_sam', 'PyQt6.QtCore'):
-        m = sys.modules.get(mod) or __import__(mod, fromlist=['__name__'])
-        ver = getattr(m, '__version__', None) or getattr(
-            m, 'QT_VERSION_STR', '?')
-        print(f"selftest: {mod} {ver}")
     try:
+        # The probe loop must be INSIDE the try: in the windowed
+        # (console=False) bundle an uncaught import error pops a modal
+        # error dialog that a headless CI runner can never dismiss —
+        # the job would hang for hours instead of failing fast.
+        for mod in ('numpy', 'cv2', 'torch', 'tifffile', 'zarr',
+                    'pyqtgraph', 'micro_sam', 'PyQt6.QtCore'):
+            m = sys.modules.get(mod) or __import__(mod, fromlist=['__name__'])
+            ver = getattr(m, '__version__', None) or getattr(
+                m, 'QT_VERSION_STR', '?')
+            print(f"selftest: {mod} {ver}")
         os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
         app = QApplication([])
         app.setOrganizationName("EyeDataLabeller")
@@ -231,13 +235,15 @@ def main():
     window._controller = controller
     window._current_file = file_path
     window._update_title()
-    # Kick off background precompute of the current frame's SAM embedding
-    # so the first SAM Box click is fast.
-    controller.on_image_loaded()
 
     app.aboutToQuit.connect(controller.cleanup_autosave)
 
     window.show()
+    # Resume prompt + first-frame SAM precompute run AFTER the window
+    # is up (queued on the event loop): their dialogs — including the
+    # missing-best.pt picker — need a visible parent, not a blank
+    # desktop before any window exists.
+    QTimer.singleShot(0, controller.on_image_loaded)
     sys.exit(app.exec())
 
 

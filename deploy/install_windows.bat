@@ -18,7 +18,11 @@ REM    >=525). Open Command Prompt and run `nvidia-smi` to see your
 REM    driver version on the top line of the output.
 REM ==================================================================
 
-setlocal enabledelayedexpansion
+REM Plain setlocal, NOT enabledelayedexpansion: nothing here uses
+REM !var! expansion, and delayed expansion silently EATS '!' characters
+REM from every %VAR% / %%d substitution (a Desktop path or best.pt
+REM path containing '!' would be corrupted).
+setlocal
 
 set "SCRIPT_DIR=%~dp0"
 for %%i in ("%SCRIPT_DIR%..") do set "PROJECT_ROOT=%%~fi"
@@ -73,6 +77,12 @@ if errorlevel 1 (
 ) else (
     echo [install] Updating existing '%ENV_NAME%' env from environment.yml
     call conda env update -n "%ENV_NAME%" -f "%PROJECT_ROOT%\environment.yml" --prune || goto :fail
+    REM environment.yml switched pyqtdarktheme -> pyqtdarktheme-fork
+    REM (same qdarktheme module). --prune doesn't remove pip packages,
+    REM so drop the old dist to avoid two dists owning the same files.
+    call conda activate "%ENV_NAME%"
+    pip uninstall -y pyqtdarktheme >nul 2>&1
+    call conda deactivate
 )
 
 REM ---- 3. GPU detection + CUDA PyTorch swap -----------------------

@@ -1902,6 +1902,11 @@ class MainWindow(QMainWindow):
         Ctrl+S.)"""
         from PyQt6.QtWidgets import QMessageBox
         ctrl = getattr(self, '_controller', None)
+        # Block any NEW embed work first \u2014 the prompt below can pump
+        # the event loop, and a frame-change precompute starting while
+        # we're tearing down would guarantee a terminate() later.
+        if ctrl is not None:
+            ctrl._shutting_down = True
         dirty = ctrl is not None and getattr(ctrl, '_seg_dirty_since_save',
                                              False)
         if dirty:
@@ -1914,20 +1919,44 @@ class MainWindow(QMainWindow):
                 | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Save)
             if resp == QMessageBox.StandardButton.Cancel:
+                if ctrl is not None:
+                    ctrl._shutting_down = False  # user is staying
                 event.ignore()
                 return
             if resp == QMessageBox.StandardButton.Save:
                 ctrl.save_seg_map()
                 if getattr(ctrl, '_seg_dirty_since_save', False):
-                    # Save failed (its own dialog already explained why)
-                    # \u2014 don't close on top of unsaved work.
-                    event.ignore()
-                    return
+                    if self.seg_data is None:
+                        # Bbox-only session: there are no masks for
+                        # save_seg_map to write, so Save can never
+                        # clear the flag \u2014 don't trap the user in a
+                        # close/ignore loop. The light autosave
+                        # snapshot preserves the annotations for the
+                        # resume prompt.
+                        try:
+                            ctrl._autosave()
+                        except Exception:
+                            pass
+                        QMessageBox.information(
+                            self, "Annotations snapshotted",
+                            "No mask layers exist yet, so only an "
+                            "annotation snapshot (autosave.json) was "
+                            "written. You'll be offered a resume on "
+                            "next open.")
+                    else:
+                        # Save failed (its own dialog explained why) \u2014
+                        # don't close on top of unsaved work.
+                        if ctrl is not None:
+                            ctrl._shutting_down = False
+                        event.ignore()
+                        return
         # Stop the embedding worker gracefully \u2014 tearing down the app
-        # around a live QThread aborts on some platforms.
+        # around a live QThread aborts on some platforms. 10s covers a
+        # slow cold-cache CPU frame; the worker checks its stop flag
+        # between frames.
         if ctrl is not None:
             try:
-                ctrl._stop_embed_worker(timeout_ms=2000)
+                ctrl._stop_embed_worker(timeout_ms=10_000)
             except Exception:
                 pass
         event.accept()

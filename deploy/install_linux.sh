@@ -67,6 +67,13 @@ ENV_YML="$PROJECT_ROOT/environment.yml"
 if conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
     say "Updating existing '$ENV_NAME' env from $ENV_YML"
     conda env update -n "$ENV_NAME" -f "$ENV_YML" --prune
+    # environment.yml switched pyqtdarktheme -> pyqtdarktheme-fork
+    # (same `qdarktheme` module). `--prune` doesn't remove pip
+    # packages, so drop the old dist to avoid two dists owning the
+    # same files.
+    conda activate "$ENV_NAME"
+    pip uninstall -y pyqtdarktheme >/dev/null 2>&1 || true
+    conda deactivate
 else
     say "Creating '$ENV_NAME' env from $ENV_YML  (5-15 min)"
     conda env create -n "$ENV_NAME" -f "$ENV_YML"
@@ -75,20 +82,26 @@ fi
 # ---- 3. GPU detection + CUDA PyTorch swap ---------------------------
 # env.yml ships CPU PyTorch as the baseline so every platform has the
 # same starting point. On Linux + NVIDIA we swap to the CUDA wheel.
-# --force-reinstall to overwrite conda's CPU torch. NO --no-deps here:
-# Linux CUDA wheels do NOT bundle the CUDA libraries — they depend on
-# the nvidia-*-cu12 pip packages and load them from site-packages.
-# With --no-deps those never install and `import torch` dies with
-# "libcublas.so.12: cannot open shared object file". torch's pip deps
-# don't include numpy/scipy, so the conda BLAS stack is not at risk.
+# Uninstall-then-install, NOT --force-reinstall, and NOT --no-deps:
+# * Linux CUDA wheels do NOT bundle the CUDA libraries — they depend
+#   on the nvidia-*-cu12 pip packages and load them from
+#   site-packages. With --no-deps those never install and
+#   `import torch` dies with "libcublas.so.12: cannot open shared
+#   object file".
+# * But --force-reinstall (without --no-deps) applies to the WHOLE
+#   dependency closure — torchvision declares numpy and pillow, so it
+#   would rip out the conda-forge builds and replace them from the
+#   PyTorch index. Uninstalling just torch/torchvision first and then
+#   installing without force leaves already-satisfied deps (numpy,
+#   pillow) alone while pulling only the missing nvidia-* packages.
 if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
     driver_ver=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || echo "?")
     gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "NVIDIA GPU")
     say "NVIDIA GPU detected: $gpu_name  (driver $driver_ver)"
     say "Swapping to CUDA-enabled PyTorch from $CUDA_INDEX"
     conda activate "$ENV_NAME"
-    pip install --force-reinstall \
-        torch torchvision --index-url "$CUDA_INDEX" || \
+    pip uninstall -y torch torchvision >/dev/null 2>&1 || true
+    pip install torch torchvision --index-url "$CUDA_INDEX" || \
         say "(CUDA PyTorch install FAILED — app will fall back to CPU. Check driver/CUDA compatibility per the header notes in this script.)"
     conda deactivate
 else

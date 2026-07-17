@@ -178,6 +178,7 @@ jobs:
       # this fails, the problem is the ENV (deps, imports), not the
       # bundling — the distinction saves an hour of guessing.
       - name: Smoke-test source tree (--selftest)
+        timeout-minutes: 15
         shell: bash -el {0}
         run: |
           python main.py --selftest
@@ -192,6 +193,10 @@ jobs:
       # manifested at import/startup — exactly what this catches.
       # Without it, Windows/Linux zips shipped fully untested.
       - name: Smoke-test built bundle (--selftest)
+        # Hard cap: in the windowed bundle an uncaught startup error can
+        # surface as a modal dialog no runner can dismiss — fail in
+        # minutes, not the 6-hour job default.
+        timeout-minutes: 15
         shell: bash -el {0}
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then

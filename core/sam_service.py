@@ -177,7 +177,26 @@ class SamService:
                                     or self._DEFAULT_MAX_RAM_EMBEDDINGS)
         self._cache_root = os.path.expanduser(
             cache_root or self._default_cache_root())
+        self._migrate_legacy_cache()
         self._embeddings = OrderedDict()  # LRU: cache_key -> ImageEmbeddings
+
+    def _migrate_legacy_cache(self):
+        """One-time move of the old ~/.cache embedding store to the new
+        per-OS location, so existing users don't silently lose hours of
+        precomputed embeddings (~2 s/frame to redo)."""
+        legacy = os.path.expanduser('~/.cache/eye_labeller/sam_embeddings')
+        try:
+            if (os.path.isdir(legacy)
+                    and os.path.abspath(legacy) != os.path.abspath(self._cache_root)
+                    and not os.path.isdir(self._cache_root)):
+                import shutil
+                os.makedirs(os.path.dirname(self._cache_root), exist_ok=True)
+                shutil.move(legacy, self._cache_root)
+                log('sam_service', 'migrated legacy embedding cache',
+                    src=legacy, dst=self._cache_root)
+        except Exception as e:
+            # Worst case: cache recomputes. Never block startup on this.
+            log_error('sam_service', 'legacy cache migration failed', exc=e)
 
     # ---- Availability + load -----------------------------------------
 

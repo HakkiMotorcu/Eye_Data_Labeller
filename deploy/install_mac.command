@@ -64,6 +64,13 @@ ENV_YML="$PROJECT_ROOT/environment.yml"
 if conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
     say "Updating existing '$ENV_NAME' env from $ENV_YML"
     conda env update -n "$ENV_NAME" -f "$ENV_YML" --prune
+    # environment.yml switched pyqtdarktheme -> pyqtdarktheme-fork
+    # (same `qdarktheme` module). `--prune` doesn't remove pip
+    # packages, so drop the old dist to avoid two dists owning the
+    # same files.
+    conda activate "$ENV_NAME"
+    pip uninstall -y pyqtdarktheme >/dev/null 2>&1 || true
+    conda deactivate
 else
     say "Creating '$ENV_NAME' env from $ENV_YML  (this can take 5-15 min)"
     conda env create -n "$ENV_NAME" -f "$ENV_YML"

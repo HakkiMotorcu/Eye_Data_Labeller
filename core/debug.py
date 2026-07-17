@@ -202,17 +202,37 @@ def log_action(component):
     """Decorator that brackets a method with debug-mode entry/exit logs.
 
     No-op when debug is off (zero-overhead path is one bool check).
+
+    Two subtleties, both load-bearing:
+    * Arity: many decorated methods are connected straight to Qt
+      signals. PyQt trims a signal's arguments to the SLOT's arity —
+      but a ``*args`` wrapper advertises "accepts everything", so e.g.
+      ``clicked(checked)`` would push an extra bool into zero-arg
+      methods and the resulting TypeError aborts the app (PyQt6 treats
+      unhandled slot exceptions as fatal). We therefore trim positional
+      args to the wrapped function's own arity, which reproduces
+      exactly what Qt would have done without the decorator.
+    * The debug flag is latched ONCE at entry: set_debug() can now flip
+      it mid-call (I/O Settings applies live), and re-checking in the
+      ``finally`` would reference t0 before assignment.
     """
     def wrap(fn):
+        code = fn.__code__
+        n_pos = code.co_argcount
+        has_varargs = bool(code.co_flags & 0x04)
+
         @wraps(fn)
         def inner(*args, **kwargs):
-            if is_debug():
+            if not has_varargs and len(args) > n_pos:
+                args = args[:n_pos]
+            dbg = is_debug()
+            if dbg:
                 log(component, f'>>> {fn.__name__}')
-                t0 = time.perf_counter()
+            t0 = time.perf_counter()
             try:
                 return fn(*args, **kwargs)
             finally:
-                if is_debug():
+                if dbg:
                     dt_ms = (time.perf_counter() - t0) * 1000
                     log(component, f'<<< {fn.__name__} ({dt_ms:.1f} ms)')
         return inner
