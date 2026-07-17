@@ -140,6 +140,13 @@ excludes = [
     "matplotlib", "matplotlib.tests", "scipy.tests",
     "tornado", "notebook", "jupyter", "jupyterlab",
     "IPython", "pytest",
+    # Unused heavy GUI/vis stacks that ride in transitively (napari /
+    # micro_sam pull them) and break the bundle: vispy tries to
+    # dlopen system libfontconfig at import, napari/magicgui drag in
+    # more Qt. The app imports none of them — exclude so PyInstaller
+    # doesn't bundle (and mis-link) them.
+    "vispy", "napari", "magicgui", "superqt", "qtpy",
+    "PyQt5", "PySide2",
 ]
 
 # ---- Analysis ---------------------------------------------------------

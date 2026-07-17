@@ -180,10 +180,31 @@ jobs:
           pip list 2>/dev/null | grep -iE "qt|pyside" || true
           ls "$MAMBA_ROOT_PREFIX/envs/eye-labeller/Library/bin" 2>/dev/null | grep -iE "^qt6" | head -10 || true
           micromamba remove -n eye-labeller -y --force \
-            qt6-main qt6-base qt-main pyside6 pyqt pyqt6 2>/dev/null || true
+            qt6-main qt6-base qt-main pyqt pyqt5-sip pyside6 pyqt6 \
+            qtpy superqt qtconsole-base 2>/dev/null || true
           pip uninstall -y PySide6 PySide6-Essentials PySide6-Addons \
-            shiboken6 2>/dev/null || true
+            shiboken6 PyQt5 PyQt5-Qt5 PyQt5-sip 2>/dev/null || true
+          # Scorched earth: conda's Qt DLLs in Library/bin shadow pip's
+          # PyQt6/Qt6/bin at load time even after the package is
+          # removed (leftover files, or a build the ABI doesn't match)
+          # -> 'DLL load failed ... specified procedure could not be
+          # found'. Delete any conda Qt runtime DLLs outright; pip
+          # PyQt6 ships and finds its own.
+          python - <<'PY'
+          import glob, os
+          libbin = os.path.join(os.environ['MAMBA_ROOT_PREFIX'],
+                                'envs', 'eye-labeller', 'Library', 'bin')
+          for pat in ('Qt6*.dll', 'Qt5*.dll'):
+              for p in glob.glob(os.path.join(libbin, pat)):
+                  try:
+                      os.remove(p); print('removed', p)
+                  except OSError as e:
+                      print('skip', p, e)
+          PY
           pip install --force-reinstall --no-deps PyQt6 PyQt6-Qt6 PyQt6-sip
+          echo "--- Qt after cleanup ---"
+          pip list 2>/dev/null | grep -iE "qt|pyside" || true
+          python -c "from PyQt6.QtWidgets import QApplication; import PyQt6.QtCore as c; print('PyQt6 import OK, Qt', c.QT_VERSION_STR)"
 
       - name: Patch cv2 config files to use bundle-safe relative paths
         shell: bash -el {0}
