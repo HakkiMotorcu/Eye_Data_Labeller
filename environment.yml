@@ -28,6 +28,13 @@ name: eye-labeller
 # To upgrade deliberately: bump the pin(s) in a branch, let CI's
 # smoke tests validate all three OSes, merge when green. Never loosen
 # back to >= ranges.
+#
+# The pip: section stays UNPINNED on purpose: conda-forge ships
+# opencv as a pip-named dist WITHOUT a RECORD file, so any '==' pin
+# there forces pip into an impossible uninstall. The exact bundle
+# cv2/Qt/pillow versions are enforced instead by the CI workflow's
+# post-create swap steps. Drift was always conda-side; those pins
+# above are what matter.
 channels:
   - conda-forge
 dependencies:
@@ -105,20 +112,20 @@ dependencies:
   - pip
   - pip:
       # PyQt6 stack — installed via pip because conda-forge ships only PyQt5
-      - PyQt6==6.11.0
-      - pyqtgraph==0.14.0
-      - qtawesome==1.4.2
+      - PyQt6
+      - pyqtgraph
+      - qtawesome
       # -fork variant: upstream pyqtdarktheme declares python <3.12, so
       # on 3.12 envs pip silently fell back to the ancient 0.1.7
       # release. The fork supports current Python and keeps the same
       # `import qdarktheme` module name.
-      - pyqtdarktheme-fork==2.3.6
+      - pyqtdarktheme-fork
       # opencv-python-headless — we DO list it here explicitly. Earlier
       # versions of this file relied on micro_sam pulling opencv in
       # transitively, but that proved inconsistent (worked on GH Linux
       # runner, failed on local Mac install). Headless variant has no
       # GTK/Qt GUI built-in; cv2 GUI features aren't used (we have
       # PyQt6) and would conflict with our Qt bindings.
-      - opencv-python-headless==4.13.0.92
+      - opencv-python-headless
       # MobileSAM (vit_t support) — same as upstream micro-sam env
       - git+https://github.com/ChaoningZhang/MobileSAM.git
