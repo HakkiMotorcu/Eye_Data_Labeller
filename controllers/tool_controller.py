@@ -1993,6 +1993,7 @@ class ToolController:
             self._mask_files_owned.clear()
             w._projection_cache = None
             w.load_video()
+            w.show_annotation_view()   # leave the landing page
             w._update_title()
             self._refresh_timeline_markers()
         finally:

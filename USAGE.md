@@ -3,10 +3,13 @@
 ## Workflow
 
 1. **Launch** — double-click the Desktop launcher (or `python main.py`).
-2. **Pick a file** — first dialog asks for a TIFF or AVI image stack.
-   After that you never need to relaunch: `Ctrl+O`, drag-and-drop a
-   file onto the window, **File → Open Recent**, or the **Files
-   sidebar** (below) all open a new stack in place.
+   The app opens on a **landing page**: an Open button, your recent
+   files, a drop target, and a shortcut to the session queue.
+2. **Open a file** — click **Open image / video…** (or drop a
+   TIFF/AVI onto the window, double-click a recent, or pick one from
+   the queue). You never need to relaunch to switch files: `Ctrl+O`,
+   drag-and-drop, **File → Open Recent**, or the **Files sidebar**
+   (below) all open a new stack in place.
 3. **Annotate** — click on a frame to place a cell, drag corners to
    resize the bbox. Add vessels / capillaries with their dedicated
    buttons (or `V` / `C`).

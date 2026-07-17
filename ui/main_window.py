@@ -262,8 +262,16 @@ class MainWindow(QMainWindow):
         return w
 
     def _setup_ui(self):
+        # Central stack: page 0 = landing (shown fileless), page 1 =
+        # the annotation view. show_landing()/show_annotation_view()
+        # switch between them.
+        from PyQt6.QtWidgets import QStackedWidget
+        self._central_stack = QStackedWidget()
+        self.setCentralWidget(self._central_stack)
+        self._landing_page = None  # created in _install_landing (needs ctrl)
+
         central_widget = QWidget()
-        self.setCentralWidget(central_widget)
+        self._central_stack.addWidget(central_widget)   # index 0 (annot view)
         main_layout = QVBoxLayout(central_widget)
 
         # --- Left: Frame view ---
@@ -2219,6 +2227,29 @@ class MainWindow(QMainWindow):
             return
 
         self._seg_overlay.setImage(rgba)
+
+    def install_landing(self):
+        """Create the landing page (needs the controller) and add it to
+        the central stack. Called once after the controller is wired."""
+        if self._landing_page is not None:
+            return
+        from ui.landing_page import LandingPage
+        self._landing_page = LandingPage(self._controller, self)
+        self._central_stack.addWidget(self._landing_page)  # index 1
+
+    def show_landing(self):
+        if self._landing_page is not None:
+            self._landing_page.refresh_recent()
+            self._central_stack.setCurrentWidget(self._landing_page)
+            self._update_title()
+
+    def show_annotation_view(self):
+        # Index 0 is always the annotation view.
+        self._central_stack.setCurrentIndex(0)
+
+    def is_on_landing(self):
+        return (self._landing_page is not None
+                and self._central_stack.currentWidget() is self._landing_page)
 
     def _update_onion_skin(self):
         """Faint outline of the previous frame's masks (all classes)."""

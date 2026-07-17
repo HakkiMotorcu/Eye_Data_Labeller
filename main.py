@@ -206,35 +206,27 @@ def main():
     icon = _make_eye_icon(64)
     app.setWindowIcon(icon)
 
-    # --- first file pick (before window exists) ---
-    file_path = pick_video_file()
-    if not file_path:
-        sys.exit(0)
-
-    print(f"Loading: {file_path}")
-    try:
-        data = load_frame_source(file_path)
-    except Exception as e:
-        QMessageBox.critical(None, "Load Error", str(e))
-        sys.exit(1)
+    # An optional path on the command line opens straight into the
+    # annotation view; otherwise the window opens on the landing page.
+    cli_path = next((a for a in sys.argv[1:] if not a.startswith('-')), None)
 
     print("Launching Interface...")
-    window = MainWindow(video_data=data)
+    window = MainWindow(video_data=None)
     window.setWindowIcon(icon)
     controller = ToolController(window)
-
     window._controller = controller
-    window._current_file = file_path
+    window.install_landing()
+    window.show_landing()
     window._update_title()
 
     app.aboutToQuit.connect(controller.cleanup_autosave)
 
     window.show()
-    # Resume prompt + first-frame SAM precompute run AFTER the window
-    # is up (queued on the event loop): their dialogs — including the
-    # missing-best.pt picker — need a visible parent, not a blank
-    # desktop before any window exists.
-    QTimer.singleShot(0, controller.on_image_loaded)
+    # open_path (queued so its dialogs get a visible parent) handles the
+    # load, resume prompt, and first-frame precompute — same path as
+    # File>Open, so the landing/annotation switch is uniform.
+    if cli_path:
+        QTimer.singleShot(0, lambda: controller.open_path(cli_path))
     sys.exit(app.exec())
 
 
