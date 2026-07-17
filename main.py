@@ -43,6 +43,65 @@ _VIDEO_EXTS = {'.avi', '.mp4', '.mkv', '.mov'}
 _TIFF_EXTS = {'.tif', '.tiff'}
 
 
+def _selftest():
+    """Headless startup check — used by CI on the built bundle.
+
+    Reaching this function already proves the full import chain
+    (PyQt6, numpy, cv2, torch, micro_sam, pyqtgraph …) survived, which
+    is where every past bundle breakage manifested. On top of that,
+    construct the real MainWindow + ToolController against a synthetic
+    stack, offscreen, so widget wiring is exercised too.
+    """
+    import platform
+    import tempfile
+    print(f"selftest: python {sys.version.split()[0]} "
+          f"on {platform.platform()} frozen={getattr(sys, 'frozen', False)}")
+    for mod in ('numpy', 'cv2', 'torch', 'tifffile', 'zarr',
+                'pyqtgraph', 'micro_sam', 'PyQt6.QtCore'):
+        m = sys.modules.get(mod) or __import__(mod, fromlist=['__name__'])
+        ver = getattr(m, '__version__', None) or getattr(
+            m, 'QT_VERSION_STR', '?')
+        print(f"selftest: {mod} {ver}")
+    try:
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        app = QApplication([])
+        app.setOrganizationName("EyeDataLabeller")
+        app.setApplicationName("Eye Data Labeller")
+
+        import numpy as np
+        import tifffile
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, 'selftest.tif')
+            tifffile.imwrite(
+                path, (np.random.default_rng(0)
+                       .integers(0, 255, (3, 64, 64))).astype('uint8'))
+            data = load_frame_source(path)
+            window = MainWindow(video_data=data)
+            controller = ToolController(window)
+            window._controller = controller
+            window._current_file = path
+            controller.spawn_new_annotation()
+            controller.delete_selected()
+            # Mark clean BEFORE close(): the closeEvent unsaved-changes
+            # guard would otherwise open a modal prompt that no one can
+            # answer in a headless CI run — the selftest would hang.
+            controller._mark_seg_clean()
+            # Tear down deterministically — letting GC destroy the
+            # pyqtgraph ViewBox during interpreter shutdown prints
+            # scary (but harmless) RuntimeError tracebacks in CI logs.
+            window.close()
+            del controller, window, data
+            app.processEvents()
+        print("selftest: MainWindow + ToolController constructed OK")
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        print("selftest: FAILED")
+        return 1
+    print("selftest: PASS")
+    return 0
+
+
 def load_frame_source(path):
     """Open a file as the right kind of frame source based on extension."""
     ext = os.path.splitext(path)[1].lower()
@@ -53,6 +112,11 @@ def load_frame_source(path):
     raise ValueError(
         f"Unsupported file type '{ext}'. "
         f"Accepted: {sorted(_VIDEO_EXTS | _TIFF_EXTS)}")
+
+
+# Must come after load_frame_source is defined — _selftest uses it.
+if '--selftest' in sys.argv:
+    sys.exit(_selftest())
 
 
 def _make_eye_icon(size=64):

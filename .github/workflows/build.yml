@@ -28,7 +28,11 @@ jobs:
           - os: windows-latest
             label: Windows-x86_64
             artifact: EyeDataLabeller-windows-x86_64.zip
-          - os: ubuntu-latest
+          # Pinned to 22.04, NOT ubuntu-latest: PyInstaller bundles link
+          # against the build machine's glibc, and 24.04's glibc 2.39
+          # floor locks out RHEL 9 / Ubuntu 22.04 lab workstations.
+          # 22.04 (glibc 2.35) keeps those working.
+          - os: ubuntu-22.04
             label: Linux-x86_64
             artifact: EyeDataLabeller-linux-x86_64.zip
     runs-on: ${{ matrix.os }}
@@ -170,10 +174,35 @@ jobs:
           print(f'cv2 OK: {cv2.__version__} at {cv2.__file__}')
           PY
 
+      # Run the app's own --selftest from the source tree first: if
+      # this fails, the problem is the ENV (deps, imports), not the
+      # bundling — the distinction saves an hour of guessing.
+      - name: Smoke-test source tree (--selftest)
+        shell: bash -el {0}
+        run: |
+          python main.py --selftest
+
       - name: Build with PyInstaller
         shell: bash -el {0}
         run: |
           pyinstaller packaging/eye_labeller.spec --clean --noconfirm
+
+      # Then run the BUILT bundle. Every past bundle breakage (cv2
+      # config recursion, numpy/Accelerate symbols, Qt plugin paths)
+      # manifested at import/startup — exactly what this catches.
+      # Without it, Windows/Linux zips shipped fully untested.
+      - name: Smoke-test built bundle (--selftest)
+        shell: bash -el {0}
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            ./dist/EyeDataLabeller/EyeDataLabeller.exe --selftest
+          elif [ -x dist/EyeDataLabeller/EyeDataLabeller/EyeDataLabeller ]; then
+            ./dist/EyeDataLabeller/EyeDataLabeller/EyeDataLabeller --selftest
+          elif [ -x dist/EyeDataLabeller/EyeDataLabeller ]; then
+            ./dist/EyeDataLabeller/EyeDataLabeller --selftest
+          else
+            ./dist/EyeDataLabeller.app/Contents/MacOS/EyeDataLabeller --selftest
+          fi
 
       # macOS: turn the COLLECT folder into a .app + a .dmg ready to
       # mount. Windows / Linux: zip the COLLECT folder as-is.
@@ -205,7 +234,10 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
+          # Extension-less artifact name: the Actions UI wraps artifacts
+          # in a zip for download, so a ".zip" name produced
+          # confusing "*.zip.zip" downloads for testers.
+          name: EyeDataLabeller-${{ matrix.label }}
           path: ${{ matrix.artifact }}
           if-no-files-found: error
 
