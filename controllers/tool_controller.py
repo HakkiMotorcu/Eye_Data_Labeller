@@ -3031,7 +3031,7 @@ class ToolController:
         ct = ct.lower()
 
         try:
-            arr = mask_io.load_mask_tif(path).astype(np.int32)
+            arr = mask_io.load_mask_tif(path).astype(np.uint16)
         except Exception as e:
             QMessageBox.critical(self.window, "Load Class",
                                   f"Failed to read TIF:\n\n{e}")
@@ -3449,7 +3449,7 @@ class ToolController:
                 raise ValueError(
                     f"{ct} layer shape {arr.shape} does not match "
                     f"cell shape {(T, H, W)}")
-            seg.set_layer(ct, arr.astype(np.int32))
+            seg.set_layer(ct, arr.astype(np.uint16))
             for iid in np.unique(arr):
                 if iid == 0:
                     continue

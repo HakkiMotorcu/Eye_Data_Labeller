@@ -116,7 +116,7 @@ class SegmentationData:
         user starts annotating a class with no existing pixels)."""
         if self._layers[class_type] is None:
             self._layers[class_type] = np.zeros(
-                (self.num_frames, self.height, self.width), dtype=np.int32)
+                (self.num_frames, self.height, self.width), dtype=np.uint16)
         return self._layers[class_type]
 
     def load_data(self):
@@ -147,9 +147,12 @@ class SegmentationData:
         # First pass — extract instances using intensity stairs.
         # An AVI-loaded seg file always populates the cell layer;
         # vessels/capillaries are user-painted later (empty here).
-        self._layers['cell']      = np.zeros((T, H, W), dtype=np.int32)
-        self._layers['vessel']    = np.zeros((T, H, W), dtype=np.int32)
-        self._layers['capillary'] = np.zeros((T, H, W), dtype=np.int32)
+        # uint16, not int32: ids are capped at 65535 anyway (the TIF
+        # export enforces it) and three full-stack layers at int32
+        # cost ~3 GB on a 1000-frame 512x512 stack — uint16 halves it.
+        self._layers['cell']      = np.zeros((T, H, W), dtype=np.uint16)
+        self._layers['vessel']    = np.zeros((T, H, W), dtype=np.uint16)
+        self._layers['capillary'] = np.zeros((T, H, W), dtype=np.uint16)
         all_stairs = set()
         for t in range(T):
             mask = self._extract_instances(raw_frames[t])
@@ -166,7 +169,7 @@ class SegmentationData:
     def _extract_instances(self, gray):
         """Extract instances from a single grayscale frame.
 
-        Returns (H, W) int32 mask where each pixel's value is the
+        Returns (H, W) uint16 mask where each pixel's value is the
         quantised median intensity of its connected component
         (0 = background).
 
@@ -201,7 +204,7 @@ class SegmentationData:
         # Use median intensity of each component as stair ID
         q = self.STAIR_QUANT
         m = self.BORDER_MARGIN
-        mask = np.zeros((H, W), dtype=np.int32)
+        mask = np.zeros((H, W), dtype=np.uint16)
 
         for c in range(1, n_labels):
             px = (labels == c)
@@ -488,9 +491,9 @@ class SegmentationData:
         seg.width = int(width)
         shape = (seg.num_frames, seg.height, seg.width)
         seg._layers = {
-            'cell':      np.zeros(shape, dtype=np.int32),
-            'vessel':    np.zeros(shape, dtype=np.int32),
-            'capillary': np.zeros(shape, dtype=np.int32),
+            'cell':      np.zeros(shape, dtype=np.uint16),
+            'vessel':    np.zeros(shape, dtype=np.uint16),
+            'capillary': np.zeros(shape, dtype=np.uint16),
         }
         seg._colors = {'cell': {}, 'vessel': {}, 'capillary': {}}
         return seg
@@ -503,7 +506,14 @@ class SegmentationData:
         max_reg = max(colors.keys()) if colors else 0
         max_id = max(max_mask, max_reg)
         q = self.STAIR_QUANT
-        return (max_id // q + 1) * q
+        nid = (max_id // q + 1) * q
+        if nid > 65535:
+            # Layers are uint16 (and the TIF export enforces the same
+            # ceiling) — writing a larger id would silently wrap.
+            raise ValueError(
+                f"Instance-id space exhausted for '{class_type}' "
+                f"(next id {nid} > 65535).")
+        return nid
 
     _PALETTE = [
         (255, 80, 80),   (80, 255, 80),   (80, 160, 255),  (255, 255, 80),
