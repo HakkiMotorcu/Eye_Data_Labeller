@@ -230,7 +230,7 @@ class ToolController:
             # Seg editing modes
             QShortcut(QKeySequence("D"),          self.window, lambda: self._set_seg_mode('paint')),
             QShortcut(QKeySequence("E"),          self.window, lambda: self._set_seg_mode('erase')),
-            QShortcut(QKeySequence("Escape"),     self.window, lambda: self._set_seg_mode('select')),
+            QShortcut(QKeySequence("Escape"),     self.window, self._escape_pressed),
             QShortcut(QKeySequence("F"),          self.window, self.fill_bbox_cmd),
             QShortcut(QKeySequence("B"),          self.window, self.run_sam_box_prompt),
             QShortcut(QKeySequence("Shift+E"),    self.window, self.clear_seg_mask_for_selected),
@@ -251,6 +251,15 @@ class ToolController:
         self.window.btn_force_paint.toggled.connect(
             lambda _checked: self._update_mode_chip())
         self._update_mode_chip()
+
+        # SAM preview layer: B shows the proposed mask as a cyan
+        # overlay; Enter/B accepts, Esc discards. Nothing touches the
+        # data until accept.
+        self._sam_preview = None
+        self._preview_shortcuts = None
+        self._sam_preview_item = pg.ImageItem()
+        self._sam_preview_item.setZValue(20)  # above the seg overlay
+        self.window.view_frame.getView().addItem(self._sam_preview_item)
 
         # Right-click context menu on the annotation list (USAGE.md
         # promised this long before it existed).
@@ -320,6 +329,12 @@ class ToolController:
         Rebuild the list widget to match."""
         from PyQt6.QtWidgets import QTreeWidgetItem
         from ui.main_window import make_swatch_icon
+
+        # A pending SAM preview belongs to one frame — navigating away
+        # silently discards it (the data was never touched).
+        pv = getattr(self, '_sam_preview', None)
+        if pv is not None and pv['frame'] != frame_idx:
+            self._cancel_sam_preview(quiet=True)
 
         self.window.list_annotations.blockSignals(True)
         self.window.list_annotations.clear()
@@ -3725,7 +3740,9 @@ class ToolController:
     def run_sam_box_prompt(self):
         """Run SAM with the selected cell's bbox as a prompt.
 
-        Behavior is safe by construction:
+        The result appears as a PREVIEW overlay first — Enter or a
+        second B accepts it into the data, Esc discards. Committed
+        behavior is safe by construction:
           * Only paints pixels where the current seg is 0 or already
             belongs to this cell's instance_id.
           * Never overwrites another annotation's pixels.
@@ -3734,6 +3751,10 @@ class ToolController:
           * Undoable via Cmd+Z.
         """
         log('controller.sam', 'run_sam_box_prompt: entered')
+        # B while a preview is showing = accept it (B-B rhythm).
+        if self._sam_preview is not None:
+            self._accept_sam_preview()
+            return
 
         # ---- Hard guards (clear errors, no mask changes) --------------
         if not SamService.available():
@@ -3853,6 +3874,15 @@ class ToolController:
                 "SAM Box returned an empty mask — nothing to paint.")
             return
 
+        # ---- Preview instead of committing ----------------------------
+        # The mask goes onto a preview layer; the data is untouched
+        # until the user accepts (Enter / B). Esc discards. This turns
+        # SAM into a suggestion instead of an edit-you-then-undo.
+        self._show_sam_preview(anno, mask)
+
+    def _apply_sam_box_result(self, anno, mask):
+        """Commit an accepted SAM box mask into the seg data. This is
+        the pre-preview apply logic, verbatim."""
         # ---- Apply safely: replace own pixels with SAM's new result ---
         # Clearing the cell's existing pixels first means re-running SAM
         # on the same bbox actually shows the new prediction (otherwise
@@ -3914,6 +3944,65 @@ class ToolController:
             + " · bbox fit to mask · Cmd+Z to undo")
         log('controller.sam', 'box prompt: done',
             anno=anno.name, painted=n_painted, blocked_by_other=n_blocked)
+
+    # ---- SAM preview state machine ----------------------------------
+    def _show_sam_preview(self, anno, mask):
+        self._sam_preview = {'anno': anno, 'mask': mask,
+                             'frame': int(anno.frame_idx)}
+        rgba = np.zeros((*mask.shape, 4), dtype=np.uint8)
+        rgba[mask] = (80, 220, 255, 160)  # cyan — visibly "not data yet"
+        self._sam_preview_item.setImage(rgba)
+        # Enter/Return accept only while a preview exists — a global
+        # Return binding would steal the key from inline rename edits.
+        if self._preview_shortcuts is None:
+            self._preview_shortcuts = [
+                QShortcut(QKeySequence("Return"), self.window,
+                          self._accept_sam_preview),
+                QShortcut(QKeySequence("Enter"), self.window,
+                          self._accept_sam_preview),
+            ]
+        for s in self._preview_shortcuts:
+            s.setEnabled(True)
+        n = int(mask.sum())
+        self.window.lbl_sam_status.setText(
+            f"SAM preview: {n} px — Enter / B accepts · Esc discards")
+        log('controller.sam', 'preview shown', anno=anno.name, n_px=n)
+
+    def _clear_sam_preview_ui(self):
+        self._sam_preview = None
+        self._sam_preview_item.clear()
+        for s in (self._preview_shortcuts or []):
+            s.setEnabled(False)
+
+    def _cancel_sam_preview(self, quiet=False):
+        if self._sam_preview is None:
+            return
+        self._clear_sam_preview_ui()
+        if not quiet:
+            self.window.lbl_sam_status.setText("SAM preview discarded.")
+        log('controller.sam', 'preview discarded')
+
+    def _accept_sam_preview(self):
+        pv = self._sam_preview
+        if pv is None:
+            return
+        self._clear_sam_preview_ui()
+        anno, mask = pv['anno'], pv['mask']
+        if (anno not in self.annotations
+                or anno.frame_idx != self.window._current_frame_idx
+                or anno.is_locked):
+            self.window.lbl_sam_status.setText(
+                "SAM preview no longer applies — discarded.")
+            return
+        self._apply_sam_box_result(anno, mask)
+
+    def _escape_pressed(self):
+        """Esc: discard a pending SAM preview first; otherwise switch
+        back to select mode (the original binding)."""
+        if self._sam_preview is not None:
+            self._cancel_sam_preview()
+            return
+        self._set_seg_mode('select')
 
     @log_action('action')
     def run_sam_segmentation(self):
