@@ -1806,6 +1806,12 @@ class MainWindow(QMainWindow):
 
     def get_colormap(self):
         name = self.combo_colormap.currentText()
+        # Resolving a colormap does registry lookups (+ a matplotlib
+        # fallback probe) — cache per name so frame navigation doesn't
+        # pay it on every step.
+        cached = getattr(self, '_cmap_cache', None)
+        if cached is not None and cached[0] == name:
+            return cached[1]
         cmap = None
         try:
             cmap = pg.colormap.get(name)
@@ -1820,6 +1826,7 @@ class MainWindow(QMainWindow):
             # Build a simple grayscale colormap as fallback
             cmap = pg.ColorMap([0.0, 1.0],
                                [(0, 0, 0, 255), (255, 255, 255, 255)])
+        self._cmap_cache = (name, cmap)
         return cmap
 
     # ------------------------------------------------------------------
@@ -1862,9 +1869,13 @@ class MainWindow(QMainWindow):
         self._current_frame_idx = idx
 
         frame = self._compose_display_frame(idx)
-        cmap = self.get_colormap()
         self.view_frame.setImage(frame, autoLevels=False, autoRange=auto_range)
-        self.view_frame.setColorMap(cmap)
+        # setColorMap forces a LUT re-application on the ImageItem —
+        # only do it when the selected colormap actually changed.
+        cmap_name = self.combo_colormap.currentText()
+        if getattr(self, '_applied_cmap_name', None) != cmap_name:
+            self.view_frame.setColorMap(self.get_colormap())
+            self._applied_cmap_name = cmap_name
 
         lo = self.slider_min.value()
         hi = self.slider_max.value()

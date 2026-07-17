@@ -1021,6 +1021,17 @@ class ToolController:
                         'capillary': 'Capillary'}
         flt = self._list_filter  # set of class keys currently shown
         seg = self.window.seg_data
+        # One vectorized pass per paint-only class for "which ids have
+        # pixels on THIS frame", plus the cached anywhere-sets — the
+        # per-annotation np.any scans this replaces were O(annotations
+        # x volume) per frame step.
+        ids_here = {}
+        if seg is not None:
+            for ct in ('vessel', 'capillary'):
+                layer = seg.get_layer(ct)
+                if layer is not None and frame_idx < layer.shape[0]:
+                    ids_here[ct] = set(np.unique(layer[frame_idx]).tolist())
+        ids_anywhere = self._anywhere_ids() if seg is not None else {}
         for anno in self.annotations:
             if anno.frame_idx == frame_idx:
                 # Hidden / class-filtered annotations still get their ROI
@@ -1048,11 +1059,9 @@ class ToolController:
                 # they're about to paint into, so it stays visible.
                 if (anno.is_paint_only and seg is not None
                         and anno.instance_id is not None):
-                    layer = seg.get_layer(anno.class_type)
-                    here = np.any(layer[frame_idx] == anno.instance_id)
-                    if not here:
-                        anywhere = np.any(layer == anno.instance_id)
-                        if anywhere:
+                    iid = int(anno.instance_id)
+                    if iid not in ids_here.get(anno.class_type, ()):
+                        if iid in ids_anywhere.get(anno.class_type, ()):
                             continue  # phantom on this frame
                 visible_annos.append(anno)
                 cls = class_labels.get(anno.class_type, anno.class_type)
@@ -1235,7 +1244,32 @@ class ToolController:
     # Defined as an instance attribute in __init__; helpers below.
     def _mark_seg_dirty(self):
         self._seg_dirty_since_save = True
+        # Any seg mutation may add/remove instances — drop the cached
+        # anywhere-in-stack id sets (rebuilt lazily on next lookup).
+        self._ids_anywhere_cache = None
         self._refresh_save_status()
+
+    def _anywhere_ids(self):
+        """Per-class sets of instance ids present ANYWHERE in the stack.
+
+        One full-volume pass per class, cached until the seg is next
+        dirtied. Replaces the per-annotation ``np.any(layer == iid)``
+        full-stack scans that made frame navigation degrade badly once
+        vessels/capillaries were propagated across many frames.
+        """
+        seg = self.window.seg_data
+        if seg is None:
+            return {}
+        cached = getattr(self, '_ids_anywhere_cache', None)
+        if cached is not None and cached[0] is seg:
+            return cached[1]
+        result = {}
+        for ct in ('cell', 'vessel', 'capillary'):
+            layer = seg.get_layer(ct)
+            result[ct] = (set(np.unique(layer).tolist()) - {0}
+                          if layer is not None else set())
+        self._ids_anywhere_cache = (seg, result)
+        return result
 
     def _mark_seg_clean(self):
         self._seg_dirty_since_save = False
@@ -2305,14 +2339,22 @@ class ToolController:
         frame_annos = [a for a in self.annotations if a.frame_idx == cur]
         # For paint-only classes count only entries that actually have
         # pixels on this frame — a phantom entry without painted pixels
-        # is invisible and shouldn't inflate the panel count.
+        # is invisible and shouldn't inflate the panel count. One
+        # unique() pass per class instead of one full-frame comparison
+        # per annotation.
+        present = {}
+        if seg is not None:
+            for ct in ('vessel', 'capillary'):
+                layer = seg.get_layer(ct)
+                if layer is not None and cur < layer.shape[0]:
+                    present[ct] = set(np.unique(layer[cur]).tolist())
+
         def _has_pixels(a):
             if not a.is_paint_only:
                 return True
             if seg is None or a.instance_id is None:
                 return False
-            return bool(np.any(
-                seg.get_layer(a.class_type)[cur] == a.instance_id))
+            return int(a.instance_id) in present.get(a.class_type, ())
         n_cell  = sum(1 for a in frame_annos if a.class_type == 'cell')
         n_vess  = sum(1 for a in frame_annos
                        if a.class_type == 'vessel' and _has_pixels(a))
@@ -4263,8 +4305,42 @@ class ToolController:
         m[y0:y1, x0:x1] = True
         return m, False
 
+    @staticmethod
+    def _mask_window(mask):
+        """(y0, y1, x0, x1, n_pixels) tight window of a bool mask, or
+        None when empty."""
+        ys, xs = np.nonzero(mask)
+        if ys.size == 0:
+            return None
+        return (int(ys.min()), int(ys.max()) + 1,
+                int(xs.min()), int(xs.max()) + 1, int(ys.size))
+
+    def _collect_dedupe_candidates(self, frame_idx, frame_shape):
+        """Precompute (anno, mask, has_pixels, window) for every
+        annotation on the frame.
+
+        Built ONCE per SAM frame run and shared across detections —
+        the previous per-detection rescan rebuilt every annotation's
+        full-frame mask for every detection: O(detections x
+        annotations) mask builds on top of the inference cost.
+        """
+        out = []
+        for anno in self.annotations:
+            if anno.frame_idx != frame_idx or anno.instance_id is None:
+                continue
+            res = self._existing_mask_for(anno, frame_shape)
+            if res is None:
+                continue
+            existing_mask, has_pixels = res
+            win = self._mask_window(existing_mask)
+            if win is None:
+                continue
+            out.append((anno, existing_mask, has_pixels, win))
+        return out
+
     def _classify_sam_detection(self, sam_mask, frame_idx,
-                                threshold=_DUPLICATE_IOU_THRESHOLD):
+                                threshold=_DUPLICATE_IOU_THRESHOLD,
+                                candidates=None):
         """Decide what to do with one SAM-detected mask.
 
         Returns:
@@ -4274,27 +4350,38 @@ class ToolController:
                                  per the locked design choice
           ('drop',   existing) - silently drop (user already labeled this
                                  region with painted pixels)
+
+        ``candidates`` (from _collect_dedupe_candidates) lets a frame
+        run share the per-annotation masks across detections; omitted,
+        they're collected fresh (same result, more work).
         """
-        if sam_mask.sum() == 0:
+        sam_win = self._mask_window(sam_mask)
+        if sam_win is None:
             return ('drop', None)
+        sy0, sy1, sx0, sx1, n_sam = sam_win
+
+        if candidates is None:
+            candidates = self._collect_dedupe_candidates(
+                frame_idx, sam_mask.shape)
 
         best_iou = 0.0
         best_anno = None
         best_has_pixels = False
-        H, W = sam_mask.shape
 
-        for anno in self.annotations:
-            if anno.frame_idx != frame_idx or anno.instance_id is None:
+        for anno, existing_mask, has_pixels, win in candidates:
+            ay0, ay1, ax0, ax1, n_ex = win
+            # Disjoint tight windows -> intersection is exactly 0.
+            if ay0 >= sy1 or ay1 <= sy0 or ax0 >= sx1 or ax1 <= sx0:
                 continue
-            res = self._existing_mask_for(anno, (H, W))
-            if res is None:
-                continue
-            existing_mask, has_pixels = res
-            # Quick reject: if bboxes don't overlap, skip the IoU calc.
-            inter = int((sam_mask & existing_mask).sum())
+            # IoU over the window overlap only — |A∪B| = |A|+|B|-|A∩B|
+            # makes the union exact without a full-frame OR.
+            y0, y1 = max(sy0, ay0), min(sy1, ay1)
+            x0, x1 = max(sx0, ax0), min(sx1, ax1)
+            inter = int(np.count_nonzero(
+                sam_mask[y0:y1, x0:x1] & existing_mask[y0:y1, x0:x1]))
             if inter == 0:
                 continue
-            union = int((sam_mask | existing_mask).sum())
+            union = n_sam + n_ex - inter
             iou = inter / max(1, union)
             if iou > best_iou:
                 best_iou = iou
@@ -4336,6 +4423,10 @@ class ToolController:
 
         dedupe = self.window.chk_sam_avoid_dupes.isChecked()
         H, W = sam_seg.shape
+        # Per-annotation masks collected once for the whole frame run
+        # and kept exact as absorb/new mutate the frame (see below).
+        candidates = (self._collect_dedupe_candidates(frame_idx, (H, W))
+                      if dedupe else None)
 
         n_created = 0
         n_absorbed = 0
@@ -4346,7 +4437,8 @@ class ToolController:
             sam_mask = (sam_seg == sid)
 
             if dedupe:
-                decision, existing = self._classify_sam_detection(sam_mask, frame_idx)
+                decision, existing = self._classify_sam_detection(
+                    sam_mask, frame_idx, candidates=candidates)
             else:
                 decision, existing = ('new', None)
 
@@ -4366,6 +4458,19 @@ class ToolController:
                 log('controller.sam', 'absorbed into bbox-only annotation',
                     frame_idx=frame_idx, sam_local_id=int(sid),
                     target=existing.name, instance_id=existing.instance_id)
+                # The absorb painted pixels into `existing` — refresh
+                # its candidate entry so later detections in this run
+                # compare against the updated mask (matching the old
+                # per-detection rescan behavior exactly).
+                if candidates is not None:
+                    for i, c in enumerate(candidates):
+                        if c[0] is existing:
+                            res = self._existing_mask_for(existing, (H, W))
+                            win = (self._mask_window(res[0])
+                                   if res is not None else None)
+                            if res is not None and win is not None:
+                                candidates[i] = (existing, res[0], res[1], win)
+                            break
                 # Refresh the existing annotation's visuals so the new
                 # painted pixels show up in the overlay.
                 if is_current:
@@ -4408,6 +4513,12 @@ class ToolController:
             self.annotations.append(anno)
             anno.roi.setVisible(is_current)
             n_created += 1
+            # New annotation joins the dedupe pool for the remaining
+            # detections in this run (matches the old rescan behavior).
+            if candidates is not None:
+                win = self._mask_window(mask_pixels)
+                if win is not None:
+                    candidates.append((anno, mask_pixels, True, win))
 
         if is_current:
             self._show_frame_annotations(self.window._current_frame_idx)
