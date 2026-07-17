@@ -1328,6 +1328,10 @@ class ToolController:
         act = QAction("&Import Annotations…\tCtrl+I", self.window)
         act.triggered.connect(self.load_annotations)
         m_file.addAction(act)
+        act = QAction("&Export Bundle (masks + overlay video + CSV)…",
+                      self.window)
+        act.triggered.connect(self.export_bundle)
+        m_file.addAction(act)
         m_file.addSeparator()
         act = QAction("I/O && Autosave Settings…", self.window)
         act.triggered.connect(self.open_io_settings)
@@ -1551,6 +1555,59 @@ class ToolController:
     def _toggle_onion_skin(self, checked):
         self.window._onion_skin = bool(checked)
         self.window._update_onion_skin()
+
+    @log_action('action')
+    def export_bundle(self):
+        """File > Export Bundle: a self-contained snapshot folder —
+        mask TIFs + overlay video + per-instance CSV — that a
+        collaborator can inspect without installing the app."""
+        from core import export as core_export
+        seg = self.window.seg_data
+        vd = self.window.video_data
+        if seg is None or vd is None:
+            QMessageBox.information(
+                self.window, "Export Bundle",
+                "Nothing to export yet — annotate something first.")
+            return
+        out_dir = os.path.join(self._resolve_out_folder(), 'export')
+        names = {(a.frame_idx, a.class_type, int(a.instance_id)): a.name
+                 for a in self.annotations if a.instance_id is not None}
+
+        from PyQt6.QtWidgets import QProgressDialog, QApplication
+        dlg = QProgressDialog("Rendering overlay video…", "Cancel",
+                              0, vd.num_frames, self.window)
+        dlg.setWindowTitle("Export Bundle")
+        dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dlg.setMinimumDuration(0)
+
+        def _progress(done, total):
+            dlg.setValue(done)
+            QApplication.processEvents()
+            return not dlg.wasCanceled()
+
+        try:
+            written = core_export.write_bundle(
+                seg, names, out_dir, vd.get_frame, vd.num_frames,
+                fps=float(getattr(vd, 'fps', 0) or 8.0),
+                progress=_progress)
+        except Exception as e:
+            dlg.close()
+            log_error('controller.export', 'bundle failed', exc=e)
+            QMessageBox.critical(
+                self.window, "Export failed",
+                f"{type(e).__name__}: {e}")
+            return
+        dlg.setValue(vd.num_frames)
+        dlg.close()
+        if dlg.wasCanceled():
+            QMessageBox.information(
+                self.window, "Export Bundle",
+                "Export cancelled — video removed, other files kept.")
+            return
+        lines = "\n".join(f"  {os.path.basename(p)}" for p in written)
+        QMessageBox.information(
+            self.window, "Export Bundle",
+            f"Exported to {out_dir}:\n{lines}")
 
     # ------------------------------------------------------------------
     # REVIEW MODE — walk every unlocked annotation, accept or fix
