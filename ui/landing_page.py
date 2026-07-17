@@ -32,9 +32,13 @@ class LandingPage(QWidget):
 
         card = QFrame()
         card.setObjectName("landingCard")
+        # background:transparent on the labels matters: qdarktheme's
+        # app-wide QWidget rule otherwise paints each label as an
+        # opaque lighter slab across the card.
         card.setStyleSheet(
             "#landingCard{background:#1c1c22;border:1px solid #2c2c33;"
-            "border-radius:14px;} QLabel{color:#d7d7dd;}")
+            "border-radius:14px;}"
+            "#landingCard QLabel{color:#d7d7dd;background:transparent;}")
         card.setMaximumWidth(560)
         cl = QVBoxLayout(card)
         cl.setContentsMargins(36, 32, 36, 32)
@@ -49,8 +53,9 @@ class LandingPage(QWidget):
         cl.addWidget(title)
         cl.addWidget(subtitle)
 
-        btn_open = QPushButton("  Open image / video…")
-        btn_open.setToolTip("Open a TIFF or AVI stack  (Ctrl+O)")
+        exts = ' / '.join(sorted(e.lstrip('.') for e in SUPPORTED_EXTS))
+        btn_open = QPushButton("Open image / video…")
+        btn_open.setToolTip(f"Open a TIFF stack or video — {exts}  (Ctrl+O)")
         btn_open.setMinimumHeight(44)
         btn_open.setStyleSheet(
             "QPushButton{background:#3b82c4;color:white;border:none;"
@@ -59,7 +64,7 @@ class LandingPage(QWidget):
         btn_open.clicked.connect(self._open)
         cl.addWidget(btn_open)
 
-        drop = QLabel("or drop a .tif / .avi file anywhere on this window")
+        drop = QLabel(f"or drop a file anywhere on this window  ({exts})")
         drop.setAlignment(Qt.AlignmentFlag.AlignCenter)
         drop.setStyleSheet("color:#70707a;font-size:12px;padding:2px;")
         cl.addWidget(drop)

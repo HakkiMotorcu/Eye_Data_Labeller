@@ -2242,10 +2242,16 @@ class MainWindow(QMainWindow):
             self._landing_page.refresh_recent()
             self._central_stack.setCurrentWidget(self._landing_page)
             self._update_title()
+            c = getattr(self, '_controller', None)
+            if c is not None:
+                c.set_home_mode(True)
 
     def show_annotation_view(self):
         # Index 0 is always the annotation view.
         self._central_stack.setCurrentIndex(0)
+        c = getattr(self, '_controller', None)
+        if c is not None:
+            c.set_home_mode(False)
 
     def is_on_landing(self):
         return (self._landing_page is not None

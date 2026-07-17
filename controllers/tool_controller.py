@@ -1340,6 +1340,10 @@ class ToolController:
         from PyQt6.QtGui import QAction
         mb = self.window.menuBar()
         mb.clear()
+        # Actions that only make sense with a file open — set_home_mode
+        # greys them out while the landing page is showing. Disabling
+        # the QAction also disables any shortcut registered on it.
+        home_off = self._home_disabled_actions = []
 
         m_file = mb.addMenu("&File")
         act = QAction("&Open Image/Video…", self.window)
@@ -1352,16 +1356,23 @@ class ToolController:
         act = QAction("&Save Project\tCtrl+S", self.window)
         act.triggered.connect(self.save_seg_map)
         m_file.addAction(act)
+        home_off.append(act)
         act = QAction("Load Project &Folder…", self.window)
         act.triggered.connect(self.load_project_folder)
         m_file.addAction(act)
+        # Disabled on landing until it can route through open_path —
+        # today it would load the session into the hidden annotation
+        # view and strand the user on the landing page.
+        home_off.append(act)
         act = QAction("&Import Annotations…\tCtrl+I", self.window)
         act.triggered.connect(self.load_annotations)
         m_file.addAction(act)
+        home_off.append(act)
         act = QAction("&Export Bundle (masks + overlay video + CSV)…",
                       self.window)
         act.triggered.connect(self.export_bundle)
         m_file.addAction(act)
+        home_off.append(act)
         m_file.addSeparator()
         act = QAction("I/O && Autosave Settings…", self.window)
         act.triggered.connect(self.open_io_settings)
@@ -1376,33 +1387,40 @@ class ToolController:
         act = QAction("&Undo\tCtrl+Z", self.window)
         act.triggered.connect(self.undo)
         m_edit.addAction(act)
+        home_off.append(act)
         act = QAction("&Redo\tCtrl+Shift+Z", self.window)
         act.setShortcut(QKeySequence("Ctrl+Y"))  # Windows-familiar alias
         act.triggered.connect(self.redo)
         m_edit.addAction(act)
+        home_off.append(act)
 
         m_view = mb.addMenu("&View")
         act = QAction("Reset &Zoom\tR", self.window)
         act.triggered.connect(self.reset_zoom)
         m_view.addAction(act)
+        home_off.append(act)
         act = QAction("Zoom to &Selection", self.window)
         act.setShortcut(QKeySequence("Z"))
         act.triggered.connect(self.zoom_to_selection)
         m_view.addAction(act)
+        home_off.append(act)
         act = QAction("Toggle Seg &Overlay", self.window)
         act.setShortcut(QKeySequence("S"))  # was advertised, never bound
         act.triggered.connect(self._on_toggle_seg)
         m_view.addAction(act)
+        home_off.append(act)
         act = QAction("Onion Skin (prev frame)", self.window)
         act.setCheckable(True)
         act.setShortcut(QKeySequence("O"))
         act.toggled.connect(self._toggle_onion_skin)
         m_view.addAction(act)
+        home_off.append(act)
         self._act_review = QAction("Review Mode", self.window)
         self._act_review.setCheckable(True)
         self._act_review.setShortcut(QKeySequence("Ctrl+R"))
         self._act_review.toggled.connect(self.toggle_review_mode)
         m_view.addAction(self._act_review)
+        home_off.append(self._act_review)
 
         # Files sidebar (browser + session queue), toggleable from View.
         from PyQt6.QtWidgets import QDockWidget
@@ -1436,6 +1454,42 @@ class ToolController:
         act = QAction("Open &Log Folder", self.window)
         act.triggered.connect(self._open_log_folder)
         m_help.addAction(act)
+
+    def set_home_mode(self, on):
+        """Landing page ⇄ annotation view: disarm/arm the editor.
+
+        While the landing page is the current stack page, every editor
+        QShortcut and file-dependent menu action is inert, and the
+        annotation status bar + Files dock are hidden. Reversed when a
+        file opens. Called from MainWindow.show_landing() /
+        show_annotation_view() so it can never drift from what is
+        actually on screen.
+        """
+        on = bool(on)
+        if getattr(self, '_home_mode', None) is on:
+            return
+        self._home_mode = on
+        for sc in self._shortcuts:
+            sc.setEnabled(not on)
+        for act in getattr(self, '_home_disabled_actions', ()):
+            act.setEnabled(not on)
+        self.window.statusBar().setVisible(not on)
+        dock = getattr(self, '_files_dock', None)
+        if dock is not None:
+            from PyQt6.QtCore import QSettings
+            # Programmatic setVisible syncs the toggle action, which
+            # would persist this as the user's preference — block it.
+            toggle = dock.toggleViewAction()
+            toggle.blockSignals(True)
+            try:
+                if on:
+                    dock.setVisible(False)
+                else:
+                    visible = str(QSettings().value(
+                        'ui/files_dock_visible', True)).lower() in ('1', 'true')
+                    dock.setVisible(visible)
+            finally:
+                toggle.blockSignals(False)
 
     def _populate_recent_menu(self):
         from PyQt6.QtGui import QAction
