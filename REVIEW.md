@@ -6,6 +6,46 @@
 > reviewer before being reported; two claims were refuted during
 > verification and dropped.
 
+## At a glance
+
+| | Fixed | Open |
+| --- | --- | --- |
+| **Findings** | **34** | **18** |
+| Critical defects | 2 / 2 | 0 |
+| High defects | 12 / 12 | 0 |
+| High-leverage refactors | 2 | 2 (planned) |
+| Medium / low | rest | mediums & lows only |
+
+*(Counts are table rows below; a few rows bundle several small
+items. Every open item is a medium/low or a planned refactor — no
+known data-loss or crash paths remain.)*
+
+## Plan for the open items
+
+In order, matching the project's small-commit rhythm:
+
+1. **Pin the environment** *(new — born from the July CI incident)*:
+   exact versions in `environment.yml`, refreshed deliberately
+   instead of drifting with every solve. First thing after the
+   current PR merges.
+2. **Responsiveness wave**: move smart-autosave mask writes, SAM
+   all-frames runs, and tracking off the UI thread (the embedding
+   worker is the in-repo pattern); sparse TrackingCmd snapshots.
+   Removes the last multi-second UI freezes.
+3. **Data-integrity sweep** (small fixes): brush stroke spanning a
+   frame change, zarr cache done-sentinel, preserve corrupt
+   Meta.json instead of overwriting, never `terminate()` the embed
+   worker.
+4. **Platform polish batch**: Linux `.desktop` launcher, Qt env-var
+   re-assert before QApplication, per-OS shortcut labels, disk-full
+   dialog paths, installer edge cases, one Windows verification of
+   non-ASCII video paths.
+5. **Release engineering**: fan-in release job, signing/notarization
+   documentation, INSTALL.md corrections.
+6. **Architecture (ongoing)**: ProjectController → SamController →
+   `set_current_frame()` / event-bus revival — one extraction per
+   session, app working after every commit.
+
 **Status: all critical and high findings are closed, and the full
 roadmap has shipped** in six delivery waves — (1) Windows
 install/first-launch/encoding + data safety + logging + CI smoke
