@@ -16,7 +16,7 @@ from core.sam_service import (
 from core.tracker_service import (
     TRACKERS, make_tracker, get_default_tracker_name, SettingSpec,
 )
-from core.debug import log, log_error
+from core.debug import log, log_error, log_action
 
 
 # ======================================================================
@@ -917,6 +917,7 @@ class ToolController:
     # ------------------------------------------------------------------
     # FRAME NAVIGATION
     # ------------------------------------------------------------------
+    @log_action('action')
     def _on_timeline_changed(self, value):
         self._maybe_fit_bbox(self.active_annotation)
         self.window.spin_frame.blockSignals(True)
@@ -1374,6 +1375,7 @@ class ToolController:
     # ------------------------------------------------------------------
     # ANNOTATION CRUD
     # ------------------------------------------------------------------
+    @log_action('action')
     def spawn_new_annotation(self, start_pos=None):
         if isinstance(start_pos, bool):
             start_pos = None
@@ -1452,10 +1454,12 @@ class ToolController:
             return self._CAPILLARY_PALETTE[(index - 1) % len(self._CAPILLARY_PALETTE)]
         return (180, 180, 180)
 
+    @log_action('action')
     def spawn_vessel(self):
         """Create a paint-only vessel annotation, optionally propagated across frames."""
         self._spawn_paint_only('vessel', 'Vessel')
 
+    @log_action('action')
     def spawn_capillary(self):
         """Create a paint-only capillary annotation, optionally propagated across frames."""
         self._spawn_paint_only('capillary', 'Capillary')
@@ -1812,6 +1816,7 @@ class ToolController:
     # ------------------------------------------------------------------
     # SELECTION / LOCKING
     # ------------------------------------------------------------------
+    @log_action('action')
     def select_annotation(self, annotation):
         if self.active_annotation == annotation:
             return
@@ -2005,6 +2010,7 @@ class ToolController:
                 f"Pos: ({int(x)}, {int(y)})  Size: ({int(w)}, {int(h)})\n"
                 f"{cls}  ID: {iid}  {anno.shape_mode}  Locked: {anno.is_locked}")
 
+    @log_action('action')
     def lock_active(self):
         if self.active_annotation and not self.active_annotation.is_locked:
             # Auto-fit bbox to actual seg pixels before locking
@@ -2016,6 +2022,7 @@ class ToolController:
             if self._label_color_mode:
                 self.window._update_seg_overlay()
 
+    @log_action('action')
     def unlock_active(self):
         if self.active_annotation and self.active_annotation.is_locked:
             self._undo_stack.push(LockCmd(self, self.active_annotation, False))
@@ -2026,12 +2033,14 @@ class ToolController:
             if self._label_color_mode:
                 self.window._update_seg_overlay()
 
+    @log_action('action')
     def lock_all(self):
         for anno in self._get_frame_annotations():
             anno.set_locked(True)
         self._refresh_list_colors()
         self._update_stats()
 
+    @log_action('action')
     def unlock_all(self):
         for anno in self._get_frame_annotations():
             anno.set_locked(False)
@@ -2039,6 +2048,7 @@ class ToolController:
         self._refresh_list_colors()
         self._update_stats()
 
+    @log_action('action')
     def delete_selected(self):
         if self.active_annotation not in self.annotations:
             return
@@ -2100,6 +2110,7 @@ class ToolController:
                                             pixel_mask, color,
                                             class_type=class_type))
 
+    @log_action('action')
     def toggle_hide_locked(self, checked):
         for anno in self._get_frame_annotations():
             if anno.is_locked:
@@ -2305,6 +2316,7 @@ class ToolController:
         self._set_roi_interactivity(new_mode == 'select')
         self._update_brush_cursor_visibility()
 
+    @log_action('action')
     def _set_seg_mode(self, mode):
         if mode == 'select' and self._seg_edit_mode != 'select':
             # Leaving brush mode → auto-fit bbox
@@ -2492,6 +2504,7 @@ class ToolController:
         if data is not None and len(data) > 0:
             self._brush_cursor.setSize(r_vid * 2)
 
+    @log_action('action')
     def fill_bbox_cmd(self):
         """Fill the selected annotation's bbox region as a seg instance."""
         seg = self.window.seg_data
@@ -2522,6 +2535,7 @@ class ToolController:
         anno._seg_dirty = True
         self.window._update_seg_overlay()
 
+    @log_action('action')
     def save_seg_map(self):
         """Save the project — 3 per-class TIFs + Meta.json + project.json.
 
@@ -2591,6 +2605,7 @@ class ToolController:
             f"  {project_io.FILE_META}\n"
             f"  {project_io.FILE_PROJECT}")
 
+    @log_action('action')
     def propagate_vein_mask(self):
         """Copy the current frame's painted mask pixels for the active annotation
         to all other frames that share the same annotation (same instance_id).
@@ -2742,6 +2757,7 @@ class ToolController:
         (120, 200, 255), (200, 255, 120), (240, 128, 180), (128, 240, 180),
     ]
 
+    @log_action('action')
     def load_project_folder(self):
         """User picks an output folder; we load every class TIF + meta
         from it as a single project. Replaces the current session.
@@ -2803,6 +2819,7 @@ class ToolController:
             self.window, "Load Project",
             f"Loaded:\n{folder}")
 
+    @log_action('action')
     def load_single_class_tif(self):
         """Import a single TIF into one chosen class layer, merging it
         into the current session without touching the other classes.
@@ -3525,6 +3542,7 @@ class ToolController:
             return np.asarray(frames)
         return np.stack([vd.get_frame(i) for i in range(vd.num_frames)])
 
+    @log_action('action')
     def _run_tracker_and_apply(self, timeseries, masks):
         """Run the active tracker, push undoable remap onto the stack."""
         from PyQt6.QtWidgets import QApplication
@@ -3658,6 +3676,7 @@ class ToolController:
             text = f"model: {self.sam_service.model_type} · {ckpt} · {badge}"
         self.window.lbl_sam_status.setText(text)
 
+    @log_action('action')
     def clear_seg_mask_for_selected(self):
         """Wipe the selected cell's painted pixels on the current frame.
 
@@ -3918,6 +3937,7 @@ class ToolController:
         log('controller.sam', 'box prompt: done',
             anno=anno.name, painted=n_painted, blocked_by_other=n_blocked)
 
+    @log_action('action')
     def run_sam_segmentation(self):
         """Top-level Auto-segment handler.
 
@@ -4420,6 +4440,7 @@ class ToolController:
         return vm
 
 
+    @log_action('action')
     def load_annotations(self):
         if not self.window.video_data:
             return
@@ -4613,6 +4634,7 @@ class ToolController:
         sec = max(5, sec)
         self._autosave_timer.start(sec * 1000)
 
+    @log_action('action')
     def _autosave(self):
         """Periodic auto-save tick. Behavior depends on mode:
 

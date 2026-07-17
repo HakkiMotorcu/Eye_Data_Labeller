@@ -28,10 +28,13 @@ except Exception:
 
 from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QPainterPath, QColor, QPen
-from PyQt6.QtCore import Qt, QRectF
+from PyQt6.QtCore import Qt, QRectF, QSettings
 from core.volume_data import VideoData
 from core.frame_source import TiffFrameSource
-from core.debug import log, is_debug
+from core.debug import (
+    log, is_debug, set_debug, log_startup_banner,
+    install_qt_message_handler, SETTING_DEBUG_KEY,
+)
 from ui.main_window import MainWindow
 from controllers.tool_controller import ToolController
 
@@ -125,6 +128,14 @@ def main():
     # QSettings without explicit identity ends up in a generic
     # "Unknown organization" bucket on macOS — pin it so the I/O
     # settings dialog's values are stable across launches.
+
+    # Detailed-logging toggle: --debug / env var always wins; otherwise
+    # honor the persisted in-app setting (I/O Settings → Debugging).
+    if not is_debug():
+        v = QSettings().value(SETTING_DEBUG_KEY, False)
+        set_debug(str(v).lower() in ('1', 'true', 'yes', 'on'))
+    install_qt_message_handler()
+    log_startup_banner()
 
     # Dark theme — consistent palette across all widgets.
     try:

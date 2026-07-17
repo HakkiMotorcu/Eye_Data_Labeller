@@ -195,6 +195,37 @@ class IOSettingsDialog(QDialog):
         url_row.addWidget(self.ed_model_url, stretch=1)
         layout.addLayout(url_row)
 
+        # ----- Debugging group --------------------------------------
+        from core import debug as core_debug
+        divider3 = QFrame()
+        divider3.setFrameShape(QFrame.Shape.HLine)
+        divider3.setStyleSheet("color: #444;")
+        layout.addWidget(divider3)
+        dbg_lbl = QLabel("Debugging")
+        dbg_lbl.setStyleSheet("font-weight: bold;")
+        layout.addWidget(dbg_lbl)
+
+        self.chk_debug = QCheckBox(
+            "Detailed logging — record every action to the log file")
+        self.chk_debug.setChecked(core_debug.is_debug())
+        self.chk_debug.setToolTip(
+            "Errors are always logged. Turn this on to also record every\n"
+            "action (frame changes, SAM runs, saves, brush strokes …) —\n"
+            "then send the newest file from the log folder when reporting\n"
+            "a problem. Applies immediately; persists across launches.")
+        layout.addWidget(self.chk_debug)
+
+        dbg_row = QHBoxLayout()
+        btn_logs = QPushButton("Open log folder…")
+        btn_logs.clicked.connect(self._open_log_folder)
+        dbg_row.addWidget(btn_logs)
+        cur = core_debug.log_file_path()
+        lbl_cur = QLabel(f"This session: {os.path.basename(cur)}" if cur
+                         else "This session: no log file yet")
+        lbl_cur.setStyleSheet("color: #888; font-size: 11px;")
+        dbg_row.addWidget(lbl_cur, stretch=1)
+        layout.addLayout(dbg_row)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
             | QDialogButtonBox.StandardButton.Cancel)
@@ -228,6 +259,12 @@ class IOSettingsDialog(QDialog):
         if path:
             self.ed_model_local.setText(path)
 
+    def _open_log_folder(self):
+        from PyQt6.QtGui import QDesktopServices
+        from PyQt6.QtCore import QUrl
+        from core import debug as core_debug
+        QDesktopServices.openUrl(QUrl.fromLocalFile(core_debug.log_dir()))
+
     def _browse_custom_root(self):
         start = os.path.expanduser(self.ed_custom.text() or "~")
         path = QFileDialog.getExistingDirectory(
@@ -250,5 +287,9 @@ class IOSettingsDialog(QDialog):
         s.setValue(model_download.SETTINGS_KEY, self.ed_model_url.text().strip())
         s.setValue(model_download.LOCAL_PATH_SETTINGS_KEY,
                     self.ed_model_local.text().strip())
+        from core import debug as core_debug
+        s.setValue(core_debug.SETTING_DEBUG_KEY,
+                    bool(self.chk_debug.isChecked()))
+        core_debug.set_debug(self.chk_debug.isChecked())  # applies live
         s.sync()
         super().accept()
