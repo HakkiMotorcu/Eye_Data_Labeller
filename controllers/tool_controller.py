@@ -4060,6 +4060,7 @@ class ToolController:
             rows.append({
                 'name': track_to_name.get(tid, f"Track_{tid}"),
                 'color': seg.instance_colors.get(new_iid, (200, 200, 200)),
+                'iid': new_iid,             # for jump-to-track navigation
                 'length': len(frames),      # frames the cell actually appears on
                 'first': frames[0],
                 'last': frames[-1],
@@ -4110,17 +4111,70 @@ class ToolController:
                 f"{r['first']}–{r['last']}",
                 str(r['gaps']) if r['gaps'] else "—"])
             it.setIcon(0, make_swatch_icon(r['color']))
+            it.setData(0, Qt.ItemDataRole.UserRole, r)
+            it.setToolTip(0, "Double-click to jump to this track")
             it.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
             it.setTextAlignment(3, Qt.AlignmentFlag.AlignCenter)
             tree.addTopLevelItem(it)
         for c, wdt in ((0, 180), (1, 70), (2, 110), (3, 60)):
             tree.setColumnWidth(c, wdt)
+        tree.itemDoubleClicked.connect(self._jump_to_track_row)
         lay.addWidget(tree, stretch=1)
+        lay.addWidget(QLabel("Double-click a track to jump to its first "
+                             "frame and zoom to the cell."))
+
+        # Close-the-loop footer: seeing single-frame/short tracks, set a
+        # minimum and re-run the tracker to drop them.
+        from PyQt6.QtWidgets import QSpinBox, QHBoxLayout, QPushButton
+        footer = QHBoxLayout()
+        footer.addWidget(QLabel("Re-run dropping tracks shorter than"))
+        spin = QSpinBox()
+        spin.setRange(2, max(2, max(lengths)))
+        spin.setValue(2)
+        footer.addWidget(spin)
+        footer.addWidget(QLabel("frames"))
+        btn_rerun = QPushButton("Re-run tracker")
+        btn_rerun.setToolTip(
+            "Set the tracker's 'Min track length' and run it again — "
+            "shorter tracks are discarded. Undoable.")
+
+        def _rerun():
+            self.tracker_service.update_setting('min_time_extent',
+                                                int(spin.value()))
+            self._rebuild_tracker_settings()  # reflect in the panel
+            dlg.accept()
+            self.run_tracking_now()
+            self.show_track_lengths()  # reopen with the new result
+        btn_rerun.clicked.connect(_rerun)
+        footer.addWidget(btn_rerun)
+        lay.addLayout(footer)
+
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         bb.rejected.connect(dlg.reject)
         bb.accepted.connect(dlg.accept)
         lay.addWidget(bb)
         dlg.show()
+
+    def _jump_to_track_row(self, item, _column=0):
+        """Double-click in the track-lengths table: navigate to the
+        track's first frame, select its cell, zoom to it."""
+        r = item.data(0, Qt.ItemDataRole.UserRole)
+        if not r:
+            return
+        self.window.slider_timeline.setValue(int(r['first']))
+        anno = next((a for a in self.annotations
+                     if a.class_type == 'cell'
+                     and a.instance_id == r['iid']
+                     and a.frame_idx == int(r['first'])), None)
+        if anno is None:  # fall back to any frame of the track
+            anno = next((a for a in self.annotations
+                         if a.class_type == 'cell'
+                         and a.instance_id == r['iid']), None)
+        if anno is not None:
+            if anno.frame_idx != self.window._current_frame_idx:
+                self.window.slider_timeline.setValue(anno.frame_idx)
+            self.select_annotation(anno)
+            self.zoom_to_selection()
 
     # ------------------------------------------------------------------
     def _refresh_sam_status(self):
@@ -4780,7 +4834,15 @@ class ToolController:
             frame_idx=frame_idx, shape=frame.shape, dtype=str(frame.dtype))
 
         # SAM always runs on the raw frame, never the enhanced display.
-        segmentation = self.sam_service.auto_segment(frame)
+        # Detection settings (Settings > Detection): custom thresholds
+        # forwarded to the segmenter, size limits applied to results.
+        from ui.settings_dialog import read_detection_settings
+        det = read_detection_settings()
+        det_kwargs = {}
+        if det['custom']:
+            det_kwargs = {'pred_iou_thresh': det['pred_iou'],
+                          'stability_score_thresh': det['stability']}
+        segmentation = self.sam_service.auto_segment(frame, **det_kwargs)
         sam_seg = segmentation.astype(np.int32)
         sam_ids = np.unique(sam_seg)
         sam_ids = sam_ids[sam_ids != 0]
@@ -4806,8 +4868,17 @@ class ToolController:
         n_dropped = 0
         is_current = (frame_idx == self.window._current_frame_idx)
 
+        n_size_dropped = 0
         for sid in sam_ids:
             sam_mask = (sam_seg == sid)
+
+            # Size gate (Settings > Detection): specks and merged blobs
+            # never become annotations. 0 = limit off.
+            n_px = int(np.count_nonzero(sam_mask))
+            if ((det['min_px'] and n_px < det['min_px'])
+                    or (det['max_px'] and n_px > det['max_px'])):
+                n_size_dropped += 1
+                continue
 
             if dedupe:
                 decision, existing = self._classify_sam_detection(
@@ -4899,7 +4970,8 @@ class ToolController:
         self.state.annotations_changed.emit()
         log('controller.sam', 'frame done',
             frame_idx=frame_idx, n_created=n_created,
-            n_absorbed=n_absorbed, n_dropped=n_dropped)
+            n_absorbed=n_absorbed, n_dropped=n_dropped,
+            n_size_dropped=n_size_dropped)
         return n_created
 
     def _on_seg_opacity_tools_changed(self, value):

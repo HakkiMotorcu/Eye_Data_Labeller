@@ -23,6 +23,11 @@
    spans), its frame range, and any gaps — sorted longest first, with
    a summary line (count, longest, median, single-frame tracks). The
    per-frame `track_length` also lands in the Export Bundle's CSV.
+   **Double-click a track** to jump to its first frame and zoom to the
+   cell; the footer's **Re-run tracker** drops tracks shorter than the
+   chosen length (single-frame tracks are the usual tracking-error
+   signal). Tracker options — mode, gap-closing, min length — live in
+   the Tracking panel.
 7. **Navigate frames** — `→` / `←` for one frame at a time,
    `Home` / `End` for first / last, `Ctrl+→` / `Ctrl+←` to jump to
    the next / previous frame with no annotations. The tick bar above
@@ -184,6 +189,11 @@ One panel, four pages (category list on the left):
   auto-save mode/intervals.
 - **SAM Model** — point at a local `best.pt` (Browse) OR paste a
   download URL. See `INSTALL.md` for details.
+- **Detection** — SAM auto-segmentation tuning: custom quality /
+  stability thresholds (stricter = fewer, cleaner cells) and a
+  min/max pixel-area size filter that drops specks and merged blobs
+  before they become annotations. Defaults are the model's own;
+  applies to Auto-segment, not SAM Box.
 - **Annotation** — quality flags (below), and future annotation
   defaults.
 - **Debugging** — detailed logging toggle + log folder.

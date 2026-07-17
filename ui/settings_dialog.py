@@ -35,6 +35,41 @@ QF_SPLIT = 'annotation/flag_split'
 QF_AREA = 'annotation/flag_area'
 
 
+# ---- Detection settings (Detection page) ----------------------------
+DET_CUSTOM = 'detection/custom_thresholds'
+DET_PRED_IOU = 'detection/pred_iou'
+DET_STABILITY = 'detection/stability'
+DET_MIN_PX = 'detection/min_px'
+DET_MAX_PX = 'detection/max_px'
+
+
+def read_detection_settings():
+    """{custom, pred_iou, stability, min_px, max_px} for SAM
+    auto-segmentation. Thresholds apply only when custom=True; size
+    limits of 0 mean 'off'."""
+    s = QSettings()
+
+    def _f(key, default):
+        try:
+            return float(s.value(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _i(key, default):
+        try:
+            return int(s.value(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        'custom': str(s.value(DET_CUSTOM, False)).lower() in ('1', 'true'),
+        'pred_iou': _f(DET_PRED_IOU, 0.88),
+        'stability': _f(DET_STABILITY, 0.95),
+        'min_px': _i(DET_MIN_PX, 0),
+        'max_px': _i(DET_MAX_PX, 0),
+    }
+
+
 def read_quality_flag_settings():
     """{enabled, edge, split, area} — all default ON (there's an off
     switch in Settings > Annotation, per design)."""
@@ -76,6 +111,7 @@ class SettingsDialog(QDialog):
         for name, builder in (
                 ("Output & Autosave", self._page_output),
                 ("SAM Model", self._page_model),
+                ("Detection", self._page_detection),
                 ("Annotation", self._page_annotation),
                 ("Debugging", self._page_debug)):
             self._nav.addItem(name)
@@ -228,6 +264,60 @@ class SettingsDialog(QDialog):
         row2.addWidget(self.ed_model_url, stretch=1)
         lay.addLayout(row2)
 
+    # ---- Page: Detection -------------------------------------------
+    def _page_detection(self, lay):
+        from PyQt6.QtWidgets import QDoubleSpinBox
+        det = read_detection_settings()
+        lay.addWidget(_bold("SAM auto-segmentation"))
+        lay.addWidget(_hint(
+            "Tuning for the Auto-segment runs (not SAM Box). Stricter "
+            "thresholds find fewer, cleaner cells; looser ones find "
+            "more with more noise. Defaults are the model's own."))
+        self.chk_det_custom = QCheckBox("Use custom detection thresholds")
+        self.chk_det_custom.setChecked(det['custom'])
+        lay.addWidget(self.chk_det_custom)
+
+        self.spin_pred_iou = QDoubleSpinBox()
+        self.spin_pred_iou.setRange(0.50, 0.95)
+        self.spin_pred_iou.setSingleStep(0.01)
+        self.spin_pred_iou.setValue(det['pred_iou'])
+        self.spin_pred_iou.setToolTip(
+            "Predicted mask quality cutoff (model default 0.88).\n"
+            "Lower = more detections, more junk.")
+        self.spin_stability = QDoubleSpinBox()
+        self.spin_stability.setRange(0.50, 0.99)
+        self.spin_stability.setSingleStep(0.01)
+        self.spin_stability.setValue(det['stability'])
+        self.spin_stability.setToolTip(
+            "Mask stability cutoff (model default 0.95).\n"
+            "Lower = keep masks that shift under threshold changes.")
+        form = QFormLayout()
+        form.addRow("Quality threshold:", self.spin_pred_iou)
+        form.addRow("Stability threshold:", self.spin_stability)
+        lay.addLayout(form)
+        for w in (self.spin_pred_iou, self.spin_stability):
+            self.chk_det_custom.toggled.connect(w.setEnabled)
+            w.setEnabled(det['custom'])
+
+        lay.addSpacing(10)
+        lay.addWidget(_bold("Size filter"))
+        lay.addWidget(_hint(
+            "Drop detections outside this pixel-area range before they "
+            "become annotations — specks and merged blobs never enter "
+            "the list. 0 = no limit. Applies to Auto-segment only."))
+        self.spin_det_min = QSpinBox()
+        self.spin_det_min.setRange(0, 100000)
+        self.spin_det_min.setValue(det['min_px'])
+        self.spin_det_min.setSuffix(" px")
+        self.spin_det_max = QSpinBox()
+        self.spin_det_max.setRange(0, 10000000)
+        self.spin_det_max.setValue(det['max_px'])
+        self.spin_det_max.setSuffix(" px")
+        form2 = QFormLayout()
+        form2.addRow("Minimum area:", self.spin_det_min)
+        form2.addRow("Maximum area:", self.spin_det_max)
+        lay.addLayout(form2)
+
     # ---- Page: Annotation ------------------------------------------
     def _page_annotation(self, lay):
         qf = read_quality_flag_settings()
@@ -330,6 +420,11 @@ class SettingsDialog(QDialog):
                    self.ed_model_url.text().strip())
         s.setValue(model_download.LOCAL_PATH_SETTINGS_KEY,
                    self.ed_model_local.text().strip())
+        s.setValue(DET_CUSTOM, bool(self.chk_det_custom.isChecked()))
+        s.setValue(DET_PRED_IOU, float(self.spin_pred_iou.value()))
+        s.setValue(DET_STABILITY, float(self.spin_stability.value()))
+        s.setValue(DET_MIN_PX, int(self.spin_det_min.value()))
+        s.setValue(DET_MAX_PX, int(self.spin_det_max.value()))
         s.setValue(QF_ENABLED, bool(self.chk_qf.isChecked()))
         s.setValue(QF_EDGE, bool(self.chk_qf_edge.isChecked()))
         s.setValue(QF_SPLIT, bool(self.chk_qf_split.isChecked()))
