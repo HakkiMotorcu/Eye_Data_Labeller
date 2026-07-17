@@ -1969,14 +1969,19 @@ class MainWindow(QMainWindow):
 
     def dropEvent(self, event):
         from core.frame_source import SUPPORTED_EXTS
+        from PyQt6.QtCore import QTimer
         ctrl = getattr(self, '_controller', None)
         if ctrl is None:
             return
         for url in event.mimeData().urls():
             p = url.toLocalFile()
             if p and os.path.splitext(p)[1].lower() in SUPPORTED_EXTS:
-                ctrl.open_path(p)
+                # Accept first, open on the next event-loop turn:
+                # open_path shows modal dialogs, and nesting those
+                # inside the OS drag-drop callback can wedge the drag
+                # source (Explorer/Finder) until dismissed.
                 event.acceptProposedAction()
+                QTimer.singleShot(0, lambda path=p: ctrl.open_path(path))
                 return
 
     def closeEvent(self, event):

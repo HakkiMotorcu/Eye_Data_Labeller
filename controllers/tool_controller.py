@@ -572,6 +572,15 @@ class ToolController:
         # Any seg mutation may add/remove instances — drop the cached
         # anywhere-in-stack id sets (rebuilt lazily on next lookup).
         self._ids_anywhere_cache = None
+        # A pending SAM preview was computed against the pre-edit
+        # state; accepting it after this mutation could clobber the
+        # user's newer edits. Discard it.
+        if getattr(self, '_sam_preview', None) is not None:
+            self._cancel_sam_preview(quiet=True)
+            self.window.lbl_sam_status.setText(
+                "SAM preview discarded — the frame changed underneath it.")
+        # Undo/redo and every command change annotation coverage.
+        self._refresh_timeline_markers()
         self._refresh_save_status()
 
     def _anywhere_ids_for(self, class_type):
@@ -1360,7 +1369,11 @@ class ToolController:
         visible = str(QSettings().value(
             'ui/files_dock_visible', True)).lower() in ('1', 'true')
         dock.setVisible(visible)
-        dock.visibilityChanged.connect(
+        # Persist from the TOGGLE ACTION, not visibilityChanged:
+        # QDockWidget emits visibilityChanged(False) when the window
+        # closes or minimizes, which would overwrite the preference
+        # with False on every clean quit.
+        toggle.toggled.connect(
             lambda v: QSettings().setValue('ui/files_dock_visible', bool(v)))
         self._files_dock = dock
 
@@ -1586,9 +1599,23 @@ class ToolController:
                 return False
             if resp == QMessageBox.StandardButton.Save:
                 self.save_seg_map()
-                if (self._seg_dirty_since_save
-                        and self.window.seg_data is not None):
-                    return False  # save failed; stay on current file
+                if self._seg_dirty_since_save:
+                    if self.window.seg_data is None:
+                        # Bbox-only session: no masks for save_seg_map
+                        # to write — same fallback as closeEvent, so a
+                        # Save click never silently discards work.
+                        try:
+                            self._autosave()
+                        except Exception:
+                            pass
+                        QMessageBox.information(
+                            self.window, "Annotations snapshotted",
+                            "No mask layers exist yet, so only an "
+                            "annotation snapshot (autosave.json) was "
+                            "written. You'll be offered a resume when "
+                            "you reopen this file.")
+                    else:
+                        return False  # save failed; stay on current file
 
         try:
             data = load_frame_source(path)
@@ -1600,18 +1627,28 @@ class ToolController:
             return False
 
         # Tear down the old session, bind the new source.
-        self._stop_embed_worker(timeout_ms=5000)
-        self._embed_pending_frame = None
-        self._clear_all_annotations()
-        w = self.window
-        w.video_data = data
-        w.seg_data = None
-        w._current_file = path
-        self._mark_seg_clean()          # fresh session starts clean
-        self._ids_anywhere_cache = None
-        w._projection_cache = None
-        w.load_video()
-        w._update_title()
+        self._loading_file = True  # gates the frame-change embed hook
+        try:
+            self._stop_embed_worker(timeout_ms=5000)
+            self._embed_pending_frame = None
+            self._cancel_sam_preview(quiet=True)
+            self._clear_all_annotations()
+            w = self.window
+            w.video_data = data
+            w.seg_data = None
+            w._current_file = path
+            self._mark_seg_clean()      # fresh session starts clean
+            self._ids_anywhere_cache = None
+            # Ownership is per-session: carrying it across files would
+            # let a later "Start fresh" retire mask files this session
+            # no longer owns.
+            self._mask_files_owned.clear()
+            w._projection_cache = None
+            w.load_video()
+            w._update_title()
+            self._refresh_timeline_markers()
+        finally:
+            self._loading_file = False
         self._add_recent_file(path)
         self.state.image_loaded.emit(int(data.num_frames))
         panel = getattr(self, '_files_panel', None)
@@ -3352,9 +3389,15 @@ class ToolController:
             return
         if self.window._current_file is None:
             return
+        if getattr(self, '_loading_file', False):
+            return  # open_path teardown drives the slider; skip
         if self.sam_service.has_cached_embedding(
                 self.window._current_file, frame_idx):
             self._embed_pending_frame = None
+            # Cached frame = no worker run = no finished_ok hook — keep
+            # the one-ahead prefetch chain alive from here, or warm and
+            # cold frames alternate as the user advances.
+            self._maybe_prefetch_next()
             return
         # If a worker is already running, just remember the most recent
         # frame request and return immediately.
@@ -3975,16 +4018,30 @@ class ToolController:
             s.setEnabled(False)
 
     def _cancel_sam_preview(self, quiet=False):
-        if self._sam_preview is None:
+        # getattr: teardown hooks can run before __init__ reaches the
+        # preview-state block.
+        if getattr(self, '_sam_preview', None) is None:
             return
         self._clear_sam_preview_ui()
         if not quiet:
             self.window.lbl_sam_status.setText("SAM preview discarded.")
+        else:
+            # Don't leave the "Enter accepts" instruction on screen
+            # after the preview is gone.
+            self._refresh_sam_status()
         log('controller.sam', 'preview discarded')
 
     def _accept_sam_preview(self):
         pv = self._sam_preview
         if pv is None:
+            return
+        # If the user is mid-edit in a text field (inline rename), the
+        # Return that got here was meant for the editor — commit the
+        # edit via focus-out and keep the preview pending.
+        from PyQt6.QtWidgets import QApplication, QLineEdit, QAbstractSpinBox
+        fw = QApplication.focusWidget()
+        if isinstance(fw, (QLineEdit, QAbstractSpinBox)):
+            fw.clearFocus()  # item-view editors commit on focus loss
             return
         self._clear_sam_preview_ui()
         anno, mask = pv['anno'], pv['mask']
@@ -4721,6 +4778,9 @@ class ToolController:
         # list widget — no need to add the row directly here.
 
     def _clear_all_annotations(self):
+        # Shared "session is gone" hook — every teardown path funnels
+        # here, so preview + marker cleanup belong here too.
+        self._cancel_sam_preview(quiet=True)
         for anno in self.annotations:
             anno.delete_ui()
         self.annotations.clear()
@@ -4730,6 +4790,7 @@ class ToolController:
         self._undo_stack.clear()
         self.window.btn_hide_locked.setChecked(False)
         self.update_inspector()
+        self._refresh_timeline_markers()
 
     # ------------------------------------------------------------------
     # AUTO-SAVE
