@@ -148,14 +148,24 @@ jobs:
           BINARIES_PATHS = []
           EOF
 
-          # config-<pyver>.py — point PYTHON_EXTENSIONS_PATHS at the
-          # python-<pyver>/ subdir RELATIVE to where this config file
-          # lives. __file__ resolves correctly in both env and bundle.
+          # config-<pyver>.py — point PYTHON_EXTENSIONS_PATHS at
+          # wherever the native module ACTUALLY lives, relative to this
+          # config file. Two layouts exist in the wild and the resolver
+          # picks whichever dependency set won this solve:
+          #   conda-forge:  cv2/python-X.Y/cv2.cpython-*.so
+          #   pip wheel:    cv2/cv2*.so  (flat)
+          # Hardcoding python-X.Y (the old approach) broke the moment a
+          # July 2026 re-solve produced the flat layout: the loader
+          # found no native module on the configured path and died with
+          # 'recursion is detected during loading of cv2'. Listing only
+          # directories that exist — with the loader dir as fallback —
+          # works for both layouts, in the env and in the bundle.
           cat > "$CV2_DIR/config-${PY_VER}.py" <<EOF
           import os
+          _here = os.path.dirname(os.path.abspath(__file__))
           PYTHON_EXTENSIONS_PATHS = [
-              os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           'python-${PY_VER}')
+              p for p in (os.path.join(_here, 'python-${PY_VER}'), _here)
+              if os.path.isdir(p)
           ] + PYTHON_EXTENSIONS_PATHS
           EOF
 
