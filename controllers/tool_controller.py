@@ -356,6 +356,11 @@ class ToolController:
                 lock_glyph = "🔒" if anno.is_locked else ""
                 item = QTreeWidgetItem(
                     ["", anno.name, cls, vis_glyph, lock_glyph])
+                # Identity stamp: every list<->annotation lookup goes
+                # through this, NEVER the display name — names are
+                # user-editable and may collide, which used to route
+                # clicks/deletes/renames to the wrong annotation.
+                item.setData(0, Qt.ItemDataRole.UserRole, anno)
                 item.setIcon(0, make_swatch_icon(anno.color))
                 # Only the name column should be editable (not the
                 # swatch / glyph columns).
@@ -368,10 +373,9 @@ class ToolController:
 
         # Re-select the active annotation if it's on this frame
         if self.active_annotation and self.active_annotation.frame_idx == frame_idx:
-            items = self.window.list_annotations.findItems(
-                self.active_annotation.name, Qt.MatchFlag.MatchExactly, 1)
-            if items:
-                self.window.list_annotations.setCurrentItem(items[0])
+            item = self._find_item_for(self.active_annotation)
+            if item is not None:
+                self.window.list_annotations.setCurrentItem(item)
         else:
             # Try to follow the same instance to this frame so a tracked
             # cell stays selected as the user scrubs. Fall back to the
@@ -401,10 +405,9 @@ class ToolController:
                 self.active_annotation = target
                 self.active_annotation.is_selected = True
                 self.active_annotation.update_visuals()
-                items = self.window.list_annotations.findItems(
-                    target.name, Qt.MatchFlag.MatchExactly, 1)
-                if items:
-                    self.window.list_annotations.setCurrentItem(items[0])
+                item = self._find_item_for(target)
+                if item is not None:
+                    self.window.list_annotations.setCurrentItem(item)
 
         self.window.list_annotations.blockSignals(False)
         self._refresh_list_colors()
@@ -1223,35 +1226,51 @@ class ToolController:
             if anno.frame_idx == cur:
                 anno.is_selected = (anno == annotation)
                 anno.update_visuals()
-        items = self.window.list_annotations.findItems(annotation.name, Qt.MatchFlag.MatchExactly, 1)
-        if items:
+        item = self._find_item_for(annotation)
+        if item is not None:
             self.window.list_annotations.blockSignals(True)
-            self.window.list_annotations.setCurrentItem(items[0])
+            self.window.list_annotations.setCurrentItem(item)
             self.window.list_annotations.blockSignals(False)
         self.update_inspector()
         self._refresh_list_colors()
         if self._label_color_mode:
             self.window._update_seg_overlay()
 
+    @staticmethod
+    def _item_anno(item):
+        """The Annotation2D a list row represents (identity-stamped at
+        row creation). None for stale rows whose C++ item was already
+        deleted by a list rebuild."""
+        if item is None:
+            return None
+        try:
+            return item.data(0, Qt.ItemDataRole.UserRole)
+        except RuntimeError:
+            return None
+
+    def _find_item_for(self, anno):
+        """The list row representing *anno*, by identity — never by the
+        user-editable (and possibly duplicated) display name."""
+        lst = self.window.list_annotations
+        for i in range(lst.topLevelItemCount()):
+            it = lst.topLevelItem(i)
+            if it is not None and it.data(0, Qt.ItemDataRole.UserRole) is anno:
+                return it
+        return None
+
     def _on_list_item_changed(self, current, previous):
-        if current:
-            name = current.text(1)
-            cur = self.window._current_frame_idx
-            for anno in self.annotations:
-                if anno.name == name and anno.frame_idx == cur:
-                    self.select_annotation(anno)
-                    break
+        anno = self._item_anno(current)
+        if anno is not None and anno in self.annotations:
+            self.select_annotation(anno)
 
     def _on_list_item_clicked(self, item, column):
         """Per-row eye/lock glyph clicks toggle anno state (D)."""
         if column not in (3, 4):
             return
-        name = item.text(1)
-        cur = self.window._current_frame_idx
-        anno = next((a for a in self.annotations
-                     if a.name == name and a.frame_idx == cur), None)
-        if anno is None:
+        anno = self._item_anno(item)
+        if anno is None or anno not in self.annotations:
             return
+        cur = self.window._current_frame_idx
         if column == 3:
             anno.is_hidden = not getattr(anno, 'is_hidden', False)
             # Bbox ROI follows hidden state immediately; seg overlay
@@ -1354,14 +1373,15 @@ class ToolController:
         # Only the Name column (1) carries rename data.
         if column != 1:
             return
+        # Rename the ROW's annotation (identity stamp), not whichever
+        # annotation happens to be selected — editing an unselected row
+        # used to rename the wrong one.
+        anno = self._item_anno(item) or self.active_annotation
+        if anno is None:
+            return
         new_name = item.text(1).strip()
         if not new_name:
-            # Revert to old name
-            if self.active_annotation:
-                item.setText(1, self.active_annotation.name)
-            return
-        anno = self.active_annotation
-        if anno is None:
+            item.setText(1, anno.name)  # revert
             return
         if new_name == anno.name:
             return
@@ -1675,9 +1695,8 @@ class ToolController:
             item = self.window.list_annotations.topLevelItem(i)
             if item is None:
                 continue
-            name = item.text(1)
-            anno = next((a for a in frame_annos if a.name == name), None)
-            if anno is None:
+            anno = self._item_anno(item)
+            if anno is None or anno not in frame_annos:
                 continue
             font = item.font(1)
             is_active = (anno == self.active_annotation)
