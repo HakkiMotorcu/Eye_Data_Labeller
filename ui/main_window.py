@@ -285,6 +285,13 @@ class MainWindow(QMainWindow):
         self._seg_overlay.setZValue(10)  # above the frame image
         self.view_frame.getView().addItem(self._seg_overlay)
         self._seg_visible = True
+        # Onion skin: faint outlines of the PREVIOUS frame's masks,
+        # rendered under the live overlay — tracking drift shows up
+        # instantly. Toggled from View > Onion Skin (O).
+        self._onion_skin = False
+        self._onion_item = pg.ImageItem()
+        self._onion_item.setZValue(9)
+        self.view_frame.getView().addItem(self._onion_item)
         # Default z-order for overlay compositing — bottom to top.
         # Cells on top reads best for most workflows; the View panel's
         # "Top: …" buttons reshuffle this at runtime.
@@ -1933,6 +1940,7 @@ class MainWindow(QMainWindow):
 
         # Update segmentation overlay
         self._update_seg_overlay()
+        self._update_onion_skin()
 
         self.lbl_frame_title.setText(
             f"Frame {idx} / {self.video_data.num_frames - 1}  "
@@ -2205,6 +2213,39 @@ class MainWindow(QMainWindow):
             return
 
         self._seg_overlay.setImage(rgba)
+
+    def _update_onion_skin(self):
+        """Faint outline of the previous frame's masks (all classes)."""
+        item = getattr(self, '_onion_item', None)
+        if item is None:
+            return
+        if (not self._onion_skin or self.seg_data is None
+                or self._current_frame_idx == 0):
+            item.clear()
+            return
+        prev = self._current_frame_idx - 1
+        combined = None
+        for ct in self.seg_data.CLASS_TYPES:
+            layer = self.seg_data.get_layer(ct)
+            if layer is None or prev >= layer.shape[0]:
+                continue
+            m = layer[prev] != 0
+            combined = m if combined is None else (combined | m)
+        if combined is None or not combined.any():
+            item.clear()
+            return
+        import cv2
+        edges = cv2.morphologyEx(
+            combined.astype(np.uint8), cv2.MORPH_GRADIENT,
+            np.ones((3, 3), np.uint8)).astype(bool)
+        rgba = np.zeros((*combined.shape, 4), dtype=np.uint8)
+        rgba[edges] = (255, 255, 255, 110)
+        if self.video_data and (rgba.shape[0] != self.video_data.height
+                                or rgba.shape[1] != self.video_data.width):
+            rgba = cv2.resize(rgba,
+                              (self.video_data.width, self.video_data.height),
+                              interpolation=cv2.INTER_NEAREST)
+        item.setImage(rgba)
 
     def set_seg_visible(self, visible):
         """Toggle segmentation overlay visibility."""

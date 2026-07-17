@@ -257,6 +257,13 @@ class ToolController:
         # data until accept.
         self._sam_preview = None
         self._preview_shortcuts = None
+        # Review mode (Ctrl+R): walk every unlocked annotation, Space
+        # accepts (locks) and advances, Esc exits.
+        self._review_mode = False
+        self._review_shortcut = None
+        self._review_queue = []
+        self._review_pos = -1
+        self._review_total = 0
         self._sam_preview_item = pg.ImageItem()
         self._sam_preview_item.setZValue(20)  # above the seg overlay
         self.window.view_frame.getView().addItem(self._sam_preview_item)
@@ -1352,6 +1359,16 @@ class ToolController:
         act.setShortcut(QKeySequence("S"))  # was advertised, never bound
         act.triggered.connect(self._on_toggle_seg)
         m_view.addAction(act)
+        act = QAction("Onion Skin (prev frame)", self.window)
+        act.setCheckable(True)
+        act.setShortcut(QKeySequence("O"))
+        act.toggled.connect(self._toggle_onion_skin)
+        m_view.addAction(act)
+        self._act_review = QAction("Review Mode", self.window)
+        self._act_review.setCheckable(True)
+        self._act_review.setShortcut(QKeySequence("Ctrl+R"))
+        self._act_review.toggled.connect(self.toggle_review_mode)
+        m_view.addAction(self._act_review)
 
         # Files sidebar (browser + session queue), toggleable from View.
         from PyQt6.QtWidgets import QDockWidget
@@ -1462,6 +1479,12 @@ class ToolController:
         lbl = getattr(self.window, 'lbl_status_mode', None)
         if lbl is None:
             return
+        base_review = "font-family: monospace; font-weight: bold; padding: 0 10px;"
+        if getattr(self, '_review_mode', False):
+            lbl.setText(f"REVIEW {min(self._review_pos + 1, self._review_total)}"
+                        f"/{self._review_total} · Space=accept · Esc=exit")
+            lbl.setStyleSheet(base_review + "color: #b18cf0;")
+            return
         mode = self._seg_edit_mode.upper()
         force = self.window.btn_force_paint.isChecked()
         base = "font-family: monospace; font-weight: bold; padding: 0 10px;"
@@ -1524,6 +1547,84 @@ class ToolController:
                 return
         self.window.lbl_stats.setText(
             "No unannotated frames in that direction")
+
+    def _toggle_onion_skin(self, checked):
+        self.window._onion_skin = bool(checked)
+        self.window._update_onion_skin()
+
+    # ------------------------------------------------------------------
+    # REVIEW MODE — walk every unlocked annotation, accept or fix
+    # ------------------------------------------------------------------
+    def toggle_review_mode(self, checked):
+        if not checked:
+            if getattr(self, '_review_mode', False):
+                self._exit_review_mode("Review mode off")
+            return
+        queue = [a for a in self.annotations if not a.is_locked]
+        queue.sort(key=lambda a: (a.frame_idx, a.name))
+        if not queue:
+            self.window.lbl_stats.setText("Review: nothing unlocked to review")
+            self._sync_review_action(False)
+            return
+        self._review_mode = True
+        self._review_queue = queue
+        self._review_total = len(queue)
+        self._review_pos = -1
+        if self._review_shortcut is None:
+            self._review_shortcut = QShortcut(
+                QKeySequence("Space"), self.window, self._review_accept)
+        self._review_shortcut.setEnabled(True)
+        log('controller.review', 'entered', n=self._review_total)
+        self._review_advance()
+
+    def _sync_review_action(self, checked):
+        act = getattr(self, '_act_review', None)
+        if act is not None:
+            act.blockSignals(True)
+            act.setChecked(checked)
+            act.blockSignals(False)
+
+    def _exit_review_mode(self, message):
+        self._review_mode = False
+        if self._review_shortcut is not None:
+            self._review_shortcut.setEnabled(False)
+        self._sync_review_action(False)
+        self._update_mode_chip()
+        self.window.lbl_stats.setText(message)
+        log('controller.review', 'exited', message=message)
+
+    def _review_advance(self):
+        """Move to the next still-unlocked annotation; exit when done."""
+        while True:
+            self._review_pos += 1
+            if self._review_pos >= len(self._review_queue):
+                self._exit_review_mode(
+                    f"Review complete — {self._review_total} annotation(s)")
+                return
+            anno = self._review_queue[self._review_pos]
+            if anno in self.annotations and not anno.is_locked:
+                break
+        if anno.frame_idx != self.window._current_frame_idx:
+            self.window.slider_timeline.setValue(anno.frame_idx)
+        self.select_annotation(anno)
+        self.zoom_to_selection()
+        self._update_mode_chip()
+
+    def _review_accept(self):
+        """Space in review mode: lock the current annotation, advance."""
+        if not getattr(self, '_review_mode', False):
+            return
+        from PyQt6.QtWidgets import QApplication, QLineEdit, QAbstractSpinBox
+        fw = QApplication.focusWidget()
+        if isinstance(fw, (QLineEdit, QAbstractSpinBox)):
+            fw.clearFocus()  # commit the edit; Space stays review-free
+            return
+        if 0 <= self._review_pos < len(self._review_queue):
+            anno = self._review_queue[self._review_pos]
+            if anno in self.annotations and not anno.is_locked:
+                self.select_annotation(anno)
+                self.lock_active()  # undoable LockCmd
+        self._review_advance()
 
     def zoom_to_selection(self):
         """Center + zoom the viewport on the selected annotation (Z)."""
@@ -2285,6 +2386,16 @@ class ToolController:
                 if self.ctrl._seg_edit_mode == 'select':
                     return False
                 etype = event.type()
+                # Ctrl+wheel over the canvas = brush size (paint/erase
+                # modes only — plain wheel keeps zooming the view).
+                if etype == QEvent.Type.GraphicsSceneWheel:
+                    if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                        step = 1 if event.delta() > 0 else -1
+                        s = self.ctrl.window.slider_brush_size
+                        s.setValue(s.value() + step)
+                        event.accept()
+                        return True
+                    return False
                 if etype == QEvent.Type.GraphicsSceneMousePress:
                     if event.button() == Qt.MouseButton.LeftButton:
                         # Snapshot the active anno's class layer before the
@@ -4054,10 +4165,13 @@ class ToolController:
         self._apply_sam_box_result(anno, mask)
 
     def _escape_pressed(self):
-        """Esc: discard a pending SAM preview first; otherwise switch
-        back to select mode (the original binding)."""
+        """Esc: discard a pending SAM preview first, then exit review
+        mode, then fall back to select mode (the original binding)."""
         if self._sam_preview is not None:
             self._cancel_sam_preview()
+            return
+        if getattr(self, '_review_mode', False):
+            self._exit_review_mode("Review mode off")
             return
         self._set_seg_mode('select')
 
