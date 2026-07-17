@@ -89,6 +89,15 @@ class FilesPanel(QWidget):
         btn_next = QPushButton("Next ▶")
         btn_next.setToolTip("Open the first unfinished queue entry")
         btn_next.clicked.connect(self.open_next_unfinished)
+        btn_rank = QPushButton("⇅ Rank")
+        btn_rank.setToolTip(
+            "OPTIONAL: run the SAM model on sample frames of every queued\n"
+            "stack and sort the queue by how much the model disagrees with\n"
+            "your saved masks — most disagreement first, so annotation\n"
+            "effort goes where the model is weakest. Slow (a few seconds\n"
+            "per stack, model inference). Details: USAGE.md → 'Ranking\n"
+            "the queue'.")
+        btn_rank.clicked.connect(self._rank_queue)
         btn_refresh = QPushButton("↻")
         btn_refresh.setFixedWidth(28)
         btn_refresh.setToolTip("Refresh statuses")
@@ -96,6 +105,7 @@ class FilesPanel(QWidget):
         q_btns = QHBoxLayout()
         q_btns.addWidget(btn_add_current)
         q_btns.addWidget(btn_next)
+        q_btns.addWidget(btn_rank)
         q_btns.addStretch(1)
         q_btns.addWidget(btn_refresh)
 
@@ -211,10 +221,36 @@ class FilesPanel(QWidget):
                                     os.path.abspath(current)) else ''
             item = QListWidgetItem(f"{glyph}  {name}{marker}")
             item.setData(Qt.ItemDataRole.UserRole, p)
-            item.setToolTip(f"{p}\n{text}")
+            tip = f"{p}\n{text}"
+            score = self._score_for(p)
+            if score is not None:
+                tip += f"\nmodel disagreement: {score:.2f}"
+            item.setToolTip(tip)
             if not os.path.isfile(p):
                 item.setText(f"✗  {name}  (missing)")
             self.queue_list.addItem(item)
+
+    def _rank_queue(self):
+        """Optional model-disagreement ordering — see USAGE.md."""
+        paths = [p for p in self.queue_paths() if os.path.isfile(p)]
+        if not paths:
+            return
+        scores = self.ctrl.rank_queue_by_disagreement(paths)
+        if not scores:
+            return
+        QSettings().setValue(
+            'queue/scores', {p: float(s) for p, s in scores.items()})
+        ordered = sorted(self.queue_paths(),
+                         key=lambda p: -scores.get(p, -1.0))
+        self._save_queue(ordered)
+
+    def _score_for(self, path):
+        raw = QSettings().value('queue/scores', {}) or {}
+        try:
+            v = raw.get(path)
+            return float(v) if v is not None else None
+        except (TypeError, ValueError, AttributeError):
+            return None
 
     def _on_queue_double_click(self, item):
         p = item.data(Qt.ItemDataRole.UserRole)

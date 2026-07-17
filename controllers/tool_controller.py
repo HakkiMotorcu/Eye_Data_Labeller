@@ -1452,12 +1452,26 @@ class ToolController:
             ]),
             ("Navigation & view", [
                 ("← / →", "Prev / next frame"), ("Home / End", "First / last"),
+                ("Ctrl+← / Ctrl+→", "Prev / next unannotated frame"),
                 ("R", "Reset zoom"), ("Z", "Zoom to selection"),
+                ("O", "Onion skin (prev frame outlines)"),
+                ("Ctrl+wheel", "Brush size (paint/erase modes)"),
+            ]),
+            ("SAM preview", [
+                ("B", "Show SAM's mask as a preview"),
+                ("Enter / B", "Accept the preview"),
+                ("Esc", "Discard the preview"),
+            ]),
+            ("Review mode", [
+                ("Ctrl+R", "Enter / leave review mode"),
+                ("Space", "Accept (lock) + next"),
+                ("Esc", "Exit review mode"),
             ]),
             ("File", [
                 ("Ctrl+O", "Open image/video"), ("Ctrl+S", "Save project"),
                 ("Ctrl+I", "Import annotations"),
                 ("Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y", "Undo / redo"),
+                ("Ctrl+Q", "Quit"),
             ]),
         ]
         rows = []
@@ -1608,6 +1622,82 @@ class ToolController:
         QMessageBox.information(
             self.window, "Export Bundle",
             f"Exported to {out_dir}:\n{lines}")
+
+    @log_action('action')
+    def rank_queue_by_disagreement(self, paths):
+        """OPTIONAL, model-heavy: score each queued stack by how much
+        SAM disagrees with its saved human masks; higher = more worth
+        a human's attention. See USAGE.md ("Ranking the queue").
+
+        Per stack, three sampled frames (first/middle/last) are run
+        through SAM auto-segmentation. With saved cell masks:
+        score = 1 - IoU(human foreground, SAM foreground). Without:
+        score = min(1, detections/20) — unlabeled-but-busy ranks high.
+        Returns {path: score in [0, 1]} for the stacks scored before
+        cancel/error.
+        """
+        if not SamService.available():
+            QMessageBox.information(
+                self.window, "Rank Queue", "micro_sam is not installed.")
+            return {}
+        svc = self.sam_service
+        if svc.checkpoint_path and not os.path.exists(svc.checkpoint_path):
+            try:
+                svc.ensure_checkpoint_ready(self.window)
+            except FileNotFoundError:
+                return {}
+        self._stop_embed_worker(timeout_ms=5000)
+
+        from core.frame_source import load_frame_source
+        from core import mask_io
+        from PyQt6.QtWidgets import QProgressDialog, QApplication
+        dlg = QProgressDialog(
+            "Scoring queue with SAM…", "Cancel", 0, len(paths), self.window)
+        dlg.setWindowTitle("Rank queue by model disagreement")
+        dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dlg.setMinimumDuration(0)
+
+        scores = {}
+        for k, p in enumerate(paths):
+            dlg.setValue(k)
+            dlg.setLabelText(f"Scoring {os.path.basename(p)} …")
+            QApplication.processEvents()
+            if dlg.wasCanceled():
+                break
+            try:
+                src = load_frame_source(p)
+                out = self._resolve_out_folder(p)
+                human = None
+                if out and os.path.isdir(out):
+                    layers = mask_io.load_multiclass_from_folder(out)
+                    human = layers.get('cell') if layers else None
+                n = src.num_frames
+                fscores = []
+                for fi in sorted({0, n // 2, max(0, n - 1)}):
+                    labels = svc.auto_segment(src.get_frame(fi))
+                    pred = labels > 0
+                    if (human is not None and fi < human.shape[0]
+                            and human[fi].any()):
+                        hum = human[fi] > 0
+                        if hum.shape != pred.shape:
+                            import cv2
+                            hum = cv2.resize(
+                                hum.astype(np.uint8),
+                                (pred.shape[1], pred.shape[0]),
+                                interpolation=cv2.INTER_NEAREST) > 0
+                        inter = np.count_nonzero(hum & pred)
+                        union = np.count_nonzero(hum | pred)
+                        fscores.append(1.0 - (inter / union if union else 0.0))
+                    else:
+                        n_obj = int(np.unique(labels).size) - 1
+                        fscores.append(min(1.0, n_obj / 20.0))
+                scores[p] = float(np.mean(fscores)) if fscores else 0.0
+                log('controller.rank', 'scored', path=p, score=scores[p])
+            except Exception as e:
+                log_error('controller.rank', 'scoring failed', exc=e, path=p)
+                continue
+        dlg.close()
+        return scores
 
     # ------------------------------------------------------------------
     # REVIEW MODE — walk every unlocked annotation, accept or fix

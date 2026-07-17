@@ -4,18 +4,78 @@
 
 1. **Launch** — double-click the Desktop launcher (or `python main.py`).
 2. **Pick a file** — first dialog asks for a TIFF or AVI image stack.
+   After that you never need to relaunch: `Ctrl+O`, drag-and-drop a
+   file onto the window, **File → Open Recent**, or the **Files
+   sidebar** (below) all open a new stack in place.
 3. **Annotate** — click on a frame to place a cell, drag corners to
    resize the bbox. Add vessels / capillaries with their dedicated
    buttons (or `V` / `C`).
 4. **Segment** — switch to **paint** mode (`D`) to draw inside the
-   bbox, or use **SAM Box** (`B`) to auto-fill the box from the
-   fine-tuned SAM model.
+   bbox, or use **SAM Box** (`B`). SAM's mask appears first as a cyan
+   **preview** — press `Enter` (or `B` again) to accept it, `Esc` to
+   throw it away. Nothing touches your data until you accept.
 5. **Lock + advance** — when an annotation is final, `Ctrl+L` locks
    it (read-only, won't be deleted) and moves to the next.
 6. **Navigate frames** — `→` / `←` for one frame at a time,
-   `Home` / `End` for first / last.
+   `Home` / `End` for first / last, `Ctrl+→` / `Ctrl+←` to jump to
+   the next / previous frame with no annotations. The tick bar above
+   the timeline shows which frames carry work.
 7. **Save** — `Ctrl+S` writes the segmentation map. Auto-save runs in
    the background every 30 sec (configurable in I/O Settings).
+
+## Working through many files — the Files sidebar
+
+**View → Files Sidebar** (on by default) has two halves:
+
+- **Browser** (top): pick a root folder; only supported stacks are
+  shown. Double-click opens a file; right-click → *Add to queue*.
+- **Session queue** (bottom): your curated worklist. Each entry shows
+  its state — `●` saved masks exist, `◐` autosave only, `○` untouched.
+  **Next ▶** opens the first unfinished entry; double-click opens any;
+  right-click removes entries or clears finished ones. The queue and
+  statuses persist across launches.
+
+### Ranking the queue (optional, model-heavy)
+
+The **⇅ Rank** button reorders the queue by *model disagreement*: for
+each stack, SAM auto-segmentation runs on three sampled frames
+(first / middle / last) and the result is compared with your saved
+cell masks — score `1 − IoU` when labels exist, or a busyness score
+(`detections / 20`, capped at 1) for unlabeled stacks. Highest
+disagreement sorts first, so your annotation effort goes where the
+model is weakest (this is a simple form of active learning).
+
+Costs and caveats — this is why it's a button, not automatic:
+
+- Each stack is loaded and run through the model — expect a few
+  seconds per stack on GPU/MPS, more on CPU. A progress dialog lets
+  you cancel; already-scored stacks keep their scores.
+- Scores are stored and shown in each entry's tooltip
+  (`model disagreement: 0.42`); re-rank whenever your labels change.
+- Scoring uses the *cell* class only, and the first/middle/last
+  sample — it's a prioritization heuristic, not a metric.
+
+## Review mode
+
+**View → Review Mode** (`Ctrl+R`) walks every *unlocked* annotation
+in frame order: each one is selected and zoomed to, the status bar
+shows `REVIEW k/N`. Press `Space` to accept it (locks it — undoable)
+and jump to the next; fix things with any normal tool in between;
+`Esc` exits. When the counter completes, everything is locked and the
+stack is review-clean.
+
+## Checking against the previous frame
+
+**View → Onion Skin** (`O`) draws faint outlines of the previous
+frame's masks under the current frame — tracking drift and missed
+cells show up immediately while you scrub.
+
+## Sharing results — Export Bundle
+
+**File → Export Bundle** writes `<out folder>/export/` containing
+mask TIF snapshots, `Overlay.mp4` (annotations burned into the video
+— anyone can scrub it without installing anything), and `Summary.csv`
+(one row per instance per frame: class, name, pixel area, bbox).
 
 ## Keyboard shortcuts
 
@@ -51,8 +111,10 @@
 | `E` | Erase mode |
 | `Shift+E` | Clear seg mask of selected |
 | `F` | Fill the entire bbox |
-| `B` | **SAM Box prompt** — auto-segment the bbox |
+| `B` | **SAM Box prompt** — preview the mask (again/`Enter` accepts, `Esc` discards) |
 | `X` | Toggle force-paint (paint outside bbox) |
+| `S` | Toggle segmentation overlay |
+| `Ctrl+wheel` | Brush size (in paint / erase modes) |
 | `Ctrl+P` | Propagate vein mask across frames |
 
 ### Frame navigation
@@ -62,21 +124,35 @@
 | `←` / `→` | Previous / next frame |
 | `Home` | First frame |
 | `End` | Last frame |
+| `Ctrl+←` / `Ctrl+→` | Previous / next **unannotated** frame |
 
 ### View
 
 | Key | Action |
 | --- | --- |
 | `R` | Reset zoom |
+| `Z` | Zoom to selected annotation |
+| `O` | Onion skin (previous frame's outlines) |
+
+### Review mode
+
+| Key | Action |
+| --- | --- |
+| `Ctrl+R` | Enter / leave review mode |
+| `Space` | Accept (lock) current + advance |
+| `Esc` | Exit review mode |
 
 ### File
 
 | Key | Action |
 | --- | --- |
+| `Ctrl+O` | Open image / video in place |
 | `Ctrl+S` | Save segmentation map |
 | `Ctrl+I` | Import / load annotations |
 | `Ctrl+Z` | Undo |
-| `Ctrl+Shift+Z` | Redo |
+| `Ctrl+Shift+Z` / `Ctrl+Y` | Redo |
+| `Ctrl+Q` | Quit |
+| `F1` | Keyboard shortcut reference (in-app) |
 
 ## Toolbar (left panel)
 
