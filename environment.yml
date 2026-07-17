@@ -17,10 +17,21 @@
 #   python main.py
 
 name: eye-labeller
+# PINNED ENVIRONMENT — versions are exact on purpose.
+#
+# July 2026: three days of CI archaeology traced every broken build to
+# the same root cause — this file used to float (>= constraints), so
+# each fresh solve could deliver different package layouts (cv2 flat
+# vs subdir, mixed Qt runtimes, pillow/libtiff mismatches). Pinning
+# ends that class of failure.
+#
+# To upgrade deliberately: bump the pin(s) in a branch, let CI's
+# smoke tests validate all three OSes, merge when green. Never loosen
+# back to >= ranges.
 channels:
   - conda-forge
 dependencies:
-  - python >=3.10,<3.13
+  - python =3.12.13
   # git is needed at env-create time: the pip section installs MobileSAM
   # from a git+https URL, and pip shells out to `git`. Windows machines
   # (GitHub Desktop installs, ZIP downloads) often have no git on PATH,
@@ -52,16 +63,16 @@ dependencies:
   # pytorch build on arm64 — there is no CUDA on Mac, so cpu* and
   # the default build are the same package. Mac users get MPS for
   # free with this pin; no install-script swap needed.
-  - pytorch >=2.5=cpu*
-  - torchvision
+  - pytorch =2.10.0=cpu*
+  - torchvision =0.26.0
   - segment-anything
-  - torch_em >=0.8
+  - torch_em =0.8.3
   - timm
   - tqdm
   - pooch
   - python-elf >=0.7.1
   - python-xxhash
-  - zarr
+  - zarr =3.2.1
   - xarray
   - nifty >=1.2.3
   - imagecodecs
@@ -70,10 +81,10 @@ dependencies:
   # NOTE: napari and `pyqt` (= PyQt5) intentionally omitted — the labeller
   # is PyQt6-native. Trackastra powers the default tracker; add it back
   # here once Phase 4-tracking lands.
-  - trackastra >=0.5.3
+  - trackastra =0.5.3
 
   # ---- Eye Data Labeller core deps ----
-  - tifffile
+  - tifffile =2026.5.15
   - imageio
   - scikit-image
   # NOTE: we don't list `opencv` here, but it WILL still end up in the
@@ -89,25 +100,25 @@ dependencies:
   # micro-sam from conda-forge — cross-platform, no local clone needed.
   # (If you want the editable local clone for hacking on micro-sam,
   #  comment this line out and add `-e <your-local-path>` under pip:.)
-  - micro_sam
-
+  - micro_sam =1.7.7
+  - numpy =2.4.6
   - pip
   - pip:
       # PyQt6 stack — installed via pip because conda-forge ships only PyQt5
-      - PyQt6
-      - pyqtgraph
-      - qtawesome
+      - PyQt6==6.11.0
+      - pyqtgraph==0.14.0
+      - qtawesome==1.4.2
       # -fork variant: upstream pyqtdarktheme declares python <3.12, so
       # on 3.12 envs pip silently fell back to the ancient 0.1.7
       # release. The fork supports current Python and keeps the same
       # `import qdarktheme` module name.
-      - pyqtdarktheme-fork
+      - pyqtdarktheme-fork==2.3.6
       # opencv-python-headless — we DO list it here explicitly. Earlier
       # versions of this file relied on micro_sam pulling opencv in
       # transitively, but that proved inconsistent (worked on GH Linux
       # runner, failed on local Mac install). Headless variant has no
       # GTK/Qt GUI built-in; cv2 GUI features aren't used (we have
       # PyQt6) and would conflict with our Qt bindings.
-      - opencv-python-headless
+      - opencv-python-headless==4.13.0.92
       # MobileSAM (vit_t support) — same as upstream micro-sam env
       - git+https://github.com/ChaoningZhang/MobileSAM.git
