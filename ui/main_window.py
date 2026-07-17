@@ -2077,13 +2077,22 @@ class MainWindow(QMainWindow):
                 rgba = np.zeros((*mask.shape, 4), dtype=np.uint8)
             ids = np.unique(mask)
             ids = ids[ids != 0]
+            if ids.size == 0:
+                continue
             hidden_ids = hidden_by_class[ct]
             inst_colors = self.seg_data.get_colors(ct)
             anno_state = anno_state_by_class[ct]
+            # Colour via a lookup table indexed by instance id: per id
+            # we write ONE 4-byte LUT row, then colour the whole layer
+            # in a single vectorized gather. The previous per-id
+            # `mask == iid` approach was a full-image pass per instance
+            # — O(instances × pixels) on the hottest redraw path (every
+            # brush move, frame change, selection). This is O(pixels).
+            lut = np.zeros((int(ids.max()) + 1, 4), dtype=np.uint8)
             for iid in ids:
                 iid_int = int(iid)
                 if iid_int in hidden_ids:
-                    continue
+                    continue  # LUT row stays alpha=0 -> not painted
                 if status_mode and ct == 'cell':
                     state = anno_state.get(iid_int, 'unlocked')
                     color = status_colors[state]
@@ -2092,13 +2101,14 @@ class MainWindow(QMainWindow):
                         color = inst_colors[iid_int]
                     else:
                         color = self._SEG_COLORS[(iid_int - 1) % len(self._SEG_COLORS)]
-                region = (mask == iid)
-                # Overwrite — later layers in `order` paint on top of
-                # earlier ones, giving the configured z-order.
-                rgba[region, 0] = color[0]
-                rgba[region, 1] = color[1]
-                rgba[region, 2] = color[2]
-                rgba[region, 3] = alpha_byte
+                lut[iid_int] = (color[0], color[1], color[2], alpha_byte)
+            layer_rgba = lut[mask]
+            # Overwrite only where this layer has a VISIBLE pixel —
+            # later layers in `order` paint on top of earlier ones
+            # (configured z-order), and hidden/background pixels must
+            # not punch holes into lower layers.
+            vis = layer_rgba[..., 3] != 0
+            rgba[vis] = layer_rgba[vis]
 
         if rgba is None:
             self._seg_overlay.clear()
