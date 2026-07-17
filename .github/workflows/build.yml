@@ -156,6 +156,35 @@ jobs:
                       print('   ', q)
           PY
 
+      # Same conda/pip duplication disease as cv2, different organ:
+      # conda's pillow links conda's libtiff/libjpeg, and inside a
+      # PyInstaller bundle that pairing broke ('undefined symbol:
+      # jpeg12_write_raw_data'). pip's pillow wheel is self-contained
+      # (bundles its own image libs under PIL.libs with $ORIGIN
+      # rpaths), which survives bundling on every OS.
+      - name: Force self-contained pip pillow
+        shell: bash -el {0}
+        run: |
+          pip install --force-reinstall --no-deps pillow
+
+      # Windows: 'DLL load failed while importing QtWidgets: The
+      # specified procedure could not be found' = mixed Qt6 runtimes.
+      # Strip any conda-delivered Qt and reinstall the matched pip
+      # PyQt6 trio; print the Qt inventory first as ground truth.
+      - name: Force single Qt runtime on Windows (pip PyQt6)
+        if: runner.os == 'Windows'
+        shell: bash -el {0}
+        run: |
+          echo "--- Qt-ish packages before cleanup ---"
+          micromamba list -n eye-labeller 2>/dev/null | grep -iE "qt|pyside" || true
+          pip list 2>/dev/null | grep -iE "qt|pyside" || true
+          ls "$MAMBA_ROOT_PREFIX/envs/eye-labeller/Library/bin" 2>/dev/null | grep -iE "^qt6" | head -10 || true
+          micromamba remove -n eye-labeller -y --force \
+            qt6-main qt6-base qt-main pyside6 pyqt pyqt6 2>/dev/null || true
+          pip uninstall -y PySide6 PySide6-Essentials PySide6-Addons \
+            shiboken6 2>/dev/null || true
+          pip install --force-reinstall --no-deps PyQt6 PyQt6-Qt6 PyQt6-sip
+
       - name: Patch cv2 config files to use bundle-safe relative paths
         shell: bash -el {0}
         run: |

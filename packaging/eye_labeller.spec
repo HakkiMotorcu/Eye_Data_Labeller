@@ -129,7 +129,15 @@ for pkg in ("torch", "torchvision", "micro_sam", "trackastra",
 # at runtime is dead code for us.
 excludes = [
     "PyQt5", "PySide2", "PySide6",
-    "matplotlib.tests", "scipy.tests",
+    # matplotlib: the app never imports it — it only sneaks in because
+    # pyqtgraph's colormap menu lazily loads it WHEN PRESENT. Bundled,
+    # it dragged in a conda libtiff whose 12-bit libjpeg symbols were
+    # missing at runtime ('undefined symbol: jpeg12_write_raw_data'),
+    # crashing ImageView construction. Excluded, pyqtgraph cleanly
+    # skips matplotlib colormaps (the app's get_colormap already
+    # guards its optional matplotlib fallback), and the bundle loses
+    # ~60 MB of dead weight.
+    "matplotlib", "matplotlib.tests", "scipy.tests",
     "tornado", "notebook", "jupyter", "jupyterlab",
     "IPython", "pytest",
 ]
