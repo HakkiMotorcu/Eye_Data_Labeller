@@ -588,6 +588,11 @@ class ToolController:
                 "SAM preview discarded — the frame changed underneath it.")
         # Undo/redo and every command change annotation coverage.
         self._refresh_timeline_markers()
+        # Cross-frame edits (propagate, multi-frame delete, undo,
+        # tracking) can change the PREVIOUS frame's masks — keep the
+        # onion outline honest. No-op unless onion skin is enabled.
+        if getattr(self.window, '_onion_skin', False):
+            self.window._update_onion_skin()
         self._refresh_save_status()
 
     def _anywhere_ids_for(self, class_type):
@@ -1611,9 +1616,14 @@ class ToolController:
                 self.window, "Export failed",
                 f"{type(e).__name__}: {e}")
             return
+        # Capture cancel state BEFORE touching the dialog: setValue(max)
+        # auto-resets the flag to False, and close() re-emits canceled()
+        # setting it to True — reading it afterwards is meaningless in
+        # both directions (verified empirically against Qt 6.11).
+        cancelled = dlg.wasCanceled()
         dlg.setValue(vd.num_frames)
         dlg.close()
-        if dlg.wasCanceled():
+        if cancelled:
             QMessageBox.information(
                 self.window, "Export Bundle",
                 "Export cancelled — video removed, other files kept.")
@@ -1646,6 +1656,12 @@ class ToolController:
                 svc.ensure_checkpoint_ready(self.window)
             except FileNotFoundError:
                 return {}
+        # Own the predictor for the whole rank: the flag stops
+        # queued finished_ok/error signals (delivered by the
+        # processEvents below) from restarting a background embed
+        # worker while auto_segment runs here on the main thread —
+        # the predictor is not thread-safe.
+        self._predictor_busy = True
         self._stop_embed_worker(timeout_ms=5000)
 
         from core.frame_source import load_frame_source
@@ -1658,7 +1674,8 @@ class ToolController:
         dlg.setMinimumDuration(0)
 
         scores = {}
-        for k, p in enumerate(paths):
+        try:
+          for k, p in enumerate(paths):
             dlg.setValue(k)
             dlg.setLabelText(f"Scoring {os.path.basename(p)} …")
             QApplication.processEvents()
@@ -1696,7 +1713,9 @@ class ToolController:
             except Exception as e:
                 log_error('controller.rank', 'scoring failed', exc=e, path=p)
                 continue
-        dlg.close()
+        finally:
+            dlg.close()
+            self._predictor_busy = False
         return scores
 
     # ------------------------------------------------------------------
@@ -1761,10 +1780,17 @@ class ToolController:
         """Space in review mode: lock the current annotation, advance."""
         if not getattr(self, '_review_mode', False):
             return
-        from PyQt6.QtWidgets import QApplication, QLineEdit, QAbstractSpinBox
+        from PyQt6.QtWidgets import (
+            QApplication, QLineEdit, QAbstractSpinBox, QAbstractButton,
+            QComboBox)
         fw = QApplication.focusWidget()
         if isinstance(fw, (QLineEdit, QAbstractSpinBox)):
             fw.clearFocus()  # commit the edit; Space stays review-free
+            return
+        if isinstance(fw, (QAbstractButton, QComboBox)):
+            # Space normally activates a focused control — don't
+            # hijack it into a silent lock; just release the focus.
+            fw.clearFocus()
             return
         if 0 <= self._review_pos < len(self._review_queue):
             anno = self._review_queue[self._review_pos]
@@ -3261,6 +3287,8 @@ class ToolController:
             return
         if getattr(self, '_shutting_down', False):
             return  # window is closing — no new background work
+        if getattr(self, '_predictor_busy', False):
+            return  # main thread owns the predictor (rank/box prompt)
         if self.window.video_data is None or self.window._current_file is None:
             return
         # Resolve a missing best.pt HERE, on the GUI thread, before the
@@ -5040,8 +5068,10 @@ class ToolController:
 
     def _clear_all_annotations(self):
         # Shared "session is gone" hook — every teardown path funnels
-        # here, so preview + marker cleanup belong here too.
+        # here, so preview / review / marker cleanup belong here too.
         self._cancel_sam_preview(quiet=True)
+        if getattr(self, '_review_mode', False):
+            self._exit_review_mode("Review cancelled — session changed")
         for anno in self.annotations:
             anno.delete_ui()
         self.annotations.clear()

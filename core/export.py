@@ -75,6 +75,10 @@ def write_bundle(seg, names, out_dir, get_frame, num_frames,
         video_path = os.path.join(out_dir, 'Overlay.avi')
         writer = cv2.VideoWriter(
             video_path, cv2.VideoWriter_fourcc(*'MJPG'), float(fps), (vw, vh))
+        if not writer.isOpened():
+            raise IOError(
+                "No usable video encoder (tried mp4v and MJPG) — "
+                "overlay video cannot be written on this OpenCV build.")
     aborted = False
     try:
         for i in range(num_frames):

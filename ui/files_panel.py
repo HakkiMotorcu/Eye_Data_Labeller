@@ -238,10 +238,19 @@ class FilesPanel(QWidget):
         scores = self.ctrl.rank_queue_by_disagreement(paths)
         if not scores:
             return
-        QSettings().setValue(
-            'queue/scores', {p: float(s) for p, s in scores.items()})
+        # MERGE with stored scores — a cancelled re-rank must not wipe
+        # earlier results (USAGE.md promises scored stacks keep them).
+        merged = {}
+        raw = QSettings().value('queue/scores', {}) or {}
+        try:
+            for k, v in dict(raw).items():
+                merged[str(k)] = float(v)
+        except (TypeError, ValueError):
+            pass
+        merged.update({p: float(s) for p, s in scores.items()})
+        QSettings().setValue('queue/scores', merged)
         ordered = sorted(self.queue_paths(),
-                         key=lambda p: -scores.get(p, -1.0))
+                         key=lambda p: -merged.get(p, -1.0))
         self._save_queue(ordered)
 
     def _score_for(self, path):

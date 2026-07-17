@@ -86,6 +86,13 @@ class EmbeddingPrecomputeWorker(QThread):
                 return
             self.frame_done.emit(int(frame_idx))
             self.progress.emit(i + 1, total)
+        if self._stop_requested:
+            # A stop that landed mid-final-frame must NOT look like a
+            # normal completion: finished_ok triggers drain/prefetch on
+            # the main thread, which could restart a worker while the
+            # stopper (e.g. queue ranking) is using the predictor.
+            log('embed_worker', 'stopped at completion boundary')
+            return
         self.finished_ok.emit()
 
 
