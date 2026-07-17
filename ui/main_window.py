@@ -47,6 +47,39 @@ import numpy as np
 import os
 
 
+class TimelineMarkerBar(QWidget):
+    """Thin bar over the frame slider: one tick per annotated frame,
+    so coverage (and gaps) are visible at a glance during review."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(7)
+        self._frames = set()
+        self._num = 1
+        self.setToolTip("Annotated frames · Ctrl+→ / Ctrl+← jumps to "
+                        "the next / previous unannotated frame")
+
+    def set_data(self, frames, num_frames):
+        self._frames = set(int(f) for f in frames)
+        self._num = max(1, int(num_frames))
+        self.update()
+
+    def paintEvent(self, event):
+        from PyQt6.QtGui import QPainter, QPen, QColor
+        p = QPainter(self)
+        w, h = self.width(), self.height()
+        p.setPen(QPen(QColor(70, 70, 80), 1))
+        p.drawLine(0, h - 1, w, h - 1)
+        if self._num > 1 and self._frames:
+            pen = QPen(QColor(110, 180, 235), 2)
+            p.setPen(pen)
+            span = max(1, self._num - 1)
+            for f in self._frames:
+                x = 1 + int(f / span * (w - 3))
+                p.drawLine(x, 0, x, h - 2)
+        p.end()
+
+
 class FilterSection(QWidget):
     """Collapsible section used in the View panel.
 
@@ -1225,9 +1258,18 @@ class MainWindow(QMainWindow):
         self.lbl_total_frames = QLabel("/ 0")
         self.lbl_total_frames.setStyleSheet("color: #888; font-family: monospace;")
 
+        # Marker bar above the slider: one tick per annotated frame,
+        # so "where is my work / what's left" is visible at a glance.
+        self.timeline_markers = TimelineMarkerBar()
+        slider_col = QVBoxLayout()
+        slider_col.setSpacing(1)
+        slider_col.setContentsMargins(0, 0, 0, 0)
+        slider_col.addWidget(self.timeline_markers)
+        slider_col.addWidget(self.slider_timeline)
+
         timeline_layout.addWidget(self.btn_frame_first)
         timeline_layout.addWidget(self.btn_frame_prev)
-        timeline_layout.addWidget(self.slider_timeline, stretch=1)
+        timeline_layout.addLayout(slider_col, stretch=1)
         timeline_layout.addWidget(self.btn_frame_next)
         timeline_layout.addWidget(self.btn_frame_last)
         timeline_layout.addWidget(self.spin_frame)

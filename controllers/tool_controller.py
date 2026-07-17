@@ -252,6 +252,21 @@ class ToolController:
             lambda _checked: self._update_mode_chip())
         self._update_mode_chip()
 
+        # Right-click context menu on the annotation list (USAGE.md
+        # promised this long before it existed).
+        lst = self.window.list_annotations
+        lst.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        lst.customContextMenuRequested.connect(self._list_context_menu)
+
+        # Timeline coverage markers — first real subscriber of the
+        # annotations_changed bus signal.
+        self.state.annotations_changed.connect(self._refresh_timeline_markers)
+        self._refresh_timeline_markers()
+        QShortcut(QKeySequence("Ctrl+Right"), self.window,
+                  lambda: self._jump_unannotated(+1))
+        QShortcut(QKeySequence("Ctrl+Left"), self.window,
+                  lambda: self._jump_unannotated(-1))
+
         # Auto-save timer (every 60 seconds)
         self._autosave_path = None
         self._autosave_timer = QTimer()
@@ -1314,6 +1329,26 @@ class ToolController:
         act.triggered.connect(self._on_toggle_seg)
         m_view.addAction(act)
 
+        # Files sidebar (browser + session queue), toggleable from View.
+        from PyQt6.QtWidgets import QDockWidget
+        from PyQt6.QtCore import QSettings
+        from ui.files_panel import FilesPanel
+        self._files_panel = FilesPanel(self)
+        dock = QDockWidget("Files", self.window)
+        dock.setObjectName("files_dock")
+        dock.setWidget(self._files_panel)
+        self.window.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
+        toggle = dock.toggleViewAction()
+        toggle.setText("&Files Sidebar")
+        m_view.addSeparator()
+        m_view.addAction(toggle)
+        visible = str(QSettings().value(
+            'ui/files_dock_visible', True)).lower() in ('1', 'true')
+        dock.setVisible(visible)
+        dock.visibilityChanged.connect(
+            lambda v: QSettings().setValue('ui/files_dock_visible', bool(v)))
+        self._files_dock = dock
+
         m_help = mb.addMenu("&Help")
         act = QAction("&Keyboard Shortcuts", self.window)
         act.setShortcut(QKeySequence("F1"))
@@ -1414,6 +1449,53 @@ class ToolController:
         else:
             lbl.setText("MODE: SELECT")
             lbl.setStyleSheet(base + "color: #8fb3d9;")
+
+    def _list_context_menu(self, pos):
+        """Right-click on an annotation row: quick per-row actions."""
+        from PyQt6.QtWidgets import QMenu
+        lst = self.window.list_annotations
+        item = lst.itemAt(pos)
+        anno = self._item_anno(item)
+        if anno is None or anno not in self.annotations:
+            return
+        self.select_annotation(anno)
+        menu = QMenu(self.window)
+        menu.addAction("Rename", self._start_rename)
+        menu.addAction("Zoom to", self.zoom_to_selection)
+        if anno.is_locked:
+            menu.addAction("Unlock", self.unlock_active)
+        else:
+            menu.addAction("Lock", self.lock_active)
+        hidden = getattr(anno, 'is_hidden', False)
+        menu.addAction("Show" if hidden else "Hide",
+                       lambda: self._on_list_item_clicked(item, 3))
+        menu.addSeparator()
+        menu.addAction("Delete", self.delete_selected)
+        menu.exec(lst.viewport().mapToGlobal(pos))
+
+    def _refresh_timeline_markers(self):
+        bar = getattr(self.window, 'timeline_markers', None)
+        if bar is None or self.window.video_data is None:
+            return
+        bar.set_data({a.frame_idx for a in self.annotations},
+                     self.window.video_data.num_frames)
+
+    def _jump_unannotated(self, direction):
+        """Ctrl+→ / Ctrl+← — jump to the next/prev frame with no
+        annotations. Review-pass companion to lock-and-advance."""
+        vd = self.window.video_data
+        if vd is None:
+            return
+        annotated = {a.frame_idx for a in self.annotations}
+        cur = self.window._current_frame_idx
+        rng = (range(cur + 1, vd.num_frames) if direction > 0
+               else range(cur - 1, -1, -1))
+        for fi in rng:
+            if fi not in annotated:
+                self.window.slider_timeline.setValue(fi)
+                return
+        self.window.lbl_stats.setText(
+            "No unannotated frames in that direction")
 
     def zoom_to_selection(self):
         """Center + zoom the viewport on the selected annotation (Z)."""
@@ -1517,6 +1599,9 @@ class ToolController:
         w._update_title()
         self._add_recent_file(path)
         self.state.image_loaded.emit(int(data.num_frames))
+        panel = getattr(self, '_files_panel', None)
+        if panel is not None:
+            panel.refresh()
         # Resume prompt + first-frame embedding, exactly like startup.
         self.on_image_loaded()
         return True
@@ -2408,6 +2493,9 @@ class ToolController:
         # Mark the seg layers as clean so the smart autosave knows it
         # doesn't need to re-flush masks until something changes again.
         self._mark_seg_clean()
+        panel = getattr(self, '_files_panel', None)
+        if panel is not None:
+            panel.refresh()  # queue status glyphs reflect the new save
 
         if not written:
             extra = ""
@@ -2980,6 +3068,30 @@ class ToolController:
         self._close_embed_dialog()
         self._refresh_sam_status_brief()
         self._drain_pending_embed()
+        self._maybe_prefetch_next()
+
+    def _maybe_prefetch_next(self):
+        """Silently precompute the NEXT frame's embedding while the
+        user works on this one — exactly one frame ahead (each prefetch
+        re-checks and stops once current+1 is cached), so lock-and-
+        advance always lands on a warm cache."""
+        if getattr(self, '_shutting_down', False):
+            return
+        w = self._embed_worker
+        if w is not None and w.isRunning():
+            return
+        if self.window.video_data is None or self.window._current_file is None:
+            return
+        svc = self.sam_service
+        if svc.checkpoint_path and not os.path.exists(svc.checkpoint_path):
+            return  # no model resolved — never prompt from a prefetch
+        fi = self.window._current_frame_idx + 1
+        if fi >= self.window.video_data.num_frames:
+            return
+        if svc.has_cached_embedding(self.window._current_file, fi):
+            return
+        self._start_embed_worker([fi], label=f"frame {fi} (prefetch)",
+                                 interactive=False)
 
     def _drain_pending_embed(self):
         """If a frame was requested while the worker was busy, start it now."""
