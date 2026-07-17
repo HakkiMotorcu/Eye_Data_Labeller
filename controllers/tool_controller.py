@@ -361,6 +361,17 @@ class ToolController:
                 layer = seg.get_layer(ct)
                 if layer is not None and frame_idx < layer.shape[0]:
                     ids_here[ct] = set(np.unique(layer[frame_idx]).tolist())
+        # Quality flags (Settings > Annotation): frame median cell area
+        # computed once per rebuild via one bincount pass.
+        qf = getattr(self, '_qf', None) or self._reload_quality_settings()
+        med_area = None
+        if qf['enabled'] and qf['area'] and seg is not None:
+            cell_layer = seg.get_layer('cell')
+            if cell_layer is not None and frame_idx < cell_layer.shape[0]:
+                counts = np.bincount(cell_layer[frame_idx].ravel())
+                inst = counts[1:][counts[1:] > 0]
+                if inst.size >= 3:
+                    med_area = float(np.median(inst))
         for anno in self.annotations:
             if anno.frame_idx == frame_idx:
                 # Hidden / class-filtered annotations still get their ROI
@@ -394,10 +405,19 @@ class ToolController:
                             continue  # phantom on this frame
                 visible_annos.append(anno)
                 cls = class_labels.get(anno.class_type, anno.class_type)
+                reasons = ()
+                if (qf['enabled'] and not anno.is_paint_only
+                        and anno.instance_id is not None and seg is not None):
+                    reasons = self._quality_reasons(
+                        anno, seg, frame_idx, med_area, qf)
+                if reasons:
+                    cls += " ⚠"
                 vis_glyph  = " " if hidden else "●"
                 lock_glyph = "🔒" if anno.is_locked else ""
                 item = QTreeWidgetItem(
                     ["", anno.name, cls, vis_glyph, lock_glyph])
+                if reasons:
+                    item.setToolTip(2, "⚠ " + " · ".join(reasons))
                 # Identity stamp: every list<->annotation lookup goes
                 # through this, NEVER the display name — names are
                 # user-editable and may collide, which used to route
@@ -565,10 +585,12 @@ class ToolController:
         """Open the modal output / autosave settings dialog. On accept,
         re-apply the autosave timer interval so changes take effect
         without a restart."""
-        from ui.io_settings_dialog import IOSettingsDialog
-        dlg = IOSettingsDialog(self.window)
+        from ui.settings_dialog import SettingsDialog
+        dlg = SettingsDialog(self.window)
         if dlg.exec():
             self._apply_autosave_interval()
+            self._reload_quality_settings()
+            self._show_frame_annotations(self.window._current_frame_idx)
 
     # ----- Project I/O helpers ------------------------------------------
     # Dirty-mask tracking — set True every time seg pixels change, reset
@@ -1574,6 +1596,55 @@ class ToolController:
     def _toggle_onion_skin(self, checked):
         self.window._onion_skin = bool(checked)
         self.window._update_onion_skin()
+
+    # ------------------------------------------------------------------
+    # QUALITY FLAGS — deterministic geometry checks, Settings>Annotation
+    # ------------------------------------------------------------------
+    def _reload_quality_settings(self):
+        from ui.settings_dialog import read_quality_flag_settings
+        self._qf = read_quality_flag_settings()
+        return self._qf
+
+    def _quality_reasons(self, anno, seg, frame_idx, med_area, qf):
+        """Why this cell deserves a ⚠, as human-readable strings.
+
+        Three geometry checks, each catching a known failure mode:
+        mask touching its bbox edge (SAM spill-over), mask split into
+        disconnected pieces, area wildly off the frame median. No
+        model involved — deterministic and explainable.
+        """
+        layer = seg.get_layer(anno.class_type)
+        if layer is None or frame_idx >= layer.shape[0]:
+            return ()
+        scale = self._seg_scale()
+        sx, sy = scale if scale else (1.0, 1.0)
+        x, y = anno.roi.pos()
+        bw, bh = anno.roi.size()
+        H, W = layer.shape[1], layer.shape[2]
+        x0 = max(0, int(round(x * sx)))
+        y0 = max(0, int(round(y * sy)))
+        x1 = min(W, int(round((x + bw) * sx)))
+        y1 = min(H, int(round((y + bh) * sy)))
+        if x1 <= x0 or y1 <= y0:
+            return ()
+        sub = layer[frame_idx, y0:y1, x0:x1] == anno.instance_id
+        n = int(np.count_nonzero(sub))
+        if n == 0:
+            return ()
+        reasons = []
+        if qf['edge'] and (sub[0, :].any() or sub[-1, :].any()
+                           or sub[:, 0].any() or sub[:, -1].any()):
+            reasons.append("mask touches bbox edge (possible spill-over)")
+        if qf['split']:
+            import cv2
+            n_comp = cv2.connectedComponents(sub.astype(np.uint8))[0] - 1
+            if n_comp > 1:
+                reasons.append(f"mask split into {n_comp} pieces")
+        if qf['area'] and med_area:
+            if n > 4 * med_area or n < med_area / 4:
+                reasons.append(f"area {n}px far from frame median "
+                               f"{int(med_area)}px")
+        return tuple(reasons)
 
     @log_action('action')
     def export_bundle(self):

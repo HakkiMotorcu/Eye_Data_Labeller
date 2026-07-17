@@ -168,19 +168,34 @@ any button for a tooltip showing the action + its shortcut.
 | **File** | Save seg, Load project, Import, I/O settings |
 | **Image** | Auto-levels (contrast), fit bbox to content |
 
-## I/O Settings (gear icon)
+## Settings (gear icon / File → Settings)
 
-Open via the **I/O settings** button. Configures:
+One panel, four pages (category list on the left):
 
-- **Output folder** — where seg maps + project JSON get saved.
-  Three modes: subfolder of input, custom prefix, or fully custom
-  path.
-- **Auto-save** — interval, minimum flush interval for the on-disk
-  mask, on/off.
-- **SAM-HeLa checkpoint** — point at a local `best.pt` (Browse) OR
-  paste a download URL. See `INSTALL.md` for details.
+- **Output & Autosave** — where seg maps + project JSON get saved
+  (subfolder of input, custom prefix, or fully custom path) and the
+  auto-save mode/intervals.
+- **SAM Model** — point at a local `best.pt` (Browse) OR paste a
+  download URL. See `INSTALL.md` for details.
+- **Annotation** — quality flags (below), and future annotation
+  defaults.
+- **Debugging** — detailed logging toggle + log folder.
 
 Settings persist across launches (stored via Qt's `QSettings`).
+
+## Quality flags (⚠ in the annotation list)
+
+Suspicious cells get a `⚠` next to their class in the list — hover
+the row's Class column to see why. Three deterministic geometry
+checks (no model involved), each catching a known failure mode:
+
+- **Mask touches its bbox edge** — SAM probably spilled past the cell.
+- **Mask split into disconnected pieces** — one "cell", two blobs.
+- **Area far from the frame's median cell** (>4× or <¼×) — probable
+  merge or speck.
+
+The flag only says *look at me* — you decide. Enable/disable the
+whole feature or individual checks in **Settings → Annotation**.
 
 ## Tips
 
