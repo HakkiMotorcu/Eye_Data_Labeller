@@ -1352,6 +1352,11 @@ class ToolController:
         m_file.addAction(act)
         self._menu_recent = m_file.addMenu("Open &Recent")
         self._menu_recent.aboutToShow.connect(self._populate_recent_menu)
+        act = QAction("&Close", self.window)
+        act.setShortcut(QKeySequence("Ctrl+W"))
+        act.triggered.connect(self.close_file)
+        m_file.addAction(act)
+        home_off.append(act)
         m_file.addSeparator()
         act = QAction("&Save Project\tCtrl+S", self.window)
         act.triggered.connect(self.save_seg_map)
@@ -1360,10 +1365,6 @@ class ToolController:
         act = QAction("Load Project &Folder…", self.window)
         act.triggered.connect(self.load_project_folder)
         m_file.addAction(act)
-        # Disabled on landing until it can route through open_path —
-        # today it would load the session into the hidden annotation
-        # view and strand the user on the landing page.
-        home_off.append(act)
         act = QAction("&Import Annotations…\tCtrl+I", self.window)
         act.triggered.connect(self.load_annotations)
         m_file.addAction(act)
@@ -1964,6 +1965,72 @@ class ToolController:
     _RECENT_MAX = 10
 
     @log_action('action')
+    def _guard_unsaved(self, verb):
+        """Save/Discard/Cancel prompt for unsaved work.
+
+        Returns True when it's safe to proceed (clean session, saved,
+        or the user chose Discard); False on Cancel or a failed save.
+        """
+        if not self._seg_dirty_since_save:
+            return True
+        resp = QMessageBox.question(
+            self.window, "Unsaved changes",
+            "There are unsaved changes (masks / annotations).\n\n"
+            f"Save before {verb}?",
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save)
+        if resp == QMessageBox.StandardButton.Cancel:
+            return False
+        if resp == QMessageBox.StandardButton.Save:
+            self.save_seg_map()
+            if self._seg_dirty_since_save:
+                if self.window.seg_data is None:
+                    # Bbox-only session: no masks for save_seg_map
+                    # to write — same fallback as closeEvent, so a
+                    # Save click never silently discards work.
+                    try:
+                        self._autosave()
+                    except Exception:
+                        pass
+                    QMessageBox.information(
+                        self.window, "Annotations snapshotted",
+                        "No mask layers exist yet, so only an "
+                        "annotation snapshot (autosave.json) was "
+                        "written. You'll be offered a resume when "
+                        "you reopen this file.")
+                else:
+                    return False  # save failed; keep the session
+
+        return True
+
+    @log_action('action')
+    def close_file(self):
+        """File > Close (Ctrl+W): tear the session down and return to
+        the landing page. The inverse of open_path's bind block."""
+        w = self.window
+        if w.video_data is None and not self.annotations:
+            return  # nothing open
+        if not self._guard_unsaved("closing this file"):
+            return
+        self._loading_file = True  # gates the frame-change embed hook
+        try:
+            self._stop_embed_worker(timeout_ms=5000)
+            self._embed_pending_frame = None
+            self._clear_all_annotations()  # also exits preview/review
+            w.video_data = None
+            w.seg_data = None
+            w._current_file = None
+            self._mark_seg_clean()
+            self._ids_anywhere_cache = None
+            self._mask_files_owned.clear()
+            w._projection_cache = None
+            w._update_seg_overlay()
+            w.show_landing()  # refreshes Recent + re-enters home mode
+        finally:
+            self._loading_file = False
+
     def open_path(self, path):
         """Open a different image/video into the running window.
 
@@ -1988,36 +2055,8 @@ class ToolController:
             return True  # already open
 
         # Same unsaved-work guard as closing the window.
-        if self._seg_dirty_since_save:
-            resp = QMessageBox.question(
-                self.window, "Unsaved changes",
-                "There are unsaved changes (masks / annotations).\n\n"
-                "Save before opening the next file?",
-                QMessageBox.StandardButton.Save
-                | QMessageBox.StandardButton.Discard
-                | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Save)
-            if resp == QMessageBox.StandardButton.Cancel:
-                return False
-            if resp == QMessageBox.StandardButton.Save:
-                self.save_seg_map()
-                if self._seg_dirty_since_save:
-                    if self.window.seg_data is None:
-                        # Bbox-only session: no masks for save_seg_map
-                        # to write — same fallback as closeEvent, so a
-                        # Save click never silently discards work.
-                        try:
-                            self._autosave()
-                        except Exception:
-                            pass
-                        QMessageBox.information(
-                            self.window, "Annotations snapshotted",
-                            "No mask layers exist yet, so only an "
-                            "annotation snapshot (autosave.json) was "
-                            "written. You'll be offered a resume when "
-                            "you reopen this file.")
-                    else:
-                        return False  # save failed; stay on current file
+        if not self._guard_unsaved("opening the next file"):
+            return False
 
         try:
             data = load_frame_source(path)
@@ -3171,6 +3210,30 @@ class ToolController:
                 f"{', '.join(project_io.CLASS_MASK_FILES.values())}.")
             return
 
+        # Fileless (landing page): a session load into the hidden
+        # annotation view would strand the user on the landing page,
+        # so open the project's source video first — open_path switches
+        # views — and let _maybe_prompt_resume load THIS folder
+        # directly instead of prompting.
+        if self.window.video_data is None:
+            manifest = summary.get('manifest') or {}
+            src = (manifest.get('source_video') or {}).get(
+                'absolute_path') or ''
+            if not src or not os.path.isfile(src):
+                QMessageBox.warning(
+                    self.window, "Load Project",
+                    f"This project folder doesn't record a source video "
+                    f"that still exists:\n{src or '(none recorded)'}\n\n"
+                    f"Open the image/video it belongs to first, then use "
+                    f"Load Project Folder to attach these masks.")
+                return
+            self._pending_project_folder = folder
+            try:
+                self.open_path(src)
+            finally:
+                self._pending_project_folder = None
+            return  # session loaded inside open_path; view switched
+
         if self.annotations:
             reply = QMessageBox.question(
                 self.window, "Replace current session?",
@@ -3615,6 +3678,18 @@ class ToolController:
             return
         if self.annotations:
             return  # work already in progress — don't ask
+        pending = getattr(self, '_pending_project_folder', None)
+        if pending:
+            # File > Load Project Folder already chose the session
+            # explicitly — load it without asking to resume.
+            try:
+                self._load_session_from_out_folder(pending)
+            except Exception as e:
+                log_error('controller.load_project', 'load failed', exc=e)
+                QMessageBox.critical(
+                    self.window, "Load Project",
+                    f"Could not load project:\n\n{type(e).__name__}: {e}")
+            return
         out_folder = self._resolve_out_folder()
         summary = project_io.session_summary(out_folder)
         if summary is None or not summary.get('has_masks'):
