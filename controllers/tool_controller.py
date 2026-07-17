@@ -23,17 +23,35 @@ from core.debug import log, log_error, log_action
 # UNDO / REDO  — lightweight command pattern
 # ======================================================================
 class UndoStack:
-    """Simple undo/redo stack. Max 50 commands."""
-    def __init__(self, max_size=50):
+    """Simple undo/redo stack. Max 50 commands.
+
+    ``on_change`` (optional callable) fires after every push / undo /
+    redo. The controller hooks _mark_seg_dirty here so EVERY undoable
+    operation — including undo/redo themselves, which also mutate
+    project state — flips the unsaved-changes flag. Individual
+    mutation sites used to be responsible for this and most forgot,
+    so painted masks could be lost on quit with the UI showing
+    "Saved ✓".
+    """
+    def __init__(self, max_size=50, on_change=None):
         self._undo = []
         self._redo = []
         self._max = max_size
+        self.on_change = on_change
+
+    def _notify(self):
+        if self.on_change is not None:
+            try:
+                self.on_change()
+            except Exception:
+                pass
 
     def push(self, cmd):
         self._undo.append(cmd)
         if len(self._undo) > self._max:
             self._undo.pop(0)
         self._redo.clear()
+        self._notify()
 
     def undo(self):
         if not self._undo:
@@ -41,6 +59,7 @@ class UndoStack:
         cmd = self._undo.pop()
         cmd.undo()
         self._redo.append(cmd)
+        self._notify()
 
     def redo(self):
         if not self._redo:
@@ -48,6 +67,7 @@ class UndoStack:
         cmd = self._redo.pop()
         cmd.redo()
         self._undo.append(cmd)
+        self._notify()
 
     @property
     def can_undo(self):
@@ -102,16 +122,41 @@ class AddAnnotationBatchCmd:
 
 
 class DeleteAnnotationCmd:
-    def __init__(self, controller, anno, index):
+    """Undo/redo deleting one cell annotation.
+
+    Also snapshots the annotation's frame in its class layer:
+    delete_selected erases the cell's painted pixels before pushing
+    this command, so undo must bring those pixels back too — they
+    used to be unrecoverable (bbox reappeared, mask stayed gone).
+    """
+    def __init__(self, controller, anno, index,
+                 before_frame=None, after_frame=None):
         self.ctrl = controller
         self.anno = anno
         self.index = index
+        self.before_frame = before_frame  # (H, W) copy pre-erase, or None
+        self.after_frame = after_frame    # (H, W) copy post-erase, or None
+
+    def _restore_frame(self, frame_mask):
+        if frame_mask is None:
+            return
+        seg = self.ctrl.window.seg_data
+        if seg is None:
+            return
+        layer = seg.get_layer(self.anno.class_type)
+        if layer is None:
+            return
+        layer[self.anno.frame_idx][:] = frame_mask
+        if self.anno.frame_idx == self.ctrl.window._current_frame_idx:
+            self.ctrl.window._update_seg_overlay()
 
     def undo(self):
         self.ctrl._raw_restore(self.anno, index=self.index)
+        self._restore_frame(self.before_frame)
 
     def redo(self):
         self.ctrl._raw_delete(self.anno)
+        self._restore_frame(self.after_frame)
 
 
 class TrackingCmd:
@@ -715,7 +760,7 @@ class ToolController:
         self.anno_counter = 0
         self.current_shape_mode = 'rect'
         self._last_size = (40, 40)
-        self._undo_stack = UndoStack()
+        self._undo_stack = UndoStack(on_change=self._mark_seg_dirty)
         self._geometry_snapshot = None
         self._label_color_mode = False  # status-based R/Y/G coloring
         self._seg_edit_mode = 'select'  # 'select' | 'paint' | 'erase'
@@ -973,9 +1018,15 @@ class ToolController:
         for anno in self.annotations:
             if anno.frame_idx == frame_idx:
                 # Hidden / class-filtered annotations still get their ROI
-                # state updated so they vanish from the viewer.
+                # state updated so they vanish from the viewer. The
+                # "Hide Locked BBoxes" toggle must be honored here too —
+                # it used to apply only to the frame it was clicked on,
+                # so scrubbing away and back resurrected locked boxes
+                # while the button still showed checked.
                 hidden = getattr(anno, 'is_hidden', False)
-                if anno.is_paint_only or hidden:
+                hide_locked = (anno.is_locked
+                               and self.window.btn_hide_locked.isChecked())
+                if anno.is_paint_only or hidden or hide_locked:
                     anno.roi.setVisible(False)
                 else:
                     anno.roi.setVisible(True)
@@ -1056,6 +1107,11 @@ class ToolController:
         self.window.list_annotations.blockSignals(False)
         self._refresh_list_colors()
         self._update_stats()
+        # Re-apply the active tool mode's ROI interactivity to THIS
+        # frame's boxes. Paint/erase mode disables dragging per-frame,
+        # and frames visited while painting used to keep dead,
+        # un-clickable ROIs after returning to select mode.
+        self._set_roi_interactivity(self._seg_edit_mode == 'select')
         self.update_inspector()
         # Always keep the seg overlay in sync with the current annotation state
         self.window._update_seg_overlay()
@@ -1177,17 +1233,29 @@ class ToolController:
 
     def _mark_seg_clean(self):
         self._seg_dirty_since_save = False
+        self._autosave_failed = False
         import time
         self._last_mask_save_ts = time.monotonic()
         self._last_save_at = time.time()
         self._refresh_save_status()
 
     def _refresh_save_status(self):
-        """Update the I/O panel's save status label."""
+        """Update the I/O panel's save status label + title dirty dot."""
+        try:
+            self.window._update_title()
+        except Exception:
+            pass
         lbl = getattr(self.window, 'lbl_save_status', None)
         if lbl is None:
             return
         import time
+        if getattr(self, '_autosave_failed', False):
+            # A failed autosave means the safety net is gone — say so
+            # loudly instead of letting the user annotate on in trust.
+            lbl.setText("✗ Autosave FAILED — press Ctrl+S")
+            lbl.setStyleSheet(
+                "color: #e05c5c; font-family: monospace; font-size: 11px;")
+            return
         if self._seg_dirty_since_save:
             lbl.setText("● Unsaved changes")
             lbl.setStyleSheet(
@@ -2063,11 +2131,18 @@ class ToolController:
                                               target.class_type)
         else:
             index = self.annotations.index(target)
+            # Snapshot the frame before/after the pixel erase so undo
+            # restores the painted mask, not just the bbox.
+            layer = (self.window.seg_data.get_layer(target.class_type)
+                     if self.window.seg_data is not None else None)
+            before = layer[target.frame_idx].copy() if layer is not None else None
             self._erase_seg_for_anno(target)
+            after = layer[target.frame_idx].copy() if layer is not None else None
             target.delete_ui()
             self.annotations.remove(target)
             self.active_annotation = None
-            self._undo_stack.push(DeleteAnnotationCmd(self, target, index))
+            self._undo_stack.push(DeleteAnnotationCmd(
+                self, target, index, before_frame=before, after_frame=after))
 
         self._show_frame_annotations(self.window._current_frame_idx)
         self.window._update_seg_overlay()
@@ -2529,9 +2604,21 @@ class ToolController:
         x, y = anno.roi.pos()
         w, h = anno.roi.size()
         force = self.window.btn_force_paint.isChecked()
+        # Snapshot around the fill so it's undoable — with Force Paint
+        # on, F overwrites other instances' pixels inside the box, and
+        # an un-undoable stray keypress there is a destructive trap.
+        layer = seg.get_layer(anno.class_type)
+        before_frame = layer[anno.frame_idx].copy()
         seg.fill_bbox(anno.frame_idx, anno.instance_id,
                       x * sx, y * sy, w * sx, h * sy,
                       force=force, class_type=anno.class_type)
+        after_frame = layer[anno.frame_idx].copy()
+        geom = ToolController._snap_geometry(anno)
+        self._undo_stack.push(
+            SamBoxPromptCmd(self, anno.frame_idx, int(anno.instance_id),
+                            before_frame, after_frame,
+                            before_geom=geom, after_geom=geom,
+                            class_type=anno.class_type))
         anno._seg_dirty = True
         self.window._update_seg_overlay()
 
@@ -2563,12 +2650,24 @@ class ToolController:
         project_io.ensure_dir(out_folder)
 
         written = []
+        removed = []
         try:
             for ct, fname in project_io.CLASS_MASK_FILES.items():
                 layer = seg.get_layer(ct)
-                if layer is None or not layer.any():
-                    continue
                 target = os.path.join(out_folder, fname)
+                if layer is None or not layer.any():
+                    # A layer that exists but is now empty means the user
+                    # erased everything — a stale mask file left behind
+                    # would resurrect the deleted annotations on the next
+                    # load. Delete the file (and its .bak) instead of
+                    # skipping it.
+                    if layer is not None and os.path.exists(target):
+                        os.remove(target)
+                        bak = target + '.bak'
+                        if os.path.exists(bak):
+                            os.remove(bak)
+                        removed.append(target)
+                    continue
                 project_io.atomic_write_tif(target, layer)
                 written.append(target)
 
@@ -2599,6 +2698,9 @@ class ToolController:
             return
 
         lines = "\n".join(f"  {os.path.basename(p)}" for p in written)
+        if removed:
+            lines += "\n" + "\n".join(
+                f"  (removed emptied {os.path.basename(p)})" for p in removed)
         QMessageBox.information(
             self.window, "Save Seg",
             f"Saved into {out_folder}:\n{lines}\n"
@@ -4679,6 +4781,8 @@ class ToolController:
             self._autosave_path = autosave_path
         except Exception as e:
             log_error('controller.autosave', f'light snapshot failed: {e}')
+            self._autosave_failed = True
+            self._refresh_save_status()
 
         if mode != project_io.AUTOSAVE_SMART:
             return
@@ -4701,10 +4805,18 @@ class ToolController:
             project_io.ensure_dir(out_folder)
             for ct, fname in project_io.CLASS_MASK_FILES.items():
                 layer = seg.get_layer(ct)
+                target = os.path.join(out_folder, fname)
                 if layer is None or not layer.any():
+                    # Same rule as save_seg_map: an emptied (but
+                    # existing) layer deletes its stale mask file so
+                    # erased annotations can't resurrect on reload.
+                    if layer is not None and os.path.exists(target):
+                        os.remove(target)
+                        bak = target + '.bak'
+                        if os.path.exists(bak):
+                            os.remove(bak)
                     continue
-                project_io.atomic_write_tif(
-                    os.path.join(out_folder, fname), layer)
+                project_io.atomic_write_tif(target, layer)
             sidecar.save_meta(
                 sidecar.collect_meta_from_annotations(self.annotations),
                 os.path.join(out_folder, project_io.FILE_META))
@@ -4720,6 +4832,8 @@ class ToolController:
             log('controller.autosave', 'smart mask flush', out=out_folder)
         except Exception as e:
             log_error('controller.autosave', f'mask flush failed: {e}')
+            self._autosave_failed = True
+            self._refresh_save_status()
 
     def cleanup_autosave(self):
         """No-op by design: autosave.json is meant to survive crashes

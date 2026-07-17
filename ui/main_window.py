@@ -1889,7 +1889,48 @@ class MainWindow(QMainWindow):
         base = "Eye Data Labeller"
         if self._current_file:
             base += f"  \u2014  {os.path.basename(self._current_file)}"
+        ctrl = getattr(self, '_controller', None)
+        if ctrl is not None and getattr(ctrl, '_seg_dirty_since_save', False):
+            base += "  \u2022"  # unsaved-changes marker
         self.setWindowTitle(base)
+
+    def closeEvent(self, event):
+        """Guard the close button: unsaved work gets a Save / Discard /
+        Cancel prompt instead of silently vanishing. (In Light autosave
+        mode mask pixels are NEVER auto-flushed, so closing without
+        this prompt used to lose all painted work since the last
+        Ctrl+S.)"""
+        from PyQt6.QtWidgets import QMessageBox
+        ctrl = getattr(self, '_controller', None)
+        dirty = ctrl is not None and getattr(ctrl, '_seg_dirty_since_save',
+                                             False)
+        if dirty:
+            resp = QMessageBox.question(
+                self, "Unsaved changes",
+                "There are unsaved changes (masks / annotations).\n\n"
+                "Save before closing?",
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save)
+            if resp == QMessageBox.StandardButton.Cancel:
+                event.ignore()
+                return
+            if resp == QMessageBox.StandardButton.Save:
+                ctrl.save_seg_map()
+                if getattr(ctrl, '_seg_dirty_since_save', False):
+                    # Save failed (its own dialog already explained why)
+                    # \u2014 don't close on top of unsaved work.
+                    event.ignore()
+                    return
+        # Stop the embedding worker gracefully \u2014 tearing down the app
+        # around a live QThread aborts on some platforms.
+        if ctrl is not None:
+            try:
+                ctrl._stop_embed_worker(timeout_ms=2000)
+            except Exception:
+                pass
+        event.accept()
 
     def get_export_default_name(self, ext=".csv", fmt_tag=""):
         if self._current_file:
