@@ -127,7 +127,10 @@ def download_file(url: str, target_path: str, *,
             dialog = None
 
     try:
-        with urllib.request.urlopen(url) as resp, open(tmp, 'wb') as out:
+        # timeout applies per blocking socket op — a stalled connection
+        # raises instead of hanging the modal dialog forever.
+        with urllib.request.urlopen(url, timeout=30) as resp, \
+                open(tmp, 'wb') as out:
             total = int(resp.headers.get('Content-Length') or 0)
             done = 0
             chunk = 1024 * 256  # 256 KB
@@ -153,6 +156,14 @@ def download_file(url: str, target_path: str, *,
                     if total and done % (chunk * 32) == 0:
                         print(f"  {done // 1024 // 1024} / "
                               f"{total // 1024 // 1024} MB")
+        if total and done != total:
+            # A connection can die at a clean chunk boundary — read()
+            # returns b'' without raising, and a truncated checkpoint
+            # would get committed, failing much later inside torch.load
+            # with a cryptic unpickling error.
+            raise IOError(
+                f"Download incomplete: got {done} of {total} bytes for "
+                f"{label}. Check the connection and try again.")
         if expected_sha256:
             got = _sha256_of(tmp)
             if got.lower() != expected_sha256.lower():

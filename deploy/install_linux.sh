@@ -75,15 +75,19 @@ fi
 # ---- 3. GPU detection + CUDA PyTorch swap ---------------------------
 # env.yml ships CPU PyTorch as the baseline so every platform has the
 # same starting point. On Linux + NVIDIA we swap to the CUDA wheel.
-# --force-reinstall to overwrite conda's CPU torch; --no-deps so we
-# don't disturb numpy / scipy / BLAS pin / etc.
+# --force-reinstall to overwrite conda's CPU torch. NO --no-deps here:
+# Linux CUDA wheels do NOT bundle the CUDA libraries — they depend on
+# the nvidia-*-cu12 pip packages and load them from site-packages.
+# With --no-deps those never install and `import torch` dies with
+# "libcublas.so.12: cannot open shared object file". torch's pip deps
+# don't include numpy/scipy, so the conda BLAS stack is not at risk.
 if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
     driver_ver=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || echo "?")
     gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "NVIDIA GPU")
     say "NVIDIA GPU detected: $gpu_name  (driver $driver_ver)"
     say "Swapping to CUDA-enabled PyTorch from $CUDA_INDEX"
     conda activate "$ENV_NAME"
-    pip install --force-reinstall --no-deps \
+    pip install --force-reinstall \
         torch torchvision --index-url "$CUDA_INDEX" || \
         say "(CUDA PyTorch install FAILED — app will fall back to CPU. Check driver/CUDA compatibility per the header notes in this script.)"
     conda deactivate

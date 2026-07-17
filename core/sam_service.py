@@ -144,7 +144,14 @@ class SamService:
 
     # ---- Embedding cache defaults -----------------------------------
     _DEFAULT_MAX_RAM_EMBEDDINGS = 16  # ~16 * 4 MB = 64 MB RAM ceiling
-    _DEFAULT_CACHE_ROOT = "~/.cache/eye_labeller/sam_embeddings"
+
+    @staticmethod
+    def _default_cache_root():
+        """Per-OS writable cache dir via app_paths — a hardcoded
+        ``~/.cache`` is a Unix-ism that lands zarr stores in roaming
+        profiles / odd places on Windows."""
+        from core.app_paths import user_data_root
+        return os.path.join(user_data_root(), 'cache', 'sam_embeddings')
 
     def __init__(self, model_type='vit_b', checkpoint_path=None, device=None,
                  max_ram_embeddings=None, cache_root=None):
@@ -169,7 +176,7 @@ class SamService:
         self._max_ram_embeddings = (max_ram_embeddings
                                     or self._DEFAULT_MAX_RAM_EMBEDDINGS)
         self._cache_root = os.path.expanduser(
-            cache_root or self._DEFAULT_CACHE_ROOT)
+            cache_root or self._default_cache_root())
         self._embeddings = OrderedDict()  # LRU: cache_key -> ImageEmbeddings
 
     # ---- Availability + load -----------------------------------------

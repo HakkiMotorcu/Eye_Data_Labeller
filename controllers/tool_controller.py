@@ -4483,7 +4483,10 @@ class ToolController:
     def _parse_annotation_file(self, path):
         ext = os.path.splitext(path)[1].lower()
         if ext == '.json':
-            with open(path) as f:
+            # utf-8-sig: explicit encoding (Windows locale default is
+            # cp125x, which silently mangles non-ASCII names) and
+            # tolerant of a BOM from Windows editors.
+            with open(path, encoding='utf-8-sig') as f:
                 data = json.load(f)
             if 'annotations' in data and isinstance(data['annotations'], list):
                 return self._parse_json_records(data['annotations'])
@@ -4493,7 +4496,10 @@ class ToolController:
     @staticmethod
     def _parse_bbox_csv(path):
         records = []
-        with open(path, newline='') as f:
+        # utf-8-sig strips the BOM Excel puts in "CSV UTF-8" exports —
+        # read as the locale default that BOM glues onto the first
+        # header, every row's 'name' comes back empty.
+        with open(path, newline='', encoding='utf-8-sig') as f:
             reader = csv.DictReader(f)
             for row in reader:
                 records.append({

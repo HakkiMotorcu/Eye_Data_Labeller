@@ -21,6 +21,11 @@ channels:
   - conda-forge
 dependencies:
   - python >=3.10,<3.13
+  # git is needed at env-create time: the pip section installs MobileSAM
+  # from a git+https URL, and pip shells out to `git`. Windows machines
+  # (GitHub Desktop installs, ZIP downloads) often have no git on PATH,
+  # which killed `conda env create` at the very last stage.
+  - git
 
   # NOTE: We don't pin BLAS/LAPACK here because Windows conda-forge
   # uses a different build family (MKL-based) than Mac/Linux and
@@ -92,7 +97,11 @@ dependencies:
       - PyQt6
       - pyqtgraph
       - qtawesome
-      - pyqtdarktheme
+      # -fork variant: upstream pyqtdarktheme declares python <3.12, so
+      # on 3.12 envs pip silently fell back to the ancient 0.1.7
+      # release. The fork supports current Python and keeps the same
+      # `import qdarktheme` module name.
+      - pyqtdarktheme-fork
       # opencv-python-headless — we DO list it here explicitly. Earlier
       # versions of this file relied on micro_sam pulling opencv in
       # transitively, but that proved inconsistent (worked on GH Linux
