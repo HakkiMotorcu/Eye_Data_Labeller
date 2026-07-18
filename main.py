@@ -1,6 +1,25 @@
 import sys
 import os
 
+# PyInstaller + multiprocessing: torch / kornia / micro_sam spawn worker
+# processes, and on Windows (the 'spawn' start method) every child
+# re-launches the frozen exe from the top. Without freeze_support() the
+# child's argv doesn't carry --selftest, so it falls through to the
+# normal GUI launch (app.exec()) and hangs forever — which is exactly
+# how the bundled --selftest hung on Windows. Handle mp children here,
+# before any heavy import, so only the real parent process continues.
+if __name__ == '__main__':
+    import multiprocessing
+    multiprocessing.freeze_support()
+
+# Optional hang watchdog (CI/debug): if EYE_LABELLER_FAULT_TIMEOUT is set,
+# dump every thread's Python stack to stderr and abort after that many
+# seconds. Lets a hung headless run reveal exactly where it stalled.
+_fault_timeout = os.environ.get('EYE_LABELLER_FAULT_TIMEOUT')
+if _fault_timeout:
+    import faulthandler
+    faulthandler.dump_traceback_later(int(_fault_timeout), exit=True)
+
 # Honor --debug BEFORE importing anything else, so the debug flag is
 # already live by the time submodules read it.
 if '--debug' in sys.argv:
@@ -16,11 +35,40 @@ if '--debug' in sys.argv:
 # trumps any QT_QPA_PLATFORM_PLUGIN_PATH the user has set globally.
 try:
     import PyQt6 as _pyqt6
-    _plugins = os.path.join(os.path.dirname(_pyqt6.__file__), 'Qt6', 'plugins')
+    _qt6_dir = os.path.join(os.path.dirname(_pyqt6.__file__), 'Qt6')
+    _plugins = os.path.join(_qt6_dir, 'plugins')
     if os.path.isdir(_plugins):
         os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = os.path.join(
             _plugins, 'platforms')
         os.environ['QT_PLUGIN_PATH'] = _plugins
+    # Windows + conda: micro_sam pulls in napari, which drags a
+    # conda-forge ICU build into <env>\Library\bin (on PATH). PyQt6's
+    # Qt6Core.dll is built against the Windows SYSTEM ICU and imports the
+    # UNVERSIONED symbols UCNV_TO_U_CALLBACK_SUBSTITUTE /
+    # UCNV_FROM_U_CALLBACK_SUBSTITUTE from icuuc.dll — which conda-forge's
+    # ICU does NOT export (it version-suffixes every symbol). If conda's
+    # icuuc.dll gets loaded first, the whole PyQt6 import dies with
+    # 'DLL load failed while importing QtCore: The specified procedure
+    # could not be found'. (The VC runtime is fine — conda's msvcp140 is
+    # newer than PyQt6's and backward-compatible; ICU is the only bad
+    # dependency.) Windows loads a DLL by base name once per process, so
+    # pin the RIGHT icuuc.dll: eagerly load System32's (the MS system
+    # ICU, which DOES export those symbols) by absolute path before the
+    # first `from PyQt6...` import. Verified in CI. Also fixes Tier B
+    # users who run from the conda env, not just the bundle.
+    if sys.platform == 'win32':
+        import ctypes
+        _sys32 = os.path.join(
+            os.environ.get('SystemRoot', r'C:\Windows'), 'System32')
+        for _icu in ('icuuc.dll', 'icuin.dll'):
+            _icu_path = os.path.join(_sys32, _icu)
+            if os.path.isfile(_icu_path):
+                try:
+                    ctypes.WinDLL(_icu_path)
+                except OSError:
+                    # No system ICU (pre-1709 Windows) or load failed:
+                    # fall through; the real import surfaces the error.
+                    pass
 except Exception:
     # If PyQt6 isn't importable at all, the next import will produce
     # a clearer error than anything we could craft here.

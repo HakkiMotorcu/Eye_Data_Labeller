@@ -287,7 +287,14 @@ jobs:
         shell: bash -el {0}
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
-            ./dist/EyeDataLabeller/EyeDataLabeller.exe --selftest
+            # The windowed (console=False) exe block-buffers stdout, so run
+            # it unbuffered to keep the selftest's output visible. And arm
+            # main.py's in-process watchdog (EYE_LABELLER_FAULT_TIMEOUT): a
+            # hung windowed exe is otherwise invisible until the job cap, so
+            # the watchdog dumps every thread's stack and aborts if startup
+            # ever stalls, turning a silent hang into an actionable trace.
+            PYTHONUNBUFFERED=1 EYE_LABELLER_FAULT_TIMEOUT=300 \
+              ./dist/EyeDataLabeller/EyeDataLabeller.exe --selftest
           elif [ -x dist/EyeDataLabeller/EyeDataLabeller/EyeDataLabeller ]; then
             ./dist/EyeDataLabeller/EyeDataLabeller/EyeDataLabeller --selftest
           elif [ -x dist/EyeDataLabeller/EyeDataLabeller ]; then
