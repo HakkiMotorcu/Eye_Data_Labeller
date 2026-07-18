@@ -306,6 +306,22 @@ jobs:
         shell: bash -el {0}
         run: |
           pyinstaller packaging/eye_labeller.spec --clean --noconfirm
+          # TEMP DIAG (macOS): libiconv ground truth. The spec drops
+          # conda's libiconv (cv2's vendored libintl needs Apple's).
+          # Verify it's gone AND that no other bundled dylib still
+          # references the GNU-only _libiconv symbols (which the system
+          # fallback does not export) — if one does, it prints here.
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            echo "== libiconv in bundle (want: none) =="
+            ls dist/EyeDataLabeller/_internal/ | grep -i iconv || echo "  none bundled (good)"
+            echo "== bundled dylibs that link libiconv =="
+            for f in dist/EyeDataLabeller/_internal/*.dylib dist/EyeDataLabeller/_internal/cv2/.dylibs/*.dylib; do
+              [ -f "$f" ] || continue
+              if otool -L "$f" 2>/dev/null | grep -q "libiconv"; then
+                echo "  $(basename "$f")"
+              fi
+            done
+          fi
           # TEMP DIAG (Linux): ground truth for the libdeflate fix — is
           # a libdeflate bundled, and what does OpenEXR link against?
           if [ "$RUNNER_OS" = "Linux" ]; then
@@ -342,13 +358,15 @@ jobs:
               EYE_LABELLER_SELFTEST_SAM=1 \
               ./dist/EyeDataLabeller/EyeDataLabeller.exe --selftest
           elif [ -x dist/EyeDataLabeller/EyeDataLabeller/EyeDataLabeller ]; then
-            EYE_LABELLER_SELFTEST_SAM=1 \
+            PYTHONUNBUFFERED=1 EYE_LABELLER_SELFTEST_SAM=1 \
               ./dist/EyeDataLabeller/EyeDataLabeller/EyeDataLabeller --selftest
           elif [ -x dist/EyeDataLabeller/EyeDataLabeller ]; then
-            EYE_LABELLER_SELFTEST_SAM=1 \
+            # PYTHONUNBUFFERED everywhere: a mid-run crash must not eat
+            # the buffered selftest verdict (it did, on macOS).
+            PYTHONUNBUFFERED=1 EYE_LABELLER_SELFTEST_SAM=1 \
               ./dist/EyeDataLabeller/EyeDataLabeller --selftest
           else
-            EYE_LABELLER_SELFTEST_SAM=1 \
+            PYTHONUNBUFFERED=1 EYE_LABELLER_SELFTEST_SAM=1 \
               ./dist/EyeDataLabeller.app/Contents/MacOS/EyeDataLabeller --selftest
           fi
 
