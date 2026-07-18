@@ -306,30 +306,28 @@ jobs:
           except Exception:
               traceback.print_exc()
           PY
-          echo "======== ICU dlls: pip Qt6/bin vs conda Library\\bin ======"
-          echo "-- pip PyQt6/Qt6/bin icu* --"; ls "$PB" 2>/dev/null | grep -iE "^icu"
-          echo "-- conda Library/bin icu* --"; ls "$ENV/Library/bin" 2>/dev/null | grep -iE "^icu"
-          echo "======== FIX VALIDATION (PATH-prepend, fresh proc) ========"
+          echo "======== all icu DLLs on disk + System32 ================="
+          find "$ENV" -iname "icuuc*.dll" -o -iname "icuin*.dll" -o -iname "icudt*.dll" 2>/dev/null
+          echo "-- System32 icu --"; ls /c/Windows/System32/ 2>/dev/null | grep -iE "^icu" || echo "  (no icu in System32)"
+          echo "======== ICU symbols Qt6Core imports (version suffix!) ===="
+          pip install -q pefile 2>/dev/null
           python - <<'PY'
-          import os, ctypes, traceback
-          import PyQt6
-          qt6_bin = os.path.join(os.path.dirname(PyQt6.__file__), "Qt6", "bin")
-          # Mirror main.py's Windows fix exactly.
-          os.environ["PATH"] = qt6_bin + os.pathsep + os.environ.get("PATH", "")
-          os.add_dll_directory(qt6_bin)
-          for d in ("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll"):
-              try:
-                  ctypes.WinDLL(os.path.join(qt6_bin, d)); print("preloaded", d)
-              except OSError as e:
-                  print("preload FAIL", d, e)
-          try:
-              from PyQt6.QtWidgets import QApplication
-              import PyQt6.QtCore as c
-              print("FIX RESULT: QtWidgets import OK, Qt", c.QT_VERSION_STR)
-          except Exception:
-              traceback.print_exc()
-              print("FIX RESULT: still FAILING")
+          import os, PyQt6, pefile
+          p = os.path.join(os.path.dirname(PyQt6.__file__), "Qt6", "bin", "Qt6Core.dll")
+          pe = pefile.PE(p, fast_load=True)
+          pe.parse_data_directories(directories=[
+              pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]])
+          for e in pe.DIRECTORY_ENTRY_IMPORT:
+              if e.dll.decode().lower().startswith("icu"):
+                  print("Qt6Core imports from", e.dll.decode(), ":")
+                  for imp in e.imports[:25]:
+                      print("   ", imp.name.decode() if imp.name else f"ord#{imp.ordinal}")
           PY
+          echo "======== does force-reinstalling PyQt6-Qt6 ship ICU? ======"
+          pip install -q --force-reinstall --no-deps PyQt6-Qt6 2>&1 | tail -2
+          echo "-- pip Qt6/bin icu* AFTER reinstall --"; ls "$PB" 2>/dev/null | grep -iE "^icu" || echo "  (still no icu in pip Qt6/bin)"
+          echo "======== can Qt6Core import after reinstall? ============="
+          python -c "import PyQt6.QtCore as c; print('QtCore OK', c.QT_VERSION_STR)" 2>&1 | tail -2
           exit 0
 
       # Run the app's own --selftest from the source tree first: if
