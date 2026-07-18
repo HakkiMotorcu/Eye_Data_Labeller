@@ -159,7 +159,14 @@ def _selftest():
                 raise RuntimeError(
                     'SAM smoke: micro_sam failed to import in this build '
                     '(see the sam_service error logged above)')
-            svc = SamService(model_type='vit_t')
+            # device='cpu' on purpose: on Apple Silicon the auto-pick is
+            # MPS, and Metal's ASYNC cleanup threads can segfault the
+            # frozen app around exit — after 'selftest: PASS' printed,
+            # even past os._exit (the crash lands on another thread).
+            # CPU proves the same thing (weights load + correct mask)
+            # with none of the GPU driver's teardown roulette. The real
+            # app still auto-picks MPS/CUDA at runtime.
+            svc = SamService(model_type='vit_t', device='cpu')
             frame = np.full((64, 64), 40, dtype=np.uint8)
             frame[20:44, 20:44] = 220
             mask = svc.segment_from_box(frame, (16.0, 16.0, 48.0, 48.0))
