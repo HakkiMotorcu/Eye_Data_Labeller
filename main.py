@@ -16,11 +16,34 @@ if '--debug' in sys.argv:
 # trumps any QT_QPA_PLATFORM_PLUGIN_PATH the user has set globally.
 try:
     import PyQt6 as _pyqt6
-    _plugins = os.path.join(os.path.dirname(_pyqt6.__file__), 'Qt6', 'plugins')
+    _qt6_dir = os.path.join(os.path.dirname(_pyqt6.__file__), 'Qt6')
+    _plugins = os.path.join(_qt6_dir, 'plugins')
     if os.path.isdir(_plugins):
         os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = os.path.join(
             _plugins, 'platforms')
         os.environ['QT_PLUGIN_PATH'] = _plugins
+    # Windows + conda: micro_sam pulls in napari, which drags conda's
+    # qt6-main into the env. Its Qt6Core.dll lives in <env>\Library\bin
+    # (which is on PATH) and, although it reports the same 6.11.x version
+    # as pip's Riverbank PyQt6, it's a different build with a different
+    # exported-symbol set — so it shadows pip's DLL and PyQt6's bindings
+    # die with 'DLL load failed while importing QtCore: The specified
+    # procedure could not be found'. Windows loads any DLL by base name
+    # only once per process, so pin the RIGHT ones: eagerly load pip's
+    # own Qt6 core DLLs from PyQt6's Qt6\bin by ABSOLUTE path here, before
+    # the first `from PyQt6...` import. Every later 'Qt6Core.dll' lookup
+    # then reuses these already-resident modules instead of conda's.
+    _qt6_bin = os.path.join(_qt6_dir, 'bin')
+    if sys.platform == 'win32' and os.path.isdir(_qt6_bin):
+        os.add_dll_directory(_qt6_bin)
+        import ctypes
+        for _dll in ('Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll'):
+            try:
+                ctypes.WinDLL(os.path.join(_qt6_bin, _dll))
+            except OSError:
+                # Missing/again-shadowed DLL: fall through and let the
+                # real import below surface the actionable error.
+                pass
 except Exception:
     # If PyQt6 isn't importable at all, the next import will produce
     # a clearer error than anything we could craft here.

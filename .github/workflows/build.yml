@@ -306,6 +306,24 @@ jobs:
           except Exception:
               traceback.print_exc()
           PY
+          echo "============= preload-fix validation (fresh proc) ========="
+          python - <<'PY'
+          import os, ctypes, traceback
+          import PyQt6
+          qt6_bin = os.path.join(os.path.dirname(PyQt6.__file__), "Qt6", "bin")
+          os.add_dll_directory(qt6_bin)
+          for d in ("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll"):
+              try:
+                  ctypes.WinDLL(os.path.join(qt6_bin, d)); print("preloaded", d)
+              except OSError as e:
+                  print("preload FAIL", d, e)
+          try:
+              from PyQt6.QtWidgets import QApplication
+              import PyQt6.QtCore as c
+              print("AFTER PRELOAD: QtWidgets OK, Qt", c.QT_VERSION_STR)
+          except Exception:
+              traceback.print_exc()
+          PY
           exit 0
 
       # Run the app's own --selftest from the source tree first: if
