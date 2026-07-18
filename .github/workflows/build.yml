@@ -306,21 +306,26 @@ jobs:
         shell: bash -el {0}
         run: |
           pyinstaller packaging/eye_labeller.spec --clean --noconfirm
-          # TEMP DIAG (macOS): libiconv ground truth. The spec drops
-          # conda's libiconv (cv2's vendored libintl needs Apple's).
-          # Verify it's gone AND that no other bundled dylib still
-          # references the GNU-only _libiconv symbols (which the system
-          # fallback does not export) — if one does, it prints here.
+          # macOS libiconv guard: the spec keeps conda's GNU libiconv
+          # for conda-built consumers and rewrites cv2's wheel-vendored
+          # dylibs to the system /usr/lib copy (two flavors, same name,
+          # different exported symbols — see the spec's iconv-fix
+          # block). Assert both halves held, or fail HERE with a clear
+          # message instead of a mystery segfault at selftest.
           if [ "$RUNNER_OS" = "macOS" ]; then
-            echo "== libiconv in bundle (want: none) =="
-            ls dist/EyeDataLabeller/_internal/ | grep -i iconv || echo "  none bundled (good)"
-            echo "== bundled dylibs that link libiconv =="
-            for f in dist/EyeDataLabeller/_internal/*.dylib dist/EyeDataLabeller/_internal/cv2/.dylibs/*.dylib; do
+            ls dist/EyeDataLabeller/_internal/ | grep -qi "^libiconv" \
+              || { echo "::error:: conda libiconv missing from bundle (conda-built dylibs need it)"; exit 1; }
+            BAD=0
+            for f in dist/EyeDataLabeller/_internal/cv2/.dylibs/*.dylib; do
               [ -f "$f" ] || continue
-              if otool -L "$f" 2>/dev/null | grep -q "libiconv"; then
-                echo "  $(basename "$f")"
+              REF=$(otool -L "$f" 2>/dev/null | awk '/libiconv/{print $1}' | head -1)
+              if [ -n "$REF" ] && [ "$REF" != "/usr/lib/libiconv.2.dylib" ]; then
+                echo "::error:: $(basename "$f") still references $REF (want /usr/lib/libiconv.2.dylib)"
+                BAD=1
               fi
             done
+            [ "$BAD" = 0 ] && echo "libiconv guard OK: conda copy bundled; cv2 dylibs point at /usr/lib"
+            [ "$BAD" = 0 ] || exit 1
           fi
           # TEMP DIAG (Linux): ground truth for the libdeflate fix — is
           # a libdeflate bundled, and what does OpenEXR link against?
