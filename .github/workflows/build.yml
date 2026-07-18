@@ -172,6 +172,32 @@ jobs:
         run: |
           pip install --force-reinstall --no-deps pillow
 
+      # micro-sam, slim: the conda package hard-depends on napari (a full
+      # second GUI stack — the root cause of the Windows ICU/Qt DLL
+      # shadowing and most bundle excludes), and upstream's pip metadata
+      # hard-pins napari too. Install the package alone; every real
+      # runtime dep is pinned in environment.yml. Then prove the compute
+      # import surface works with the GUI stack truly absent — if the
+      # solver ever sneaks napari back in, fail HERE with a clear
+      # message, not somewhere downstream.
+      - name: Install micro_sam (slim, --no-deps)
+        shell: bash -el {0}
+        run: |
+          pip install --no-deps \
+            "git+https://github.com/computational-cell-analytics/micro-sam.git@v1.7.7"
+          python - <<'PY'
+          import importlib.util as iu
+          for m in ("napari", "magicgui", "superqt", "vispy"):
+              assert iu.find_spec(m) is None, \
+                  f"GUI stack leaked back into the env: {m}"
+          import micro_sam.util
+          import micro_sam.automatic_segmentation
+          import micro_sam.prompt_based_segmentation
+          import micro_sam
+          print(f"micro_sam {micro_sam.__version__} slim import surface OK; "
+                "napari/magicgui/superqt/vispy absent")
+          PY
+
       # NOTE: PyQt6 import is validated by the source-tree selftest
       # below (after the Linux GL libs are installed). We no longer
       # surgically rewrite Qt on Windows — a plain `conda env create`
