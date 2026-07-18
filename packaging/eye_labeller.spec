@@ -231,6 +231,26 @@ a = Analysis(
     noarchive=False,
 )
 
+# ---- macOS: do NOT bundle conda's libiconv ----------------------------
+# Two libiconv flavors exist with the SAME install name: Apple's (in the
+# dyld shared cache, exports _iconv/_iconv_open) and conda's GNU build
+# (exports the prefixed _libiconv* symbols only). pip's cv2 wheel vendors
+# a libintl.8.dylib that was delocate-built against APPLE's flavor; when
+# the bundle also ships conda's libiconv.2.dylib, dyld binds cv2's
+# libintl to it and dies at first (lazy) use:
+#   dyld: Symbol not found: _iconv
+#     Referenced from: _internal/cv2/.dylibs/libintl.8.dylib
+#     Expected in:     _internal/libiconv.2.dylib
+# This bind is lazy, so it fired nondeterministically — including AFTER
+# 'selftest: PASS' was printed (the "flaky teardown segfault" on CI).
+# Dropping conda's copy from the bundle makes dyld fall back to the
+# system libiconv in the shared cache, which exports what cv2 expects.
+# (macOS is guaranteed to provide it — it lives in the dyld cache on
+# every supported macOS, so the bundle stays self-contained in practice.)
+if sys.platform == "darwin":
+    a.binaries = [b for b in a.binaries
+                  if not os.path.basename(b[0]).startswith("libiconv")]
+
 pyz = PYZ(a.pure, a.zipped_data)
 
 # ---- One-folder build (faster startup) -------------------------------
