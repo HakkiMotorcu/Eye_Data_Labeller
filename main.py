@@ -22,36 +22,34 @@ try:
         os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = os.path.join(
             _plugins, 'platforms')
         os.environ['QT_PLUGIN_PATH'] = _plugins
-    # Windows + conda: micro_sam pulls in napari, which drags conda's
-    # qt6-main and a conda ICU build into the env, populating
-    # <env>\Library\bin (which is on PATH) with a DIFFERENT icuuc.dll
-    # than the one PyQt6's own Qt6Core.dll links against. ICU has no ABI
-    # stability — its exported symbols are version-suffixed — so when
-    # Qt6Core binds to conda's icuuc.dll it can't find the symbol it
-    # needs and the whole PyQt6 import dies with 'DLL load failed while
-    # importing QtCore: The specified procedure could not be found'.
-    # (The VC runtime is NOT the problem: conda ships a newer msvcp140
-    # than PyQt6, and it's backward-compatible.)
-    #
-    # Fix: put PyQt6's own Qt6\bin FIRST on the DLL search path so
-    # Qt6Core resolves icuuc.dll (and its other bundled deps) to PyQt6's
-    # copies before the conda env's. Prepend PATH and register the dir,
-    # then eagerly load the Qt6 core DLLs so the correct ICU is resident
-    # before the first `from PyQt6...` import. Windows loads a DLL by
-    # base name once per process, so this pins the right ones. Also fixes
-    # Tier B users running from the conda env, not just CI.
-    _qt6_bin = os.path.join(_qt6_dir, 'bin')
-    if sys.platform == 'win32' and os.path.isdir(_qt6_bin):
-        os.environ['PATH'] = _qt6_bin + os.pathsep + os.environ.get('PATH', '')
-        os.add_dll_directory(_qt6_bin)
+    # Windows + conda: micro_sam pulls in napari, which drags a
+    # conda-forge ICU build into <env>\Library\bin (on PATH). PyQt6's
+    # Qt6Core.dll is built against the Windows SYSTEM ICU and imports the
+    # UNVERSIONED symbols UCNV_TO_U_CALLBACK_SUBSTITUTE /
+    # UCNV_FROM_U_CALLBACK_SUBSTITUTE from icuuc.dll — which conda-forge's
+    # ICU does NOT export (it version-suffixes every symbol). If conda's
+    # icuuc.dll gets loaded first, the whole PyQt6 import dies with
+    # 'DLL load failed while importing QtCore: The specified procedure
+    # could not be found'. (The VC runtime is fine — conda's msvcp140 is
+    # newer than PyQt6's and backward-compatible; ICU is the only bad
+    # dependency.) Windows loads a DLL by base name once per process, so
+    # pin the RIGHT icuuc.dll: eagerly load System32's (the MS system
+    # ICU, which DOES export those symbols) by absolute path before the
+    # first `from PyQt6...` import. Verified in CI. Also fixes Tier B
+    # users who run from the conda env, not just the bundle.
+    if sys.platform == 'win32':
         import ctypes
-        for _dll in ('Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll'):
-            try:
-                ctypes.WinDLL(os.path.join(_qt6_bin, _dll))
-            except OSError:
-                # Missing/again-shadowed DLL: fall through and let the
-                # real import below surface the actionable error.
-                pass
+        _sys32 = os.path.join(
+            os.environ.get('SystemRoot', r'C:\Windows'), 'System32')
+        for _icu in ('icuuc.dll', 'icuin.dll'):
+            _icu_path = os.path.join(_sys32, _icu)
+            if os.path.isfile(_icu_path):
+                try:
+                    ctypes.WinDLL(_icu_path)
+                except OSError:
+                    # No system ICU (pre-1709 Windows) or load failed:
+                    # fall through; the real import surfaces the error.
+                    pass
 except Exception:
     # If PyQt6 isn't importable at all, the next import will produce
     # a clearer error than anything we could craft here.
