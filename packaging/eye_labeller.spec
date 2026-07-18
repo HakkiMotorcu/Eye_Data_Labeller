@@ -162,21 +162,12 @@ except Exception:
 # at runtime is dead code for us.
 excludes = [
     "PyQt5", "PySide2", "PySide6",
-    # matplotlib is NOT excluded: micro_sam imports it from deeper
+    # matplotlib itself is handled per-platform just below (NOT
+    # unconditionally excluded): micro_sam imports it from deeper
     # submodules (e.g. micro_sam.util, which core/sam_service.py loads),
-    # so excluding it makes that import raise ModuleNotFoundError.
-    # sam_service catches the ImportError and silently disables SAM — so
-    # the shipped app runs but SAM is dead, a quieter and worse failure
-    # than a crash. (Top-level `import micro_sam` and main.py's selftest
-    # probe don't need it, which is why excluding it never tripped the
-    # selftest — it only killed SAM at runtime.) So keep matplotlib.
-    #
-    # Regression watch: bundling matplotlib previously dragged in a conda
-    # libtiff whose 12-bit libjpeg symbols were missing at runtime
-    # ('undefined symbol: jpeg12_write_raw_data'), crashing ImageView
-    # construction on Linux. If that resurfaces, scope this exclusion
-    # per-platform (Linux only) rather than dropping matplotlib on all
-    # OSes. matplotlib.tests stays excluded — it's pure dead weight.
+    # so excluding it makes that import raise ModuleNotFoundError, and
+    # sam_service catches it and silently disables SAM. matplotlib.tests
+    # is always excluded — pure dead weight.
     "matplotlib.tests", "scipy.tests",
     "tornado", "notebook", "jupyter", "jupyterlab",
     "IPython", "pytest",
@@ -188,6 +179,23 @@ excludes = [
     "vispy", "napari", "magicgui", "superqt", "qtpy",
     "PyQt5", "PySide2",
 ]
+
+# matplotlib, per-platform. Keep it on macOS/Windows so micro_sam (and
+# thus SAM) imports cleanly. EXCLUDE it on Linux, where bundling it is a
+# net negative: pyqtgraph's ColorMapMenu eagerly imports matplotlib
+# while constructing every pg.ImageView (find_mpl_leftovers ->
+# colormap.listMaps), and matplotlib's bundled native stack has
+# undefined symbols in the frozen Linux app — historically a conda
+# libtiff ('undefined symbol: jpeg12_write_raw_data'), currently
+# libraqm/harfbuzz ('undefined symbol: hb_ft_font_get_ft_face') — which
+# crashes the app at ImageView construction. And micro_sam already fails
+# to import in the Linux bundle for an unrelated native-symbol reason
+# (libOpenEXRCore/libdeflate), so SAM is dead on Linux regardless;
+# excluding matplotlib there costs no SAM support while keeping the app
+# runnable. (See the offscreen-plugin block above for the other half of
+# the macOS-arm64 selftest fix.)
+if sys.platform.startswith("linux"):
+    excludes.append("matplotlib")
 
 # ---- Analysis ---------------------------------------------------------
 a = Analysis(
