@@ -187,7 +187,16 @@ def _selftest():
 
 # Must come after imports are complete — _selftest uses load_frame_source.
 if '--selftest' in sys.argv:
-    sys.exit(_selftest())
+    _rc = _selftest()
+    # Exit WITHOUT interpreter teardown: in the frozen bundle, native
+    # cleanup ordering (Qt widgets + torch + objc) can segfault AFTER
+    # every check has passed and "selftest: PASS" was printed — seen as
+    # a flaky exit 139 on macOS CI. The verdict is complete by now;
+    # os._exit keeps a meaningless late crash from flipping a passing
+    # job red. Flush first — os._exit skips buffered-IO flushing.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(_rc)
 
 
 def _make_eye_icon(size=64):
