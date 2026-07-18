@@ -79,6 +79,16 @@ else
     conda env create -n "$ENV_NAME" -f "$ENV_YML"
 fi
 
+# micro-sam, slim install: NOT in environment.yml because both the conda
+# package and upstream's pip metadata hard-depend on napari (a second GUI
+# stack the app never uses, and the source of Qt DLL conflicts). --no-deps
+# installs just the package; its real runtime deps are pinned in the yml.
+say "Installing micro-sam (slim, --no-deps)"
+conda activate "$ENV_NAME"
+pip install --no-deps \
+    "git+https://github.com/computational-cell-analytics/micro-sam.git@v1.7.7"
+conda deactivate
+
 # ---- 3. GPU detection + CUDA PyTorch swap ---------------------------
 # env.yml ships CPU PyTorch as the baseline so every platform has the
 # same starting point. On Linux + NVIDIA we swap to the CUDA wheel.

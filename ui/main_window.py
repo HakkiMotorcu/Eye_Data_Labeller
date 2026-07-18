@@ -47,6 +47,39 @@ import numpy as np
 import os
 
 
+class TimelineMarkerBar(QWidget):
+    """Thin bar over the frame slider: one tick per annotated frame,
+    so coverage (and gaps) are visible at a glance during review."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(7)
+        self._frames = set()
+        self._num = 1
+        self.setToolTip("Annotated frames · Ctrl+→ / Ctrl+← jumps to "
+                        "the next / previous unannotated frame")
+
+    def set_data(self, frames, num_frames):
+        self._frames = set(int(f) for f in frames)
+        self._num = max(1, int(num_frames))
+        self.update()
+
+    def paintEvent(self, event):
+        from PyQt6.QtGui import QPainter, QPen, QColor
+        p = QPainter(self)
+        w, h = self.width(), self.height()
+        p.setPen(QPen(QColor(70, 70, 80), 1))
+        p.drawLine(0, h - 1, w, h - 1)
+        if self._num > 1 and self._frames:
+            pen = QPen(QColor(110, 180, 235), 2)
+            p.setPen(pen)
+            span = max(1, self._num - 1)
+            for f in self._frames:
+                x = 1 + int(f / span * (w - 3))
+                p.drawLine(x, 0, x, h - 2)
+        p.end()
+
+
 class FilterSection(QWidget):
     """Collapsible section used in the View panel.
 
@@ -141,6 +174,7 @@ class MainWindow(QMainWindow):
     def __init__(self, video_data=None):
         super().__init__()
         self.resize(1500, 900)
+        self.setAcceptDrops(True)  # drop a .tif/.avi to open it
         self.video_data = video_data
         self.seg_data = None
         self._current_file = None
@@ -228,8 +262,16 @@ class MainWindow(QMainWindow):
         return w
 
     def _setup_ui(self):
+        # Central stack: page 0 = landing (shown fileless), page 1 =
+        # the annotation view. show_landing()/show_annotation_view()
+        # switch between them.
+        from PyQt6.QtWidgets import QStackedWidget
+        self._central_stack = QStackedWidget()
+        self.setCentralWidget(self._central_stack)
+        self._landing_page = None  # created in _install_landing (needs ctrl)
+
         central_widget = QWidget()
-        self.setCentralWidget(central_widget)
+        self._central_stack.addWidget(central_widget)   # index 0 (annot view)
         main_layout = QVBoxLayout(central_widget)
 
         # --- Left: Frame view ---
@@ -251,6 +293,13 @@ class MainWindow(QMainWindow):
         self._seg_overlay.setZValue(10)  # above the frame image
         self.view_frame.getView().addItem(self._seg_overlay)
         self._seg_visible = True
+        # Onion skin: faint outlines of the PREVIOUS frame's masks,
+        # rendered under the live overlay — tracking drift shows up
+        # instantly. Toggled from View > Onion Skin (O).
+        self._onion_skin = False
+        self._onion_item = pg.ImageItem()
+        self._onion_item.setZValue(9)
+        self.view_frame.getView().addItem(self._onion_item)
         # Default z-order for overlay compositing — bottom to top.
         # Cells on top reads best for most workflows; the View panel's
         # "Top: …" buttons reshuffle this at runtime.
@@ -726,6 +775,12 @@ class MainWindow(QMainWindow):
             "Undoable via Cmd+Z.")
         self.btn_run_tracker.setStyleSheet("color: #ffd166; font-weight: bold;")
         run_track_row.addWidget(self.btn_run_tracker)
+        self.btn_track_lengths = QPushButton("Track lengths…")
+        self.btn_track_lengths.setToolTip(
+            "Show each track's length (how many frames the cell spans),\n"
+            "its frame range, and any gaps. Enabled after a tracker run.")
+        self.btn_track_lengths.setEnabled(False)
+        run_track_row.addWidget(self.btn_track_lengths)
         tracking_layout.addLayout(run_track_row)
 
         # Status line
@@ -1224,9 +1279,18 @@ class MainWindow(QMainWindow):
         self.lbl_total_frames = QLabel("/ 0")
         self.lbl_total_frames.setStyleSheet("color: #888; font-family: monospace;")
 
+        # Marker bar above the slider: one tick per annotated frame,
+        # so "where is my work / what's left" is visible at a glance.
+        self.timeline_markers = TimelineMarkerBar()
+        slider_col = QVBoxLayout()
+        slider_col.setSpacing(1)
+        slider_col.setContentsMargins(0, 0, 0, 0)
+        slider_col.addWidget(self.timeline_markers)
+        slider_col.addWidget(self.slider_timeline)
+
         timeline_layout.addWidget(self.btn_frame_first)
         timeline_layout.addWidget(self.btn_frame_prev)
-        timeline_layout.addWidget(self.slider_timeline, stretch=1)
+        timeline_layout.addLayout(slider_col, stretch=1)
         timeline_layout.addWidget(self.btn_frame_next)
         timeline_layout.addWidget(self.btn_frame_last)
         timeline_layout.addWidget(self.spin_frame)
@@ -1246,11 +1310,18 @@ class MainWindow(QMainWindow):
         self.lbl_status_frame = QLabel("Frame: — / —")
         self.lbl_status_coords = QLabel("(—, —)")
         self.lbl_status_value = QLabel("val: —")
+        # Always-visible tool-mode chip — the active seg-edit mode and
+        # the destructive Force-Paint toggle used to be visible only
+        # inside a collapsible mid-sidebar panel.
+        self.lbl_status_mode = QLabel("MODE: SELECT")
         for w in (self.lbl_status_image, self.lbl_status_frame,
                   self.lbl_status_coords, self.lbl_status_value):
             w.setStyleSheet("font-family: monospace; color: #bbb; padding: 0 10px;")
+        self.lbl_status_mode.setStyleSheet(
+            "font-family: monospace; color: #bbb; padding: 0 10px;")
         # Add a leading info label on the left, others on the right
         sb.addWidget(self.lbl_status_image)
+        sb.addWidget(self.lbl_status_mode)
         sb.addPermanentWidget(self.lbl_status_frame)
         sb.addPermanentWidget(self.lbl_status_coords)
         sb.addPermanentWidget(self.lbl_status_value)
@@ -1806,6 +1877,12 @@ class MainWindow(QMainWindow):
 
     def get_colormap(self):
         name = self.combo_colormap.currentText()
+        # Resolving a colormap does registry lookups (+ a matplotlib
+        # fallback probe) — cache per name so frame navigation doesn't
+        # pay it on every step.
+        cached = getattr(self, '_cmap_cache', None)
+        if cached is not None and cached[0] == name:
+            return cached[1]
         cmap = None
         try:
             cmap = pg.colormap.get(name)
@@ -1820,6 +1897,7 @@ class MainWindow(QMainWindow):
             # Build a simple grayscale colormap as fallback
             cmap = pg.ColorMap([0.0, 1.0],
                                [(0, 0, 0, 255), (255, 255, 255, 255)])
+        self._cmap_cache = (name, cmap)
         return cmap
 
     # ------------------------------------------------------------------
@@ -1862,9 +1940,13 @@ class MainWindow(QMainWindow):
         self._current_frame_idx = idx
 
         frame = self._compose_display_frame(idx)
-        cmap = self.get_colormap()
         self.view_frame.setImage(frame, autoLevels=False, autoRange=auto_range)
-        self.view_frame.setColorMap(cmap)
+        # setColorMap forces a LUT re-application on the ImageItem —
+        # only do it when the selected colormap actually changed.
+        cmap_name = self.combo_colormap.currentText()
+        if getattr(self, '_applied_cmap_name', None) != cmap_name:
+            self.view_frame.setColorMap(self.get_colormap())
+            self._applied_cmap_name = cmap_name
 
         lo = self.slider_min.value()
         hi = self.slider_max.value()
@@ -1872,6 +1954,7 @@ class MainWindow(QMainWindow):
 
         # Update segmentation overlay
         self._update_seg_overlay()
+        self._update_onion_skin()
 
         self.lbl_frame_title.setText(
             f"Frame {idx} / {self.video_data.num_frames - 1}  "
@@ -1893,6 +1976,35 @@ class MainWindow(QMainWindow):
         if ctrl is not None and getattr(ctrl, '_seg_dirty_since_save', False):
             base += "  \u2022"  # unsaved-changes marker
         self.setWindowTitle(base)
+
+    # --- drag & drop: drop a .tif/.avi onto the window to open it ----
+    def dragEnterEvent(self, event):
+        from core.frame_source import SUPPORTED_EXTS
+        md = event.mimeData()
+        if md.hasUrls():
+            for url in md.urls():
+                p = url.toLocalFile()
+                if p and os.path.splitext(p)[1].lower() in SUPPORTED_EXTS:
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+
+    def dropEvent(self, event):
+        from core.frame_source import SUPPORTED_EXTS
+        from PyQt6.QtCore import QTimer
+        ctrl = getattr(self, '_controller', None)
+        if ctrl is None:
+            return
+        for url in event.mimeData().urls():
+            p = url.toLocalFile()
+            if p and os.path.splitext(p)[1].lower() in SUPPORTED_EXTS:
+                # Accept first, open on the next event-loop turn:
+                # open_path shows modal dialogs, and nesting those
+                # inside the OS drag-drop callback can wedge the drag
+                # source (Explorer/Finder) until dismissed.
+                event.acceptProposedAction()
+                QTimer.singleShot(0, lambda path=p: ctrl.open_path(path))
+                return
 
     def closeEvent(self, event):
         """Guard the close button: unsaved work gets a Save / Discard /
@@ -2077,13 +2189,22 @@ class MainWindow(QMainWindow):
                 rgba = np.zeros((*mask.shape, 4), dtype=np.uint8)
             ids = np.unique(mask)
             ids = ids[ids != 0]
+            if ids.size == 0:
+                continue
             hidden_ids = hidden_by_class[ct]
             inst_colors = self.seg_data.get_colors(ct)
             anno_state = anno_state_by_class[ct]
+            # Colour via a lookup table indexed by instance id: per id
+            # we write ONE 4-byte LUT row, then colour the whole layer
+            # in a single vectorized gather. The previous per-id
+            # `mask == iid` approach was a full-image pass per instance
+            # — O(instances × pixels) on the hottest redraw path (every
+            # brush move, frame change, selection). This is O(pixels).
+            lut = np.zeros((int(ids.max()) + 1, 4), dtype=np.uint8)
             for iid in ids:
                 iid_int = int(iid)
                 if iid_int in hidden_ids:
-                    continue
+                    continue  # LUT row stays alpha=0 -> not painted
                 if status_mode and ct == 'cell':
                     state = anno_state.get(iid_int, 'unlocked')
                     color = status_colors[state]
@@ -2092,19 +2213,76 @@ class MainWindow(QMainWindow):
                         color = inst_colors[iid_int]
                     else:
                         color = self._SEG_COLORS[(iid_int - 1) % len(self._SEG_COLORS)]
-                region = (mask == iid)
-                # Overwrite — later layers in `order` paint on top of
-                # earlier ones, giving the configured z-order.
-                rgba[region, 0] = color[0]
-                rgba[region, 1] = color[1]
-                rgba[region, 2] = color[2]
-                rgba[region, 3] = alpha_byte
+                lut[iid_int] = (color[0], color[1], color[2], alpha_byte)
+            layer_rgba = lut[mask]
+            # Overwrite only where this layer has a VISIBLE pixel —
+            # later layers in `order` paint on top of earlier ones
+            # (configured z-order), and hidden/background pixels must
+            # not punch holes into lower layers.
+            vis = layer_rgba[..., 3] != 0
+            rgba[vis] = layer_rgba[vis]
 
         if rgba is None:
             self._seg_overlay.clear()
             return
 
         self._seg_overlay.setImage(rgba)
+
+    def install_landing(self):
+        """Create the landing page (needs the controller) and add it to
+        the central stack. Called once after the controller is wired."""
+        if self._landing_page is not None:
+            return
+        from ui.landing_page import LandingPage
+        self._landing_page = LandingPage(self._controller, self)
+        self._central_stack.addWidget(self._landing_page)  # index 1
+
+    def show_landing(self):
+        if self._landing_page is not None:
+            self._landing_page.refresh_recent()
+            self._central_stack.setCurrentWidget(self._landing_page)
+            self._update_title()
+
+    def show_annotation_view(self):
+        # Index 0 is always the annotation view.
+        self._central_stack.setCurrentIndex(0)
+
+    def is_on_landing(self):
+        return (self._landing_page is not None
+                and self._central_stack.currentWidget() is self._landing_page)
+
+    def _update_onion_skin(self):
+        """Faint outline of the previous frame's masks (all classes)."""
+        item = getattr(self, '_onion_item', None)
+        if item is None:
+            return
+        if (not self._onion_skin or self.seg_data is None
+                or self._current_frame_idx == 0):
+            item.clear()
+            return
+        prev = self._current_frame_idx - 1
+        combined = None
+        for ct in self.seg_data.CLASS_TYPES:
+            layer = self.seg_data.get_layer(ct)
+            if layer is None or prev >= layer.shape[0]:
+                continue
+            m = layer[prev] != 0
+            combined = m if combined is None else (combined | m)
+        if combined is None or not combined.any():
+            item.clear()
+            return
+        import cv2
+        edges = cv2.morphologyEx(
+            combined.astype(np.uint8), cv2.MORPH_GRADIENT,
+            np.ones((3, 3), np.uint8)).astype(bool)
+        rgba = np.zeros((*combined.shape, 4), dtype=np.uint8)
+        rgba[edges] = (255, 255, 255, 110)
+        if self.video_data and (rgba.shape[0] != self.video_data.height
+                                or rgba.shape[1] != self.video_data.width):
+            rgba = cv2.resize(rgba,
+                              (self.video_data.width, self.video_data.height),
+                              interpolation=cv2.INTER_NEAREST)
+        item.setImage(rgba)
 
     def set_seg_visible(self, visible):
         """Toggle segmentation overlay visibility."""

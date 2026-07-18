@@ -117,6 +117,60 @@ for pkg in ("torch", "torchvision", "micro_sam", "trackastra",
 # this is the place to drop assets if we add icons / theme files.
 # datas += [(str(PROJECT_ROOT / "assets" / "*"), "assets")]
 
+# ---- Qt platform plugins (headless "offscreen") -----------------------
+# main.py --selftest (run by CI on the built bundle) forces
+# QT_QPA_PLATFORM=offscreen so it can build real widgets with no display.
+# PyInstaller's PyQt6 hook bundles the on-screen platform plugin
+# (libqcocoa.dylib on macOS, qwindows.dll on Windows) but on some PyQt6
+# layouts it does NOT collect the offscreen plugin, so the built app
+# aborts at startup (SIGABRT / exit 134) with:
+#   'Could not find the Qt platform plugin "offscreen" in
+#    .../_internal/PyQt6/Qt6/plugins/platforms'
+# Force-collect the offscreen plugin from the PyQt6 package into the
+# platforms dir Qt scans (PyQt6/Qt6/plugins/platforms in the bundle).
+# On Windows a missing offscreen plugin doesn't abort — Qt pops a modal
+# "no Qt platform plugin could be initialized" dialog that hangs a
+# headless run forever. Linux already passes because the hook collects
+# it; the explicit add is a harmless de-dupe there.
+#
+# IMPORTANT: locate the plugin via the PyQt6 PACKAGE path only — do NOT
+# `import PyQt6.QtCore` / use QLibraryInfo here. During the Windows build
+# `import PyQt6.QtCore` fails (conda's ICU shadows PyQt6's — see main.py's
+# runtime fix, which the spec process does NOT run), and that exception
+# would skip this whole block, leaving the Windows bundle without the
+# offscreen plugin. `import PyQt6` (the bare package) loads no Qt DLL and
+# works everywhere.
+try:
+    import PyQt6
+    _plat_dir = Path(PyQt6.__file__).parent / "Qt6" / "plugins" / "platforms"
+    _offscreen = next(
+        (_plat_dir / n
+         for n in ("libqoffscreen.dylib", "qoffscreen.dll", "libqoffscreen.so")
+         if (_plat_dir / n).is_file()),
+        None,
+    )
+    if _offscreen is not None:
+        binaries.append((str(_offscreen), "PyQt6/Qt6/plugins/platforms"))
+except Exception:
+    pass
+
+# ---- Linux: bundle the env's libdeflate --------------------------------
+# The Linux bundle ships libOpenEXRCore.so.33 (linked in via vigra, a
+# micro_sam compute dep) but PyInstaller does not always collect the
+# env's libdeflate beside it. At runtime the loader then resolves
+# libdeflate.so.0 to the SYSTEM copy — Ubuntu 22.04 ships libdeflate
+# 1.10, which predates the libdeflate_alloc_compressor_ex API OpenEXR
+# needs — and micro_sam's import dies inside the bundle with:
+#   libOpenEXRCore.so.33: undefined symbol: libdeflate_alloc_compressor_ex
+# (sam_service swallows it, so SAM was silently dead on Linux.) In the
+# live env it works because the loader finds conda's newer libdeflate.
+# Same pattern as the pillow/cv2 fixes: force the matching copy in.
+if sys.platform.startswith("linux"):
+    import glob as _glob
+    for _p in sorted(_glob.glob(os.path.join(sys.prefix, "lib",
+                                             "libdeflate.so*"))):
+        binaries.append((_p, "."))
+
 # ---- Excludes ---------------------------------------------------------
 # Trim the bundle by excluding things we definitely don't use.
 #
@@ -129,10 +183,40 @@ for pkg in ("torch", "torchvision", "micro_sam", "trackastra",
 # at runtime is dead code for us.
 excludes = [
     "PyQt5", "PySide2", "PySide6",
+    # matplotlib itself is handled per-platform just below (NOT
+    # unconditionally excluded): micro_sam imports it from deeper
+    # submodules (e.g. micro_sam.util, which core/sam_service.py loads),
+    # so excluding it makes that import raise ModuleNotFoundError, and
+    # sam_service catches it and silently disables SAM. matplotlib.tests
+    # is always excluded — pure dead weight.
     "matplotlib.tests", "scipy.tests",
     "tornado", "notebook", "jupyter", "jupyterlab",
     "IPython", "pytest",
+    # Unused heavy GUI/vis stacks that ride in transitively (napari /
+    # micro_sam pull them) and break the bundle: vispy tries to
+    # dlopen system libfontconfig at import, napari/magicgui drag in
+    # more Qt. The app imports none of them — exclude so PyInstaller
+    # doesn't bundle (and mis-link) them.
+    "vispy", "napari", "magicgui", "superqt", "qtpy",
+    "PyQt5", "PySide2",
 ]
+
+# matplotlib, per-platform. Keep it on macOS/Windows so micro_sam (and
+# thus SAM) imports cleanly. EXCLUDE it on Linux, where bundling it is a
+# net negative: pyqtgraph's ColorMapMenu eagerly imports matplotlib
+# while constructing every pg.ImageView (find_mpl_leftovers ->
+# colormap.listMaps), and matplotlib's bundled native stack has
+# undefined symbols in the frozen Linux app — historically a conda
+# libtiff ('undefined symbol: jpeg12_write_raw_data'), currently
+# libraqm/harfbuzz ('undefined symbol: hb_ft_font_get_ft_face') — which
+# crashes the app at ImageView construction. And micro_sam already fails
+# to import in the Linux bundle for an unrelated native-symbol reason
+# (libOpenEXRCore/libdeflate), so SAM is dead on Linux regardless;
+# excluding matplotlib there costs no SAM support while keeping the app
+# runnable. (See the offscreen-plugin block above for the other half of
+# the macOS-arm64 selftest fix.)
+if sys.platform.startswith("linux"):
+    excludes.append("matplotlib")
 
 # ---- Analysis ---------------------------------------------------------
 a = Analysis(
@@ -176,6 +260,47 @@ coll = COLLECT(
     upx=False,
     name=APP_NAME,
 )
+
+# ---- macOS: reconcile the two libiconv flavors ------------------------
+# Two libiconv builds share the install name libiconv.2.dylib but export
+# DIFFERENT symbols: Apple's system copy (dyld shared cache) exports
+# _iconv/_iconv_open; conda's GNU build exports only the prefixed
+# _libiconv* names. The bundle contains consumers of BOTH flavors:
+#   - conda-built dylibs (libarchive, ffmpeg family, …) need conda's
+#     GNU copy -> it must STAY bundled (removing it crashes them);
+#   - pip cv2's wheel-vendored dylibs (cv2/.dylibs/libintl.8.dylib &
+#     friends) were delocate-built against APPLE's copy -> bound to
+#     conda's, they die at first lazy use with
+#       dyld: Symbol not found: _iconv
+#     which surfaced as the "random" macOS bundle segfault, sometimes
+#     even after 'selftest: PASS' had been printed.
+# Resolution: keep conda's copy for conda consumers, and REWRITE every
+# cv2-vendored dylib's libiconv reference to /usr/lib/libiconv.2.dylib
+# (always present via the dyld shared cache). macOS two-level namespaces
+# bind each consumer to the library it names, so both flavors coexist.
+# Ad-hoc re-sign afterwards — arm64 refuses to load modified code with
+# a stale signature. Runs post-COLLECT so the .app BUNDLE below (built
+# from the collected dir) inherits the fix; local builds get it too.
+if sys.platform == "darwin":
+    import glob as _g
+    import subprocess as _sp
+    _cv2_dylibs = _g.glob(os.path.join(
+        DISTPATH, APP_NAME, "_internal", "cv2", ".dylibs", "*.dylib"))  # noqa: F821
+    for _f in _cv2_dylibs:
+        try:
+            _out = _sp.run(["otool", "-L", _f], capture_output=True,
+                           text=True, check=True).stdout
+            _refs = [ln.split()[0] for ln in _out.splitlines()[1:]
+                     if "libiconv" in ln]
+            for _ref in _refs:
+                if _ref != "/usr/lib/libiconv.2.dylib":
+                    print(f"iconv-fix: {os.path.basename(_f)}: {_ref} "
+                          f"-> /usr/lib/libiconv.2.dylib")
+                    _sp.run(["install_name_tool", "-change", _ref,
+                             "/usr/lib/libiconv.2.dylib", _f], check=True)
+                    _sp.run(["codesign", "-f", "-s", "-", _f], check=True)
+        except Exception as _e:
+            print(f"iconv-fix: WARNING: {_f}: {_e}")
 
 # macOS .app bundle wrapper.
 if sys.platform == "darwin":

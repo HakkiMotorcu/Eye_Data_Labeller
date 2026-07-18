@@ -86,6 +86,13 @@ class EmbeddingPrecomputeWorker(QThread):
                 return
             self.frame_done.emit(int(frame_idx))
             self.progress.emit(i + 1, total)
+        if self._stop_requested:
+            # A stop that landed mid-final-frame must NOT look like a
+            # normal completion: finished_ok triggers drain/prefetch on
+            # the main thread, which could restart a worker while the
+            # stopper (e.g. queue ranking) is using the predictor.
+            log('embed_worker', 'stopped at completion boundary')
+            return
         self.finished_ok.emit()
 
 
@@ -568,14 +575,33 @@ class SamService:
             )
             log('sam_service', 'auto_segment: got predictor + segmenter',
                 segmenter_type=type(segmenter).__name__)
-            seg = automatic_instance_segmentation(
-                predictor=predictor,
-                segmenter=segmenter,
-                input_path=frame_rgb,
-                ndim=2,
-                verbose=verbose,
-                **kwargs,
-            )
+            try:
+                seg = automatic_instance_segmentation(
+                    predictor=predictor,
+                    segmenter=segmenter,
+                    input_path=frame_rgb,
+                    ndim=2,
+                    verbose=verbose,
+                    **kwargs,
+                )
+            except TypeError as te:
+                # Custom generate kwargs (pred_iou_thresh etc.) apply to
+                # the AMG segmenter; a decoder-based AIS segmenter takes
+                # different parameters. Fall back to defaults rather
+                # than failing the whole run.
+                if not kwargs or 'unexpected keyword' not in str(te):
+                    raise
+                log_error('sam_service',
+                          'segmenter rejected custom thresholds; '
+                          'retrying with defaults',
+                          exc=te, rejected=sorted(kwargs))
+                seg = automatic_instance_segmentation(
+                    predictor=predictor,
+                    segmenter=segmenter,
+                    input_path=frame_rgb,
+                    ndim=2,
+                    verbose=verbose,
+                )
         except Exception as e:
             log_error('sam_service', 'auto_segment failed', exc=e,
                       frame_shape=frame_rgb.shape, model_type=self.model_type)

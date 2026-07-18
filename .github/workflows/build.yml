@@ -28,13 +28,17 @@ jobs:
           - os: windows-latest
             label: Windows-x86_64
             artifact: EyeDataLabeller-windows-x86_64.zip
-          # Pinned to 22.04, NOT ubuntu-latest: PyInstaller bundles link
-          # against the build machine's glibc, and 24.04's glibc 2.39
-          # floor locks out RHEL 9 / Ubuntu 22.04 lab workstations.
-          # 22.04 (glibc 2.35) keeps those working.
-          - os: ubuntu-22.04
-            label: Linux-x86_64
-            artifact: EyeDataLabeller-linux-x86_64.zip
+          # Linux DROPPED from the support matrix (2026-07-18): the
+          # collaborators only use Windows + macOS. Tier B (clone +
+          # install_linux.sh + conda env) still works on Linux — only
+          # the CI-built bundle is gone. To re-enable, restore:
+          #   - os: ubuntu-22.04     # 22.04, NOT -latest: glibc 2.35
+          #     label: Linux-x86_64  # floor keeps RHEL 9 / 22.04 labs
+          #     artifact: EyeDataLabeller-linux-x86_64.zip
+          # The runner.os == 'Linux' steps below and the Linux branches
+          # in eye_labeller.spec were left intact on purpose — they are
+          # inert without this matrix entry, and the known-open Linux
+          # bundle issue is documented in .claude/skills/ci-bundle-debugging.
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -68,7 +72,12 @@ jobs:
           # to 'none' skips the cleanup; this is cosmetic-only on
           # ephemeral runners that are destroyed anyway.
           post-cleanup: none
-          cache-environment: true
+          # Cache OFF: a restored-from-tar conda env can carry stale or
+          # path-broken DLLs across runners (a prime suspect in the
+          # Windows Qt-load failures). Now the env is pinned, a fresh
+          # solve is reproducible anyway. Re-enable once green if the
+          # solve time hurts.
+          cache-environment: false
 
       # macOS-only: force the BLAS/LAPACK stack to OpenBLAS. We can't
       # put this in environment.yml because the openblas constraint
@@ -115,6 +124,89 @@ jobs:
       # so we don't reinstall numpy (would clobber the BLAS pin).
       # Code grep confirms we don't use any cv2 GUI features
       # (imshow / namedWindow / waitKey / etc.) so headless is safe.
+      # July 2026 re-solve left cv2 split across two half-installed
+      # flavors: conda's py-opencv (transitive via micro_sam) AND pip's
+      # opencv-python-headless from environment.yml. The cv2/ package
+      # dir shadows any bare cv2*.so beside it, so the loader finds no
+      # native module anywhere and dies with 'recursion is detected' —
+      # no config patching can fix a shadowing conflict. The old
+      # workflow force-replaced conda's cv2 for exactly this reason;
+      # that step was dropped when patching alone happened to suffice
+      # with May's package set. Reinstated, decisively: remove every
+      # cv2 flavor, then install exactly one (pip headless, --no-deps
+      # so numpy/BLAS stay untouched).
+      - name: Force a single cv2 (pip opencv-python-headless)
+        shell: bash -el {0}
+        run: |
+          micromamba remove -n eye-labeller -y --force \
+            opencv py-opencv libopencv 2>/dev/null || true
+          pip uninstall -y opencv-python opencv-python-headless \
+            opencv-contrib-python opencv-contrib-python-headless \
+            2>/dev/null || true
+          # Scrub any orphaned leftovers of either layout.
+          python - <<'PY'
+          import glob, os, shutil, sysconfig
+          sp = sysconfig.get_paths()['purelib']
+          for pat in ('cv2', 'cv2.*', 'opencv_python*', 'opencv-python*'):
+              for p in glob.glob(os.path.join(sp, pat)):
+                  (shutil.rmtree if os.path.isdir(p) else os.remove)(p)
+                  print('removed leftover:', p)
+          PY
+          pip install --no-deps opencv-python-headless
+          # Diagnostic ground truth for any future drift: what does the
+          # cv2 install actually look like now?
+          python - <<'PY'
+          import glob, os, sysconfig
+          sp = sysconfig.get_paths()['purelib']
+          for p in sorted(glob.glob(os.path.join(sp, 'cv2*'))):
+              print(p)
+              if os.path.isdir(p):
+                  for q in sorted(os.listdir(p))[:25]:
+                      print('   ', q)
+          PY
+
+      # Same conda/pip duplication disease as cv2, different organ:
+      # conda's pillow links conda's libtiff/libjpeg, and inside a
+      # PyInstaller bundle that pairing broke ('undefined symbol:
+      # jpeg12_write_raw_data'). pip's pillow wheel is self-contained
+      # (bundles its own image libs under PIL.libs with $ORIGIN
+      # rpaths), which survives bundling on every OS.
+      - name: Force self-contained pip pillow
+        shell: bash -el {0}
+        run: |
+          pip install --force-reinstall --no-deps pillow
+
+      # micro-sam, slim: the conda package hard-depends on napari (a full
+      # second GUI stack — the root cause of the Windows ICU/Qt DLL
+      # shadowing and most bundle excludes), and upstream's pip metadata
+      # hard-pins napari too. Install the package alone; every real
+      # runtime dep is pinned in environment.yml. Then prove the compute
+      # import surface works with the GUI stack truly absent — if the
+      # solver ever sneaks napari back in, fail HERE with a clear
+      # message, not somewhere downstream.
+      - name: Install micro_sam (slim, --no-deps)
+        shell: bash -el {0}
+        run: |
+          pip install --no-deps \
+            "git+https://github.com/computational-cell-analytics/micro-sam.git@v1.7.7"
+          python - <<'PY'
+          import importlib.util as iu
+          for m in ("napari", "magicgui", "superqt", "vispy"):
+              assert iu.find_spec(m) is None, \
+                  f"GUI stack leaked back into the env: {m}"
+          import micro_sam.util
+          import micro_sam.automatic_segmentation
+          import micro_sam.prompt_based_segmentation
+          import micro_sam
+          print(f"micro_sam {micro_sam.__version__} slim import surface OK; "
+                "napari/magicgui/superqt/vispy absent")
+          PY
+
+      # NOTE: PyQt6 import is validated by the source-tree selftest
+      # below (after the Linux GL libs are installed). We no longer
+      # surgically rewrite Qt on Windows — a plain `conda env create`
+      # launches PyQt6 fine on real machines; keep the env clean.
+
       - name: Patch cv2 config files to use bundle-safe relative paths
         shell: bash -el {0}
         run: |
@@ -148,14 +240,24 @@ jobs:
           BINARIES_PATHS = []
           EOF
 
-          # config-<pyver>.py — point PYTHON_EXTENSIONS_PATHS at the
-          # python-<pyver>/ subdir RELATIVE to where this config file
-          # lives. __file__ resolves correctly in both env and bundle.
+          # config-<pyver>.py — point PYTHON_EXTENSIONS_PATHS at
+          # wherever the native module ACTUALLY lives, relative to this
+          # config file. Two layouts exist in the wild and the resolver
+          # picks whichever dependency set won this solve:
+          #   conda-forge:  cv2/python-X.Y/cv2.cpython-*.so
+          #   pip wheel:    cv2/cv2*.so  (flat)
+          # Hardcoding python-X.Y (the old approach) broke the moment a
+          # July 2026 re-solve produced the flat layout: the loader
+          # found no native module on the configured path and died with
+          # 'recursion is detected during loading of cv2'. Listing only
+          # directories that exist — with the loader dir as fallback —
+          # works for both layouts, in the env and in the bundle.
           cat > "$CV2_DIR/config-${PY_VER}.py" <<EOF
           import os
+          _here = os.path.dirname(os.path.abspath(__file__))
           PYTHON_EXTENSIONS_PATHS = [
-              os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           'python-${PY_VER}')
+              p for p in (os.path.join(_here, 'python-${PY_VER}'), _here)
+              if os.path.isdir(p)
           ] + PYTHON_EXTENSIONS_PATHS
           EOF
 
@@ -174,6 +276,21 @@ jobs:
           print(f'cv2 OK: {cv2.__version__} at {cv2.__file__}')
           PY
 
+      # PyQt6 links against system GL/X11 libraries that GitHub's
+      # headless Linux runners don't ship — without them even
+      # `import PyQt6.QtWidgets` dies with 'libEGL.so.1: cannot open
+      # shared object file'. Needed by both selftest steps (the bundle
+      # links the same system libs).
+      - name: Install Linux Qt system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libopengl0 libxkbcommon0 libxkbcommon-x11-0 \
+            libdbus-1-3 libfontconfig1 libxcb-cursor0 libxcb-icccm4 \
+            libxcb-image0 libxcb-keysyms1 libxcb-render-util0 \
+            libxcb-shape0 libxcb-xinerama0
+
       # Run the app's own --selftest from the source tree first: if
       # this fails, the problem is the ENV (deps, imports), not the
       # bundling — the distinction saves an hour of guessing.
@@ -181,12 +298,48 @@ jobs:
         timeout-minutes: 15
         shell: bash -el {0}
         run: |
-          python main.py --selftest
+          # EYE_LABELLER_SELFTEST_SAM=1: actually load vit_t and run a
+          # box prompt — proves "SAM does the job", not just "imports".
+          EYE_LABELLER_SELFTEST_SAM=1 python main.py --selftest
 
       - name: Build with PyInstaller
         shell: bash -el {0}
         run: |
           pyinstaller packaging/eye_labeller.spec --clean --noconfirm
+          # macOS libiconv guard: the spec keeps conda's GNU libiconv
+          # for conda-built consumers and rewrites cv2's wheel-vendored
+          # dylibs to the system /usr/lib copy (two flavors, same name,
+          # different exported symbols — see the spec's iconv-fix
+          # block). Assert both halves held, or fail HERE with a clear
+          # message instead of a mystery segfault at selftest.
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            ls dist/EyeDataLabeller/_internal/ | grep -qi "^libiconv" \
+              || { echo "::error:: conda libiconv missing from bundle (conda-built dylibs need it)"; exit 1; }
+            BAD=0
+            for f in dist/EyeDataLabeller/_internal/cv2/.dylibs/*.dylib; do
+              [ -f "$f" ] || continue
+              REF=$(otool -L "$f" 2>/dev/null | awk '/libiconv/{print $1}' | head -1)
+              if [ -n "$REF" ] && [ "$REF" != "/usr/lib/libiconv.2.dylib" ]; then
+                echo "::error:: $(basename "$f") still references $REF (want /usr/lib/libiconv.2.dylib)"
+                BAD=1
+              fi
+            done
+            [ "$BAD" = 0 ] && echo "libiconv guard OK: conda copy bundled; cv2 dylibs point at /usr/lib"
+            [ "$BAD" = 0 ] || exit 1
+          fi
+          # TEMP DIAG (Linux): ground truth for the libdeflate fix — is
+          # a libdeflate bundled, and what does OpenEXR link against?
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            echo "== libdeflate in bundle =="
+            ls dist/EyeDataLabeller/_internal/ | grep -i deflate || echo "  NONE BUNDLED"
+            echo "== bundled libOpenEXRCore deps =="
+            ldd dist/EyeDataLabeller/_internal/libOpenEXRCore.so.33 2>/dev/null \
+              | grep -iE "deflate|not found" || true
+            echo "== env libdeflate has the symbol? =="
+            for f in "$CONDA_PREFIX"/lib/libdeflate.so*; do
+              [ -e "$f" ] && echo "$f: $(nm -D "$f" 2>/dev/null | grep -c alloc_compressor_ex) match(es)"
+            done
+          fi
 
       # Then run the BUILT bundle. Every past bundle breakage (cv2
       # config recursion, numpy/Accelerate symbols, Qt plugin paths)
@@ -200,13 +353,26 @@ jobs:
         shell: bash -el {0}
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
-            ./dist/EyeDataLabeller/EyeDataLabeller.exe --selftest
+            # The windowed (console=False) exe block-buffers stdout, so run
+            # it unbuffered to keep the selftest's output visible. And arm
+            # main.py's in-process watchdog (EYE_LABELLER_FAULT_TIMEOUT): a
+            # hung windowed exe is otherwise invisible until the job cap, so
+            # the watchdog dumps every thread's stack and aborts if startup
+            # ever stalls, turning a silent hang into an actionable trace.
+            PYTHONUNBUFFERED=1 EYE_LABELLER_FAULT_TIMEOUT=600 \
+              EYE_LABELLER_SELFTEST_SAM=1 \
+              ./dist/EyeDataLabeller/EyeDataLabeller.exe --selftest
           elif [ -x dist/EyeDataLabeller/EyeDataLabeller/EyeDataLabeller ]; then
-            ./dist/EyeDataLabeller/EyeDataLabeller/EyeDataLabeller --selftest
+            PYTHONUNBUFFERED=1 EYE_LABELLER_SELFTEST_SAM=1 \
+              ./dist/EyeDataLabeller/EyeDataLabeller/EyeDataLabeller --selftest
           elif [ -x dist/EyeDataLabeller/EyeDataLabeller ]; then
-            ./dist/EyeDataLabeller/EyeDataLabeller --selftest
+            # PYTHONUNBUFFERED everywhere: a mid-run crash must not eat
+            # the buffered selftest verdict (it did, on macOS).
+            PYTHONUNBUFFERED=1 EYE_LABELLER_SELFTEST_SAM=1 \
+              ./dist/EyeDataLabeller/EyeDataLabeller --selftest
           else
-            ./dist/EyeDataLabeller.app/Contents/MacOS/EyeDataLabeller --selftest
+            PYTHONUNBUFFERED=1 EYE_LABELLER_SELFTEST_SAM=1 \
+              ./dist/EyeDataLabeller.app/Contents/MacOS/EyeDataLabeller --selftest
           fi
 
       # macOS: turn the COLLECT folder into a .app + a .dmg ready to

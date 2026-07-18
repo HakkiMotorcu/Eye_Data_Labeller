@@ -15,9 +15,31 @@ display compatibility with the existing pyqtgraph pipeline; raw data is
 kept on the instance for future passes that need the original dtype.
 """
 
+import os
 from typing import Protocol, runtime_checkable
 import numpy as np
 import tifffile
+
+VIDEO_EXTS = {'.avi', '.mp4', '.mkv', '.mov'}
+TIFF_EXTS = {'.tif', '.tiff'}
+SUPPORTED_EXTS = VIDEO_EXTS | TIFF_EXTS
+
+
+def load_frame_source(path):
+    """Open a file as the right kind of frame source based on extension.
+
+    Lives here (not main.py) so File>Open / drag-drop / the session
+    queue can dispatch without importing the entry-point module.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext in TIFF_EXTS:
+        return TiffFrameSource(path)
+    if ext in VIDEO_EXTS:
+        from core.volume_data import VideoData  # local: avoid cycle
+        return VideoData(path)
+    raise ValueError(
+        f"Unsupported file type '{ext}'. "
+        f"Accepted: {sorted(SUPPORTED_EXTS)}")
 
 
 @runtime_checkable

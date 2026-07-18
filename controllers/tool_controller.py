@@ -19,726 +19,13 @@ from core.tracker_service import (
 from core.debug import log, log_error, log_action
 
 
-# ======================================================================
-# UNDO / REDO  — lightweight command pattern
-# ======================================================================
-class UndoStack:
-    """Simple undo/redo stack. Max 50 commands.
-
-    ``on_change`` (optional callable) fires after every push / undo /
-    redo. The controller hooks _mark_seg_dirty here so EVERY undoable
-    operation — including undo/redo themselves, which also mutate
-    project state — flips the unsaved-changes flag. Individual
-    mutation sites used to be responsible for this and most forgot,
-    so painted masks could be lost on quit with the UI showing
-    "Saved ✓".
-    """
-    def __init__(self, max_size=50, on_change=None):
-        self._undo = []
-        self._redo = []
-        self._max = max_size
-        self.on_change = on_change
-
-    def _notify(self):
-        if self.on_change is not None:
-            try:
-                self.on_change()
-            except Exception:
-                pass
-
-    def push(self, cmd):
-        self._undo.append(cmd)
-        if len(self._undo) > self._max:
-            self._undo.pop(0)
-        self._redo.clear()
-        self._notify()
-
-    def undo(self):
-        if not self._undo:
-            return
-        cmd = self._undo.pop()
-        cmd.undo()
-        self._redo.append(cmd)
-        self._notify()
-
-    def redo(self):
-        if not self._redo:
-            return
-        cmd = self._redo.pop()
-        cmd.redo()
-        self._undo.append(cmd)
-        self._notify()
-
-    @property
-    def can_undo(self):
-        return bool(self._undo)
-
-    @property
-    def can_redo(self):
-        return bool(self._redo)
-
-    def clear(self):
-        self._undo.clear()
-        self._redo.clear()
-
-
-# ======================================================================
-# UNDO COMMANDS
-# ======================================================================
-class AddAnnotationCmd:
-    def __init__(self, controller, anno):
-        self.ctrl = controller
-        self.anno = anno
-
-    def undo(self):
-        self.ctrl._raw_delete(self.anno)
-
-    def redo(self):
-        self.ctrl._raw_restore(self.anno)
-
-
-class AddAnnotationBatchCmd:
-    """Undo/redo adding a group of annotations at once (e.g. vein propagation)."""
-    def __init__(self, controller, annos):
-        self.ctrl = controller
-        self.annos = list(annos)
-
-    def undo(self):
-        for anno in self.annos:
-            if anno in self.ctrl.annotations:
-                anno.delete_ui()
-                self.ctrl.annotations.remove(anno)
-                if self.ctrl.active_annotation == anno:
-                    self.ctrl.active_annotation = None
-        self.ctrl._show_frame_annotations(self.ctrl.window._current_frame_idx)
-
-    def redo(self):
-        for anno in self.annos:
-            if anno not in self.ctrl.annotations:
-                self.ctrl.annotations.append(anno)
-                self.ctrl.window.view_frame.addItem(anno.roi)
-                anno.update_visuals()
-        self.ctrl._show_frame_annotations(self.ctrl.window._current_frame_idx)
-
-
-class DeleteAnnotationCmd:
-    """Undo/redo deleting one cell annotation.
-
-    Also snapshots the annotation's frame in its class layer:
-    delete_selected erases the cell's painted pixels before pushing
-    this command, so undo must bring those pixels back too — they
-    used to be unrecoverable (bbox reappeared, mask stayed gone).
-    """
-    def __init__(self, controller, anno, index,
-                 before_frame=None, after_frame=None):
-        self.ctrl = controller
-        self.anno = anno
-        self.index = index
-        self.before_frame = before_frame  # (H, W) copy pre-erase, or None
-        self.after_frame = after_frame    # (H, W) copy post-erase, or None
-
-    def _restore_frame(self, frame_mask):
-        if frame_mask is None:
-            return
-        seg = self.ctrl.window.seg_data
-        if seg is None:
-            return
-        layer = seg.get_layer(self.anno.class_type)
-        if layer is None:
-            return
-        layer[self.anno.frame_idx][:] = frame_mask
-        if self.anno.frame_idx == self.ctrl.window._current_frame_idx:
-            self.ctrl.window._update_seg_overlay()
-
-    def undo(self):
-        self.ctrl._raw_restore(self.anno, index=self.index)
-        self._restore_frame(self.before_frame)
-
-    def redo(self):
-        self.ctrl._raw_delete(self.anno)
-        self._restore_frame(self.after_frame)
-
-
-class TrackingCmd:
-    """Undo/redo a tracker pass.
-
-    Snapshots the seg masks, the instance_colors dict, and each
-    annotation's (instance_id, name) before and after the tracker
-    applied its remap. Undo restores the 'before' snapshot; redo
-    restores 'after'.
-
-    Memory: 2 * seg.masks.nbytes plus small dicts. For typical
-    10-frame 500x500 stacks that's ~10 MB — fine.
-    """
-    def __init__(self, controller, before, after):
-        self.ctrl = controller
-        self.before = before  # {'masks': np.ndarray, 'colors': dict, 'annos': [(anno, iid, name), ...]}
-        self.after = after
-
-    def undo(self):
-        self._restore(self.before)
-
-    def redo(self):
-        self._restore(self.after)
-
-    def _restore(self, state):
-        seg = self.ctrl.window.seg_data
-        if seg is None:
-            return
-        seg.masks[:] = state['masks']
-        seg.instance_colors.clear()
-        seg.instance_colors.update(state['colors'])
-        for record in state['annos']:
-            # Backwards-compat: old snapshots had 3-tuples without color.
-            if len(record) == 4:
-                anno, iid, name, color = record
-                anno.instance_id = iid
-                anno.name = name
-                anno.color = color
-            else:
-                anno, iid, name = record
-                anno.instance_id = iid
-                anno.name = name
-        # Refresh visuals + list
-        for anno in self.ctrl.annotations:
-            anno.update_visuals()
-        self.ctrl._show_frame_annotations(self.ctrl.window._current_frame_idx)
-        self.ctrl.window._update_seg_overlay()
-        self.ctrl.state.annotations_changed.emit()
-
-
-class SamBoxPromptCmd:
-    """Undo/redo for a single SAM-box-prompt paint into one cell.
-
-    Snapshots the affected frame's full mask AND the annotation's ROI
-    geometry (because the bbox may have been tightened to fit the new
-    mask). Memory cost is one (H, W) int32 per command — fine.
-    """
-    def __init__(self, controller, frame_idx, instance_id,
-                 before_frame, after_frame,
-                 before_geom=None, after_geom=None, class_type='cell'):
-        self.ctrl = controller
-        self.frame_idx = int(frame_idx)
-        self.instance_id = int(instance_id)
-        self.before_frame = before_frame  # (H, W) int32 copy
-        self.after_frame = after_frame
-        self.before_geom = before_geom    # {'x','y','w','h'} or None
-        self.after_geom = after_geom
-        self.class_type = class_type
-
-    def _restore(self, frame_mask, geom):
-        seg = self.ctrl.window.seg_data
-        if seg is None:
-            return
-        seg.get_layer(self.class_type)[self.frame_idx][:] = frame_mask
-        for a in self.ctrl.annotations:
-            if (a.frame_idx == self.frame_idx
-                    and a.instance_id == self.instance_id
-                    and a.class_type == self.class_type):
-                if geom is not None:
-                    a._is_syncing = True
-                    a.roi.setPos([geom['x'], geom['y']])
-                    a.roi.setSize([geom['w'], geom['h']])
-                    a._is_syncing = False
-                a.update_visuals()
-                break
-        if self.frame_idx == self.ctrl.window._current_frame_idx:
-            self.ctrl.window._update_seg_overlay()
-        self.ctrl.state.annotations_changed.emit()
-
-    def undo(self):
-        self._restore(self.before_frame, self.before_geom)
-
-    def redo(self):
-        self._restore(self.after_frame, self.after_geom)
-
-
-class DeletePaintOnlyIdentityCmd:
-    """Undo/redo deletion of every frame-entry + every painted pixel for a
-    paint-only identity (vessel / capillary).
-
-    Snapshots the (T, H, W) boolean mask of pixels that belonged to this
-    instance_id so undo can restore them exactly.
-    """
-    def __init__(self, controller, annos, instance_id, pixel_mask, color,
-                 class_type='vessel'):
-        self.ctrl = controller
-        self.annos = list(annos)
-        self.iid = instance_id
-        self.pixel_mask = pixel_mask  # (T, H, W) bool, in `class_type` layer
-        self.color = color
-        self.class_type = class_type
-
-    def undo(self):
-        seg = self.ctrl.window.seg_data
-        if seg is not None:
-            layer = seg.get_layer(self.class_type)
-            layer[self.pixel_mask] = self.iid
-            if self.color is not None:
-                seg.register_instance_color(self.iid, self.color,
-                                             class_type=self.class_type)
-        for anno in self.annos:
-            self.ctrl._raw_restore(anno)
-        self.ctrl._show_frame_annotations(self.ctrl.window._current_frame_idx)
-        self.ctrl.window._update_seg_overlay()
-        self.ctrl.state.annotations_changed.emit()
-
-    def redo(self):
-        seg = self.ctrl.window.seg_data
-        if seg is not None:
-            layer = seg.get_layer(self.class_type)
-            layer[self.pixel_mask] = 0
-            seg.get_colors(self.class_type).pop(self.iid, None)
-        if self.ctrl.active_annotation in self.annos:
-            self.ctrl.active_annotation = None
-        for anno in self.annos:
-            self.ctrl._raw_delete(anno)
-        self.ctrl._show_frame_annotations(self.ctrl.window._current_frame_idx)
-        self.ctrl.window._update_seg_overlay()
-        self.ctrl.state.annotations_changed.emit()
-
-
-class MoveResizeCmd:
-    """Undo/redo a bbox move or resize, optionally also restoring pixel data.
-
-    old_mask / new_mask are full frame mask copies (int32 ndarray).
-    Provided only when pixels were actually modified (translate or crop).
-    """
-    def __init__(self, anno, old_state, new_state,
-                 ctrl=None, frame_idx=None, old_mask=None, new_mask=None,
-                 class_type='cell'):
-        self.anno = anno
-        self.old = old_state
-        self.new = new_state
-        self.ctrl = ctrl
-        self.frame_idx = frame_idx
-        self.old_mask = old_mask
-        self.new_mask = new_mask
-        self.class_type = class_type
-
-    def undo(self):
-        self._apply_box(self.old)
-        self._apply_mask(self.old_mask)
-
-    def redo(self):
-        self._apply_box(self.new)
-        self._apply_mask(self.new_mask)
-
-    def _apply_box(self, s):
-        a = self.anno
-        a._is_syncing = True
-        a.roi.setPos([s['x'], s['y']])
-        a.roi.setSize([s['w'], s['h']])
-        a._is_syncing = False
-        a.sig_updated.emit(a)
-
-    def _apply_mask(self, mask):
-        if mask is None or self.ctrl is None:
-            return
-        seg = self.ctrl.window.seg_data
-        if seg is None:
-            return
-        seg.get_layer(self.class_type)[self.frame_idx] = mask.copy()
-        self.ctrl.window._update_seg_overlay()
-
-
-class LockCmd:
-    def __init__(self, controller, anno, locked_after):
-        self.ctrl = controller
-        self.anno = anno
-        self.locked_after = locked_after
-
-    def undo(self):
-        self.anno.set_locked(not self.locked_after)
-        self.ctrl._refresh_list_colors()
-
-    def redo(self):
-        self.anno.set_locked(self.locked_after)
-        self.ctrl._refresh_list_colors()
-
-
-class BrushStrokeCmd:
-    """Undo/redo a single brush stroke (press → drag → release)."""
-    def __init__(self, controller, frame_idx, old_mask, new_mask,
-                 class_type='cell'):
-        self.ctrl = controller
-        self.frame_idx = frame_idx
-        self.old_mask = old_mask
-        self.new_mask = new_mask
-        self.class_type = class_type
-
-    def undo(self):
-        seg = self.ctrl.window.seg_data
-        if seg is not None:
-            seg.get_layer(self.class_type)[self.frame_idx] = self.old_mask.copy()
-            self.ctrl.window._update_seg_overlay()
-
-    def redo(self):
-        seg = self.ctrl.window.seg_data
-        if seg is not None:
-            seg.get_layer(self.class_type)[self.frame_idx] = self.new_mask.copy()
-            self.ctrl.window._update_seg_overlay()
-
-
-class PropagateWithSpawnCmd:
-    """Undo/redo a propagate operation that also created the per-frame
-    paint-only annotations (when the user invoked Propagate Mask on a
-    vessel/capillary that only existed on the current frame).
-
-    Single undoable step:
-      undo  → revert propagated pixels, then remove the spawned annos.
-      redo  → re-add the spawned annos, then re-apply pixels.
-    """
-    def __init__(self, controller, annos, old_masks, new_masks, class_type):
-        self.ctrl = controller
-        self.annos = list(annos)
-        self.old_masks = old_masks
-        self.new_masks = new_masks
-        self.class_type = class_type
-
-    def _apply_masks(self, masks_dict):
-        seg = self.ctrl.window.seg_data
-        if seg is None:
-            return
-        layer = seg.get_layer(self.class_type)
-        for fi, mask in masks_dict.items():
-            layer[fi] = mask.copy()
-
-    def undo(self):
-        self._apply_masks(self.old_masks)
-        for anno in self.annos:
-            if anno in self.ctrl.annotations:
-                anno.delete_ui()
-                self.ctrl.annotations.remove(anno)
-                if self.ctrl.active_annotation == anno:
-                    self.ctrl.active_annotation = None
-        self.ctrl._show_frame_annotations(
-            self.ctrl.window._current_frame_idx)
-        self.ctrl.window._update_seg_overlay()
-
-    def redo(self):
-        for anno in self.annos:
-            if anno not in self.ctrl.annotations:
-                self.ctrl.annotations.append(anno)
-                self.ctrl.window.view_frame.addItem(anno.roi)
-                anno.update_visuals()
-        self._apply_masks(self.new_masks)
-        self.ctrl._show_frame_annotations(
-            self.ctrl.window._current_frame_idx)
-        self.ctrl.window._update_seg_overlay()
-
-
-class PropagateMaskCmd:
-    """Undo/redo a mask-propagation operation across multiple frames."""
-    def __init__(self, controller, old_masks, new_masks, class_type='cell'):
-        # old_masks / new_masks: dict {frame_idx: np.ndarray copy}
-        self.ctrl = controller
-        self.old_masks = old_masks   # {fi: mask before propagation}
-        self.new_masks = new_masks   # {fi: mask after  propagation}
-        self.class_type = class_type
-
-    def _apply(self, masks_dict):
-        seg = self.ctrl.window.seg_data
-        if seg is None:
-            return
-        layer = seg.get_layer(self.class_type)
-        for fi, mask in masks_dict.items():
-            layer[fi] = mask.copy()
-        self.ctrl.window._update_seg_overlay()
-
-    def undo(self):
-        self._apply(self.old_masks)
-
-    def redo(self):
-        self._apply(self.new_masks)
-
-
-# ======================================================================
-# 2D ANNOTATION
-# ======================================================================
-class Annotation2D(QObject):
-    sig_clicked = pyqtSignal(object)
-    sig_updated = pyqtSignal(object)
-
-    # class_type slot values:
-    #   'cell'       - has a bbox, drawn via ROI
-    #   'vessel'     - paint-only (no bbox); larger retinal vessel
-    #   'capillary'  - paint-only (no bbox); small retinal capillary
-    # Non-cell classes use the same paint-only rendering path.
-
-    def __init__(self, name, view, controller,
-                 start_pos=(100, 100), start_size=(40, 40),
-                 shape_mode='rect', frame_idx=0,
-                 instance_id=None, color=None, class_type='cell'):
-        super().__init__()
-        self.name = name
-        self.view = view
-        self.controller = controller
-        self.shape_mode = shape_mode
-        self.frame_idx = frame_idx
-        self.instance_id = instance_id  # seg instance ID (if from seg map)
-        self.color = color              # (R, G, B) display colour
-        # Backwards compat: 'vein' was the old name for 'vessel'
-        if class_type == 'vein':
-            class_type = 'vessel'
-        self.class_type = class_type
-
-        self._seg_dirty = False         # True when seg pixels were painted/erased
-        self._is_syncing = False
-        self.is_selected = False
-        self.is_locked = False
-        self.is_hidden = False  # per-row visibility toggle (D)
-
-        x, y = start_pos
-        w, h = start_size
-
-        self.roi = self._make_roi(shape_mode, [x, y], [w, h])
-        self.view.addItem(self.roi)
-        self._connect_roi_signals()
-
-        if self.is_paint_only:
-            # Paint-only classes have no visible bbox
-            self.roi.setPen(pg.mkPen(None))
-            self.roi.hoverPen = pg.mkPen(None)
-            self.roi.translatable = False
-            self.roi.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-            for h in self.roi.getHandles():
-                h.setVisible(False)
-            self.roi.setVisible(False)
-        else:
-            self.update_visuals()
-
-    @property
-    def is_paint_only(self):
-        """True for non-cell classes (vessel, capillary): paint-only, no visible bbox."""
-        return self.class_type != 'cell'
-
-    @staticmethod
-    def _make_rect_roi(pos, size):
-        roi = pg.RectROI(pos, size, resizable=False)
-        roi.addScaleHandle([0, 0], [1, 1])
-        roi.addScaleHandle([1, 0], [0, 1])
-        roi.addScaleHandle([0, 1], [1, 0])
-        roi.addScaleHandle([1, 1], [0, 0])
-        return roi
-
-    @staticmethod
-    def _make_ellipse_roi(pos, size):
-        roi = pg.EllipseROI(pos, size)
-        old_children = list(roi.childItems())
-        for h in roi.getHandles()[:]:
-            roi.removeHandle(h)
-        for c in roi.childItems():
-            if c in old_children:
-                c.setParentItem(None)
-        roi.addScaleHandle([0.5, 0],   [0.5, 1])
-        roi.addScaleHandle([1,   0.5], [0,   0.5])
-        roi.addScaleHandle([0.5, 1],   [0.5, 0])
-        roi.addScaleHandle([0,   0.5], [1,   0.5])
-        return roi
-
-    @staticmethod
-    def _make_roi(mode, pos, size):
-        if mode == 'ellipse':
-            return Annotation2D._make_ellipse_roi(pos, size)
-        return Annotation2D._make_rect_roi(pos, size)
-
-    def _connect_roi_signals(self):
-        self.roi.sigRegionChanged.connect(self._on_region_changed)
-        self.roi.sigClicked.connect(self._on_interaction)
-        self.roi.sigRegionChangeStarted.connect(self._on_interaction)
-        self.roi.sigRegionChangeStarted.connect(self._on_drag_start)
-        self.roi.sigRegionChangeFinished.connect(self._on_drag_end)
-
-    def _disconnect_roi_signals(self):
-        try:
-            self.roi.sigRegionChanged.disconnect(self._on_region_changed)
-            self.roi.sigClicked.disconnect(self._on_interaction)
-            self.roi.sigRegionChangeStarted.disconnect(self._on_interaction)
-            self.roi.sigRegionChangeStarted.disconnect(self._on_drag_start)
-            self.roi.sigRegionChangeFinished.disconnect(self._on_drag_end)
-        except RuntimeError:
-            pass
-
-    def set_shape_mode(self, mode):
-        if mode == self.shape_mode:
-            return
-        x, y = self.roi.pos()
-        w, h = self.roi.size()
-
-        self._disconnect_roi_signals()
-        self.view.removeItem(self.roi)
-
-        self.shape_mode = mode
-        self.roi = self._make_roi(mode, [x, y], [w, h])
-        self.view.addItem(self.roi)
-        self._connect_roi_signals()
-
-        if self.is_locked:
-            self.roi.translatable = False
-            self.roi.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
-        self.update_visuals()
-
-    def set_locked(self, locked):
-        self.is_locked = locked
-        self.roi.translatable = not locked
-        # Reject mouse buttons entirely when locked so neither the ROI body
-        # nor a stray hit on a handle moves anything. pyqtgraph handles still
-        # receive mouse events when only hidden, so also disable them.
-        self.roi.setAcceptedMouseButtons(
-            Qt.MouseButton.NoButton if locked else Qt.MouseButton.LeftButton)
-        for h in self.roi.getHandles():
-            h.setEnabled(not locked)
-        self.update_visuals()
-
-    def update_visuals(self):
-        if self.is_paint_only:
-            # Veins never show ROI
-            return
-        style = Qt.PenStyle.SolidLine
-
-        if self.controller._label_color_mode:
-            # Simple status-based coloring: R=unlocked, Y=selected, G=locked
-            if self.is_locked:
-                color = QColor(0, 200, 0)          # green
-                width = 3 if self.is_selected else 2
-                if self.is_selected:
-                    style = Qt.PenStyle.DashLine
-            elif self.is_selected:
-                color = QColor(255, 255, 0)         # yellow
-                width = 2
-            else:
-                color = QColor(255, 50, 50)         # red
-                width = 2
-            z_val = 10 if self.is_selected else (5 if self.is_locked else 2)
-        elif self.is_locked:
-            color = 'g'
-            width = 3 if self.is_selected else 1
-            if self.is_selected:
-                style = Qt.PenStyle.DashLine
-            z_val = 5
-        elif self.is_selected:
-            color = 'y'
-            width = 2
-            z_val = 10
-        elif self.color:
-            color = QColor(*self.color)
-            width = 1
-            z_val = 2
-        else:
-            color = 'r'
-            width = 1
-            z_val = 2
-
-        if color is not None:
-            pen = pg.mkPen(color, width=width, style=style)
-            hover = pg.mkPen('y', width=width + 1)
-        else:
-            pen = pg.mkPen(None)
-            hover = pg.mkPen(None)
-
-        self.roi.setPen(pen)
-        self.roi.hoverPen = hover
-        self.roi.setZValue(z_val)
-        for h in self.roi.getHandles():
-            h.setVisible(not self.is_locked)
-
-    def _on_interaction(self, *args):
-        if not self.is_selected:
-            self.sig_clicked.emit(self)
-
-    def _on_region_changed(self):
-        if not self._is_syncing:
-            self.sig_updated.emit(self)
-
-    def _on_drag_start(self, *args):
-        self.controller._geometry_snapshot = ToolController._snap_geometry(self)
-
-    def _on_drag_end(self, *args):
-        if self.is_locked:
-            # Belt-and-braces: set_locked already blocks mouse input, but
-            # if anything sneaks through we refuse to push a MoveResizeCmd
-            # for a locked annotation.
-            self.controller._geometry_snapshot = None
-            return
-        old = self.controller._geometry_snapshot
-        if old is None:
-            return
-        new = ToolController._snap_geometry(self)
-        self.controller._geometry_snapshot = None
-
-        # Nothing actually changed
-        if (old['x'] == new['x'] and old['y'] == new['y'] and
-                old['w'] == new['w'] and old['h'] == new['h']):
-            return
-
-        ctrl = self.controller
-        seg = ctrl.window.seg_data
-        frame = self.frame_idx
-        has_seg = (seg is not None and self.instance_id is not None
-                   and not self.is_paint_only)
-
-        # Detect translate vs resize (0.5 px tolerance on size)
-        _EPS = 0.5
-        size_changed = (abs(old['w'] - new['w']) > _EPS or
-                        abs(old['h'] - new['h']) > _EPS)
-
-        old_mask = new_mask = None
-
-        ct = self.class_type
-        layer = seg.get_layer(ct) if seg is not None else None
-        if not size_changed:
-            # ── TRANSLATE: move pixels with the box ───────────────────────
-            if has_seg:
-                scale = ctrl._seg_scale()
-                if scale is not None:
-                    sx, sy = scale
-                    old_mask = layer[frame].copy()
-                    seg.move_instance_pixels(
-                        frame, self.instance_id,
-                        (old['x'] * sx, old['y'] * sy,
-                         old['w'] * sx, old['h'] * sy),
-                        (new['x'] * sx, new['y'] * sy,
-                         new['w'] * sx, new['h'] * sy),
-                        class_type=ct,
-                    )
-                    new_mask = layer[frame].copy()
-                    ctrl.window._update_seg_overlay()
-        else:
-            # ── RESIZE ────────────────────────────────────────────────────
-            shrunk = (new['w'] < old['w'] - _EPS or new['h'] < old['h'] - _EPS)
-            if shrunk and has_seg:
-                # Smaller box → crop pixels that now fall outside
-                scale = ctrl._seg_scale()
-                if scale is not None:
-                    sx, sy = scale
-                    old_mask = layer[frame].copy()
-                    seg.crop_instance_to_bbox(
-                        frame, self.instance_id,
-                        new['x'] * sx, new['y'] * sy,
-                        new['w'] * sx, new['h'] * sy,
-                        class_type=ct,
-                    )
-                    new_mask = layer[frame].copy()
-                    ctrl.window._update_seg_overlay()
-            # Bigger box → pixels unchanged, no mask snapshot needed
-
-        ctrl._undo_stack.push(MoveResizeCmd(
-            self, old, new,
-            ctrl=ctrl if old_mask is not None else None,
-            frame_idx=frame,
-            old_mask=old_mask,
-            new_mask=new_mask,
-            class_type=ct,
-        ))
-
-    def delete_ui(self):
-        self.view.removeItem(self.roi)
-
-    def set_visible(self, visible):
-        if self.is_paint_only:
-            return  # vein ROIs always hidden
-        self.roi.setVisible(visible)
+from controllers.commands import (
+    UndoStack, AddAnnotationCmd, AddAnnotationBatchCmd,
+    DeleteAnnotationCmd, TrackingCmd, SamBoxPromptCmd,
+    DeletePaintOnlyIdentityCmd, MoveResizeCmd, LockCmd,
+    BrushStrokeCmd, PropagateWithSpawnCmd, PropagateMaskCmd,
+)
+from controllers.annotation_item import Annotation2D
 
 
 # ======================================================================
@@ -878,6 +165,9 @@ class ToolController:
         self.window.combo_tracker.setCurrentText(self.tracker_service.name)
         self.window.combo_tracker.currentTextChanged.connect(self._on_tracker_changed)
         self.window.btn_run_tracker.clicked.connect(self.run_tracking_now)
+        self.window.btn_track_lengths.clicked.connect(self.show_track_lengths)
+        # Frame-span + naming of the last tracker run, for the lengths view.
+        self._last_track_lengths = None
         self._rebuild_tracker_settings()
         self.window.slider_seg_opacity.valueChanged.connect(self._on_seg_opacity_changed)
         # Mirror seg-opacity between the View-panel slider and the Tools
@@ -943,7 +233,7 @@ class ToolController:
             # Seg editing modes
             QShortcut(QKeySequence("D"),          self.window, lambda: self._set_seg_mode('paint')),
             QShortcut(QKeySequence("E"),          self.window, lambda: self._set_seg_mode('erase')),
-            QShortcut(QKeySequence("Escape"),     self.window, lambda: self._set_seg_mode('select')),
+            QShortcut(QKeySequence("Escape"),     self.window, self._escape_pressed),
             QShortcut(QKeySequence("F"),          self.window, self.fill_bbox_cmd),
             QShortcut(QKeySequence("B"),          self.window, self.run_sam_box_prompt),
             QShortcut(QKeySequence("Shift+E"),    self.window, self.clear_seg_mask_for_selected),
@@ -958,6 +248,43 @@ class ToolController:
 
         # Mouse events for seg brush painting
         self._connect_brush_events()
+
+        # Native menu bar (File/Edit/View/Help) + status-bar mode chip.
+        self._build_menu_bar()
+        self.window.btn_force_paint.toggled.connect(
+            lambda _checked: self._update_mode_chip())
+        self._update_mode_chip()
+
+        # SAM preview layer: B shows the proposed mask as a cyan
+        # overlay; Enter/B accepts, Esc discards. Nothing touches the
+        # data until accept.
+        self._sam_preview = None
+        self._preview_shortcuts = None
+        # Review mode (Ctrl+R): walk every unlocked annotation, Space
+        # accepts (locks) and advances, Esc exits.
+        self._review_mode = False
+        self._review_shortcut = None
+        self._review_queue = []
+        self._review_pos = -1
+        self._review_total = 0
+        self._sam_preview_item = pg.ImageItem()
+        self._sam_preview_item.setZValue(20)  # above the seg overlay
+        self.window.view_frame.getView().addItem(self._sam_preview_item)
+
+        # Right-click context menu on the annotation list (USAGE.md
+        # promised this long before it existed).
+        lst = self.window.list_annotations
+        lst.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        lst.customContextMenuRequested.connect(self._list_context_menu)
+
+        # Timeline coverage markers — first real subscriber of the
+        # annotations_changed bus signal.
+        self.state.annotations_changed.connect(self._refresh_timeline_markers)
+        self._refresh_timeline_markers()
+        QShortcut(QKeySequence("Ctrl+Right"), self.window,
+                  lambda: self._jump_unannotated(+1))
+        QShortcut(QKeySequence("Ctrl+Left"), self.window,
+                  lambda: self._jump_unannotated(-1))
 
         # Auto-save timer (every 60 seconds)
         self._autosave_path = None
@@ -1013,6 +340,12 @@ class ToolController:
         from PyQt6.QtWidgets import QTreeWidgetItem
         from ui.main_window import make_swatch_icon
 
+        # A pending SAM preview belongs to one frame — navigating away
+        # silently discards it (the data was never touched).
+        pv = getattr(self, '_sam_preview', None)
+        if pv is not None and pv['frame'] != frame_idx:
+            self._cancel_sam_preview(quiet=True)
+
         self.window.list_annotations.blockSignals(True)
         self.window.list_annotations.clear()
 
@@ -1021,6 +354,27 @@ class ToolController:
                         'capillary': 'Capillary'}
         flt = self._list_filter  # set of class keys currently shown
         seg = self.window.seg_data
+        # One vectorized pass per paint-only class for "which ids have
+        # pixels on THIS frame", plus the cached anywhere-sets — the
+        # per-annotation np.any scans this replaces were O(annotations
+        # x volume) per frame step.
+        ids_here = {}
+        if seg is not None:
+            for ct in ('vessel', 'capillary'):
+                layer = seg.get_layer(ct)
+                if layer is not None and frame_idx < layer.shape[0]:
+                    ids_here[ct] = set(np.unique(layer[frame_idx]).tolist())
+        # Quality flags (Settings > Annotation): frame median cell area
+        # computed once per rebuild via one bincount pass.
+        qf = getattr(self, '_qf', None) or self._reload_quality_settings()
+        med_area = None
+        if qf['enabled'] and qf['area'] and seg is not None:
+            cell_layer = seg.get_layer('cell')
+            if cell_layer is not None and frame_idx < cell_layer.shape[0]:
+                counts = np.bincount(cell_layer[frame_idx].ravel())
+                inst = counts[1:][counts[1:] > 0]
+                if inst.size >= 3:
+                    med_area = float(np.median(inst))
         for anno in self.annotations:
             if anno.frame_idx == frame_idx:
                 # Hidden / class-filtered annotations still get their ROI
@@ -1048,18 +402,30 @@ class ToolController:
                 # they're about to paint into, so it stays visible.
                 if (anno.is_paint_only and seg is not None
                         and anno.instance_id is not None):
-                    layer = seg.get_layer(anno.class_type)
-                    here = np.any(layer[frame_idx] == anno.instance_id)
-                    if not here:
-                        anywhere = np.any(layer == anno.instance_id)
-                        if anywhere:
+                    iid = int(anno.instance_id)
+                    if iid not in ids_here.get(anno.class_type, ()):
+                        if iid in self._anywhere_ids_for(anno.class_type):
                             continue  # phantom on this frame
                 visible_annos.append(anno)
                 cls = class_labels.get(anno.class_type, anno.class_type)
+                reasons = ()
+                if (qf['enabled'] and not anno.is_paint_only
+                        and anno.instance_id is not None and seg is not None):
+                    reasons = self._quality_reasons(
+                        anno, seg, frame_idx, med_area, qf)
+                if reasons:
+                    cls += " ⚠"
                 vis_glyph  = " " if hidden else "●"
                 lock_glyph = "🔒" if anno.is_locked else ""
                 item = QTreeWidgetItem(
                     ["", anno.name, cls, vis_glyph, lock_glyph])
+                if reasons:
+                    item.setToolTip(2, "⚠ " + " · ".join(reasons))
+                # Identity stamp: every list<->annotation lookup goes
+                # through this, NEVER the display name — names are
+                # user-editable and may collide, which used to route
+                # clicks/deletes/renames to the wrong annotation.
+                item.setData(0, Qt.ItemDataRole.UserRole, anno)
                 item.setIcon(0, make_swatch_icon(anno.color))
                 # Only the name column should be editable (not the
                 # swatch / glyph columns).
@@ -1072,10 +438,9 @@ class ToolController:
 
         # Re-select the active annotation if it's on this frame
         if self.active_annotation and self.active_annotation.frame_idx == frame_idx:
-            items = self.window.list_annotations.findItems(
-                self.active_annotation.name, Qt.MatchFlag.MatchExactly, 1)
-            if items:
-                self.window.list_annotations.setCurrentItem(items[0])
+            item = self._find_item_for(self.active_annotation)
+            if item is not None:
+                self.window.list_annotations.setCurrentItem(item)
         else:
             # Try to follow the same instance to this frame so a tracked
             # cell stays selected as the user scrubs. Fall back to the
@@ -1105,10 +470,9 @@ class ToolController:
                 self.active_annotation = target
                 self.active_annotation.is_selected = True
                 self.active_annotation.update_visuals()
-                items = self.window.list_annotations.findItems(
-                    target.name, Qt.MatchFlag.MatchExactly, 1)
-                if items:
-                    self.window.list_annotations.setCurrentItem(items[0])
+                item = self._find_item_for(target)
+                if item is not None:
+                    self.window.list_annotations.setCurrentItem(item)
 
         self.window.list_annotations.blockSignals(False)
         self._refresh_list_colors()
@@ -1224,10 +588,12 @@ class ToolController:
         """Open the modal output / autosave settings dialog. On accept,
         re-apply the autosave timer interval so changes take effect
         without a restart."""
-        from ui.io_settings_dialog import IOSettingsDialog
-        dlg = IOSettingsDialog(self.window)
+        from ui.settings_dialog import SettingsDialog
+        dlg = SettingsDialog(self.window)
         if dlg.exec():
             self._apply_autosave_interval()
+            self._reload_quality_settings()
+            self._show_frame_annotations(self.window._current_frame_idx)
 
     # ----- Project I/O helpers ------------------------------------------
     # Dirty-mask tracking — set True every time seg pixels change, reset
@@ -1235,7 +601,50 @@ class ToolController:
     # Defined as an instance attribute in __init__; helpers below.
     def _mark_seg_dirty(self):
         self._seg_dirty_since_save = True
+        # Any seg mutation may add/remove instances — drop the cached
+        # anywhere-in-stack id sets (rebuilt lazily on next lookup).
+        self._ids_anywhere_cache = None
+        # A pending SAM preview was computed against the pre-edit
+        # state; accepting it after this mutation could clobber the
+        # user's newer edits. Discard it.
+        if getattr(self, '_sam_preview', None) is not None:
+            self._cancel_sam_preview(quiet=True)
+            self.window.lbl_sam_status.setText(
+                "SAM preview discarded — the frame changed underneath it.")
+        # Undo/redo and every command change annotation coverage.
+        self._refresh_timeline_markers()
+        # Cross-frame edits (propagate, multi-frame delete, undo,
+        # tracking) can change the PREVIOUS frame's masks — keep the
+        # onion outline honest. No-op unless onion skin is enabled.
+        if getattr(self.window, '_onion_skin', False):
+            self.window._update_onion_skin()
         self._refresh_save_status()
+
+    def _anywhere_ids_for(self, class_type):
+        """Ids present ANYWHERE in the stack for one class.
+
+        Computed lazily per class on first phantom lookup and cached
+        until the seg is next dirtied. Replaces the per-annotation
+        ``np.any(layer == iid)`` full-stack scans that made frame
+        navigation degrade once vessels/capillaries were propagated
+        across many frames. Laziness matters: only paint-only phantom
+        checks consult this, so cell painting/brushing never triggers
+        a full-volume pass at all, and a class is only scanned when a
+        phantom row of that class actually needs the answer.
+        """
+        seg = self.window.seg_data
+        if seg is None:
+            return set()
+        cache = getattr(self, '_ids_anywhere_cache', None)
+        if cache is None or cache[0] is not seg:
+            cache = (seg, {})
+            self._ids_anywhere_cache = cache
+        per_class = cache[1]
+        if class_type not in per_class:
+            layer = seg.get_layer(class_type)
+            per_class[class_type] = (set(np.unique(layer).tolist()) - {0}
+                                     if layer is not None else set())
+        return per_class[class_type]
 
     def _mark_seg_clean(self):
         self._seg_dirty_since_save = False
@@ -1483,7 +892,9 @@ class ToolController:
             instance_id = None
             color = None
             if seg is not None:
-                instance_id = seg.next_instance_id()
+                instance_id = self._alloc_instance_id()
+                if instance_id is None:
+                    return  # id space exhausted — dialog already shown
                 color = seg.register_instance_color(instance_id)
                 self.anno_counter = max(self.anno_counter, instance_id)
             n, name = self._next_available_name('Cell')
@@ -1566,7 +977,9 @@ class ToolController:
             # register the color in that class's color table — otherwise
             # vessel/capillary IDs collide with cells and the overlay
             # falls back to the generic palette (looks wrong).
-            instance_id = seg.next_instance_id(class_type=class_type)
+            instance_id = self._alloc_instance_id(class_type)
+            if instance_id is None:
+                return  # id space exhausted — dialog already shown
             color = seg.register_instance_color(
                 instance_id, color=default_color, class_type=class_type)
             self.anno_counter = max(self.anno_counter, instance_id)
@@ -1902,35 +1315,787 @@ class ToolController:
             if anno.frame_idx == cur:
                 anno.is_selected = (anno == annotation)
                 anno.update_visuals()
-        items = self.window.list_annotations.findItems(annotation.name, Qt.MatchFlag.MatchExactly, 1)
-        if items:
+        item = self._find_item_for(annotation)
+        if item is not None:
             self.window.list_annotations.blockSignals(True)
-            self.window.list_annotations.setCurrentItem(items[0])
+            self.window.list_annotations.setCurrentItem(item)
             self.window.list_annotations.blockSignals(False)
         self.update_inspector()
         self._refresh_list_colors()
         if self._label_color_mode:
             self.window._update_seg_overlay()
 
+    # ------------------------------------------------------------------
+    # MENU BAR + DISCOVERABILITY
+    # ------------------------------------------------------------------
+    def _build_menu_bar(self):
+        """Native File/Edit/View/Help menu bar.
+
+        Actions that duplicate an already-registered QShortcut show
+        their key as a '\\t' text hint only — registering the same
+        QKeySequence twice makes Qt call it ambiguous and NEITHER
+        binding fires. Only genuinely new keys (Ctrl+O, Ctrl+Q, Ctrl+Y,
+        Z, S, F1) are registered here.
+        """
+        from PyQt6.QtGui import QAction
+        mb = self.window.menuBar()
+        mb.clear()
+
+        m_file = mb.addMenu("&File")
+        act = QAction("&Open Image/Video…", self.window)
+        act.setShortcut(QKeySequence("Ctrl+O"))
+        act.triggered.connect(self.open_file_dialog)
+        m_file.addAction(act)
+        self._menu_recent = m_file.addMenu("Open &Recent")
+        self._menu_recent.aboutToShow.connect(self._populate_recent_menu)
+        m_file.addSeparator()
+        act = QAction("&Save Project\tCtrl+S", self.window)
+        act.triggered.connect(self.save_seg_map)
+        m_file.addAction(act)
+        act = QAction("Load Project &Folder…", self.window)
+        act.triggered.connect(self.load_project_folder)
+        m_file.addAction(act)
+        act = QAction("&Import Annotations…\tCtrl+I", self.window)
+        act.triggered.connect(self.load_annotations)
+        m_file.addAction(act)
+        act = QAction("&Export Bundle (masks + overlay video + CSV)…",
+                      self.window)
+        act.triggered.connect(self.export_bundle)
+        m_file.addAction(act)
+        m_file.addSeparator()
+        act = QAction("I/O && Autosave Settings…", self.window)
+        act.triggered.connect(self.open_io_settings)
+        m_file.addAction(act)
+        m_file.addSeparator()
+        act = QAction("&Quit", self.window)
+        act.setShortcut(QKeySequence("Ctrl+Q"))
+        act.triggered.connect(self.window.close)
+        m_file.addAction(act)
+
+        m_edit = mb.addMenu("&Edit")
+        act = QAction("&Undo\tCtrl+Z", self.window)
+        act.triggered.connect(self.undo)
+        m_edit.addAction(act)
+        act = QAction("&Redo\tCtrl+Shift+Z", self.window)
+        act.setShortcut(QKeySequence("Ctrl+Y"))  # Windows-familiar alias
+        act.triggered.connect(self.redo)
+        m_edit.addAction(act)
+
+        m_view = mb.addMenu("&View")
+        act = QAction("Reset &Zoom\tR", self.window)
+        act.triggered.connect(self.reset_zoom)
+        m_view.addAction(act)
+        act = QAction("Zoom to &Selection", self.window)
+        act.setShortcut(QKeySequence("Z"))
+        act.triggered.connect(self.zoom_to_selection)
+        m_view.addAction(act)
+        act = QAction("Toggle Seg &Overlay", self.window)
+        act.setShortcut(QKeySequence("S"))  # was advertised, never bound
+        act.triggered.connect(self._on_toggle_seg)
+        m_view.addAction(act)
+        act = QAction("Onion Skin (prev frame)", self.window)
+        act.setCheckable(True)
+        act.setShortcut(QKeySequence("O"))
+        act.toggled.connect(self._toggle_onion_skin)
+        m_view.addAction(act)
+        self._act_review = QAction("Review Mode", self.window)
+        self._act_review.setCheckable(True)
+        self._act_review.setShortcut(QKeySequence("Ctrl+R"))
+        self._act_review.toggled.connect(self.toggle_review_mode)
+        m_view.addAction(self._act_review)
+
+        # Files sidebar (browser + session queue), toggleable from View.
+        from PyQt6.QtWidgets import QDockWidget
+        from PyQt6.QtCore import QSettings
+        from ui.files_panel import FilesPanel
+        self._files_panel = FilesPanel(self)
+        dock = QDockWidget("Files", self.window)
+        dock.setObjectName("files_dock")
+        dock.setWidget(self._files_panel)
+        self.window.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
+        toggle = dock.toggleViewAction()
+        toggle.setText("&Files Sidebar")
+        m_view.addSeparator()
+        m_view.addAction(toggle)
+        visible = str(QSettings().value(
+            'ui/files_dock_visible', True)).lower() in ('1', 'true')
+        dock.setVisible(visible)
+        # Persist from the TOGGLE ACTION, not visibilityChanged:
+        # QDockWidget emits visibilityChanged(False) when the window
+        # closes or minimizes, which would overwrite the preference
+        # with False on every clean quit.
+        toggle.toggled.connect(
+            lambda v: QSettings().setValue('ui/files_dock_visible', bool(v)))
+        self._files_dock = dock
+
+        m_help = mb.addMenu("&Help")
+        act = QAction("&Keyboard Shortcuts", self.window)
+        act.setShortcut(QKeySequence("F1"))
+        act.triggered.connect(self._show_shortcut_help)
+        m_help.addAction(act)
+        act = QAction("Open &Log Folder", self.window)
+        act.triggered.connect(self._open_log_folder)
+        m_help.addAction(act)
+
+    def _populate_recent_menu(self):
+        from PyQt6.QtGui import QAction
+        self._menu_recent.clear()
+        files = self.recent_files()
+        if not files:
+            act = QAction("(no recent files)", self.window)
+            act.setEnabled(False)
+            self._menu_recent.addAction(act)
+            return
+        for p in files:
+            act = QAction(os.path.basename(p), self.window)
+            act.setToolTip(p)
+            act.triggered.connect(lambda _c=False, path=p: self.open_path(path))
+            self._menu_recent.addAction(act)
+
+    def _open_log_folder(self):
+        from PyQt6.QtGui import QDesktopServices
+        from PyQt6.QtCore import QUrl
+        from core import debug as core_debug
+        QDesktopServices.openUrl(QUrl.fromLocalFile(core_debug.log_dir()))
+
+    def _show_shortcut_help(self):
+        """F1 — the USAGE.md shortcut table, in-app."""
+        from PyQt6.QtWidgets import QDialog, QTextBrowser, QVBoxLayout
+        groups = [
+            ("Annotations", [
+                ("A", "Add cell"), ("V", "Add vessel"), ("C", "Add capillary"),
+                ("Delete / Backspace", "Delete selected"),
+                ("N / P", "Next / previous annotation"),
+                ("L / U", "Lock / unlock selected"),
+                ("Ctrl+L", "Lock and advance"),
+                ("H", "Toggle hide for locked"),
+            ]),
+            ("Size presets", [
+                ("1 – 4", "Apply preset"), ("0", "Capture current size"),
+                ("T", "Apply last-used size"),
+            ]),
+            ("Segmentation", [
+                ("Esc", "Select mode"), ("D", "Paint"), ("E", "Erase"),
+                ("Shift+E", "Clear mask of selected"), ("F", "Fill bbox"),
+                ("B", "SAM box prompt"), ("X", "Force paint toggle"),
+                ("S", "Toggle seg overlay"), ("Ctrl+P", "Propagate mask"),
+            ]),
+            ("Navigation & view", [
+                ("← / →", "Prev / next frame"), ("Home / End", "First / last"),
+                ("Ctrl+← / Ctrl+→", "Prev / next unannotated frame"),
+                ("R", "Reset zoom"), ("Z", "Zoom to selection"),
+                ("O", "Onion skin (prev frame outlines)"),
+                ("Ctrl+wheel", "Brush size (paint/erase modes)"),
+            ]),
+            ("SAM preview", [
+                ("B", "Show SAM's mask as a preview"),
+                ("Enter / B", "Accept the preview"),
+                ("Esc", "Discard the preview"),
+            ]),
+            ("Review mode", [
+                ("Ctrl+R", "Enter / leave review mode"),
+                ("Space", "Accept (lock) + next"),
+                ("Esc", "Exit review mode"),
+            ]),
+            ("File", [
+                ("Ctrl+O", "Open image/video"), ("Ctrl+S", "Save project"),
+                ("Ctrl+I", "Import annotations"),
+                ("Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y", "Undo / redo"),
+                ("Ctrl+Q", "Quit"),
+            ]),
+        ]
+        rows = []
+        for title, keys in groups:
+            rows.append(
+                f"<tr><td colspan=2 style='padding-top:10px'>"
+                f"<b>{title}</b></td></tr>")
+            for k, desc in keys:
+                rows.append(
+                    f"<tr><td style='padding-right:18px'><code>{k}</code>"
+                    f"</td><td>{desc}</td></tr>")
+        dlg = QDialog(self.window)
+        dlg.setWindowTitle("Keyboard shortcuts")
+        dlg.resize(430, 560)
+        browser = QTextBrowser(dlg)
+        browser.setHtml("<table>" + "".join(rows) + "</table>")
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(browser)
+        dlg.show()
+
+    def _update_mode_chip(self):
+        """Status-bar chip: current tool mode + loud Force-Paint state."""
+        lbl = getattr(self.window, 'lbl_status_mode', None)
+        if lbl is None:
+            return
+        base_review = "font-family: monospace; font-weight: bold; padding: 0 10px;"
+        if getattr(self, '_review_mode', False):
+            lbl.setText(f"REVIEW {min(self._review_pos + 1, self._review_total)}"
+                        f"/{self._review_total} · Space=accept · Esc=exit")
+            lbl.setStyleSheet(base_review + "color: #b18cf0;")
+            return
+        mode = self._seg_edit_mode.upper()
+        force = self.window.btn_force_paint.isChecked()
+        base = "font-family: monospace; font-weight: bold; padding: 0 10px;"
+        if force:
+            lbl.setText(f"MODE: {mode} · FORCE PAINT ON")
+            lbl.setStyleSheet(base + "color: #ff5c5c;")
+        elif mode == 'PAINT':
+            lbl.setText("MODE: PAINT")
+            lbl.setStyleSheet(base + "color: #e9a33a;")
+        elif mode == 'ERASE':
+            lbl.setText("MODE: ERASE")
+            lbl.setStyleSheet(base + "color: #e07be0;")
+        else:
+            lbl.setText("MODE: SELECT")
+            lbl.setStyleSheet(base + "color: #8fb3d9;")
+
+    def _list_context_menu(self, pos):
+        """Right-click on an annotation row: quick per-row actions."""
+        from PyQt6.QtWidgets import QMenu
+        lst = self.window.list_annotations
+        item = lst.itemAt(pos)
+        anno = self._item_anno(item)
+        if anno is None or anno not in self.annotations:
+            return
+        self.select_annotation(anno)
+        menu = QMenu(self.window)
+        menu.addAction("Rename", self._start_rename)
+        menu.addAction("Zoom to", self.zoom_to_selection)
+        if anno.is_locked:
+            menu.addAction("Unlock", self.unlock_active)
+        else:
+            menu.addAction("Lock", self.lock_active)
+        hidden = getattr(anno, 'is_hidden', False)
+        menu.addAction("Show" if hidden else "Hide",
+                       lambda: self._on_list_item_clicked(item, 3))
+        menu.addSeparator()
+        menu.addAction("Delete", self.delete_selected)
+        menu.exec(lst.viewport().mapToGlobal(pos))
+
+    def _refresh_timeline_markers(self):
+        bar = getattr(self.window, 'timeline_markers', None)
+        if bar is None or self.window.video_data is None:
+            return
+        bar.set_data({a.frame_idx for a in self.annotations},
+                     self.window.video_data.num_frames)
+
+    def _jump_unannotated(self, direction):
+        """Ctrl+→ / Ctrl+← — jump to the next/prev frame with no
+        annotations. Review-pass companion to lock-and-advance."""
+        vd = self.window.video_data
+        if vd is None:
+            return
+        annotated = {a.frame_idx for a in self.annotations}
+        cur = self.window._current_frame_idx
+        rng = (range(cur + 1, vd.num_frames) if direction > 0
+               else range(cur - 1, -1, -1))
+        for fi in rng:
+            if fi not in annotated:
+                self.window.slider_timeline.setValue(fi)
+                return
+        self.window.lbl_stats.setText(
+            "No unannotated frames in that direction")
+
+    def _toggle_onion_skin(self, checked):
+        self.window._onion_skin = bool(checked)
+        self.window._update_onion_skin()
+
+    # ------------------------------------------------------------------
+    # QUALITY FLAGS — deterministic geometry checks, Settings>Annotation
+    # ------------------------------------------------------------------
+    def _reload_quality_settings(self):
+        from ui.settings_dialog import read_quality_flag_settings
+        self._qf = read_quality_flag_settings()
+        return self._qf
+
+    def _quality_reasons(self, anno, seg, frame_idx, med_area, qf):
+        """Why this cell deserves a ⚠, as human-readable strings.
+
+        Three geometry checks, each catching a known failure mode:
+        mask touching its bbox edge (SAM spill-over), mask split into
+        disconnected pieces, area wildly off the frame median. No
+        model involved — deterministic and explainable.
+        """
+        layer = seg.get_layer(anno.class_type)
+        if layer is None or frame_idx >= layer.shape[0]:
+            return ()
+        scale = self._seg_scale()
+        sx, sy = scale if scale else (1.0, 1.0)
+        x, y = anno.roi.pos()
+        bw, bh = anno.roi.size()
+        H, W = layer.shape[1], layer.shape[2]
+        x0 = max(0, int(round(x * sx)))
+        y0 = max(0, int(round(y * sy)))
+        x1 = min(W, int(round((x + bw) * sx)))
+        y1 = min(H, int(round((y + bh) * sy)))
+        if x1 <= x0 or y1 <= y0:
+            return ()
+        sub = layer[frame_idx, y0:y1, x0:x1] == anno.instance_id
+        n = int(np.count_nonzero(sub))
+        if n == 0:
+            return ()
+        reasons = []
+        if qf['edge'] and (sub[0, :].any() or sub[-1, :].any()
+                           or sub[:, 0].any() or sub[:, -1].any()):
+            reasons.append("mask touches bbox edge (possible spill-over)")
+        if qf['split']:
+            import cv2
+            n_comp = cv2.connectedComponents(sub.astype(np.uint8))[0] - 1
+            if n_comp > 1:
+                reasons.append(f"mask split into {n_comp} pieces")
+        if qf['area'] and med_area:
+            if n > 4 * med_area or n < med_area / 4:
+                reasons.append(f"area {n}px far from frame median "
+                               f"{int(med_area)}px")
+        return tuple(reasons)
+
+    @log_action('action')
+    def export_bundle(self):
+        """File > Export Bundle: a self-contained snapshot folder —
+        mask TIFs + overlay video + per-instance CSV — that a
+        collaborator can inspect without installing the app."""
+        from core import export as core_export
+        seg = self.window.seg_data
+        vd = self.window.video_data
+        if seg is None or vd is None:
+            QMessageBox.information(
+                self.window, "Export Bundle",
+                "Nothing to export yet — annotate something first.")
+            return
+        out_dir = os.path.join(self._resolve_out_folder(), 'export')
+        names = {(a.frame_idx, a.class_type, int(a.instance_id)): a.name
+                 for a in self.annotations if a.instance_id is not None}
+
+        from PyQt6.QtWidgets import QProgressDialog, QApplication
+        dlg = QProgressDialog("Rendering overlay video…", "Cancel",
+                              0, vd.num_frames, self.window)
+        dlg.setWindowTitle("Export Bundle")
+        dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dlg.setMinimumDuration(0)
+
+        def _progress(done, total):
+            dlg.setValue(done)
+            QApplication.processEvents()
+            return not dlg.wasCanceled()
+
+        try:
+            written = core_export.write_bundle(
+                seg, names, out_dir, vd.get_frame, vd.num_frames,
+                fps=float(getattr(vd, 'fps', 0) or 8.0),
+                progress=_progress)
+        except Exception as e:
+            dlg.close()
+            log_error('controller.export', 'bundle failed', exc=e)
+            QMessageBox.critical(
+                self.window, "Export failed",
+                f"{type(e).__name__}: {e}")
+            return
+        # Capture cancel state BEFORE touching the dialog: setValue(max)
+        # auto-resets the flag to False, and close() re-emits canceled()
+        # setting it to True — reading it afterwards is meaningless in
+        # both directions (verified empirically against Qt 6.11).
+        cancelled = dlg.wasCanceled()
+        dlg.setValue(vd.num_frames)
+        dlg.close()
+        if cancelled:
+            QMessageBox.information(
+                self.window, "Export Bundle",
+                "Export cancelled — video removed, other files kept.")
+            return
+        lines = "\n".join(f"  {os.path.basename(p)}" for p in written)
+        QMessageBox.information(
+            self.window, "Export Bundle",
+            f"Exported to {out_dir}:\n{lines}")
+
+    @log_action('action')
+    def rank_queue_by_disagreement(self, paths):
+        """OPTIONAL, model-heavy: score each queued stack by how much
+        SAM disagrees with its saved human masks; higher = more worth
+        a human's attention. See USAGE.md ("Ranking the queue").
+
+        Per stack, three sampled frames (first/middle/last) are run
+        through SAM auto-segmentation. With saved cell masks:
+        score = 1 - IoU(human foreground, SAM foreground). Without:
+        score = min(1, detections/20) — unlabeled-but-busy ranks high.
+        Returns {path: score in [0, 1]} for the stacks scored before
+        cancel/error.
+        """
+        if not SamService.available():
+            QMessageBox.information(
+                self.window, "Rank Queue", "micro_sam is not installed.")
+            return {}
+        svc = self.sam_service
+        if svc.checkpoint_path and not os.path.exists(svc.checkpoint_path):
+            try:
+                svc.ensure_checkpoint_ready(self.window)
+            except FileNotFoundError:
+                return {}
+        # Own the predictor for the whole rank: the flag stops
+        # queued finished_ok/error signals (delivered by the
+        # processEvents below) from restarting a background embed
+        # worker while auto_segment runs here on the main thread —
+        # the predictor is not thread-safe.
+        self._predictor_busy = True
+        self._stop_embed_worker(timeout_ms=5000)
+
+        from core.frame_source import load_frame_source
+        from core import mask_io
+        from PyQt6.QtWidgets import QProgressDialog, QApplication
+        dlg = QProgressDialog(
+            "Scoring queue with SAM…", "Cancel", 0, len(paths), self.window)
+        dlg.setWindowTitle("Rank queue by model disagreement")
+        dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dlg.setMinimumDuration(0)
+
+        scores = {}
+        try:
+          for k, p in enumerate(paths):
+            dlg.setValue(k)
+            dlg.setLabelText(f"Scoring {os.path.basename(p)} …")
+            QApplication.processEvents()
+            if dlg.wasCanceled():
+                break
+            try:
+                src = load_frame_source(p)
+                out = self._resolve_out_folder(p)
+                human = None
+                if out and os.path.isdir(out):
+                    layers = mask_io.load_multiclass_from_folder(out)
+                    human = layers.get('cell') if layers else None
+                n = src.num_frames
+                fscores = []
+                for fi in sorted({0, n // 2, max(0, n - 1)}):
+                    labels = svc.auto_segment(src.get_frame(fi))
+                    pred = labels > 0
+                    if (human is not None and fi < human.shape[0]
+                            and human[fi].any()):
+                        hum = human[fi] > 0
+                        if hum.shape != pred.shape:
+                            import cv2
+                            hum = cv2.resize(
+                                hum.astype(np.uint8),
+                                (pred.shape[1], pred.shape[0]),
+                                interpolation=cv2.INTER_NEAREST) > 0
+                        inter = np.count_nonzero(hum & pred)
+                        union = np.count_nonzero(hum | pred)
+                        fscores.append(1.0 - (inter / union if union else 0.0))
+                    else:
+                        n_obj = int(np.unique(labels).size) - 1
+                        fscores.append(min(1.0, n_obj / 20.0))
+                scores[p] = float(np.mean(fscores)) if fscores else 0.0
+                log('controller.rank', 'scored', path=p, score=scores[p])
+            except Exception as e:
+                log_error('controller.rank', 'scoring failed', exc=e, path=p)
+                continue
+        finally:
+            dlg.close()
+            self._predictor_busy = False
+        return scores
+
+    # ------------------------------------------------------------------
+    # REVIEW MODE — walk every unlocked annotation, accept or fix
+    # ------------------------------------------------------------------
+    def toggle_review_mode(self, checked):
+        if not checked:
+            if getattr(self, '_review_mode', False):
+                self._exit_review_mode("Review mode off")
+            return
+        queue = [a for a in self.annotations if not a.is_locked]
+        queue.sort(key=lambda a: (a.frame_idx, a.name))
+        if not queue:
+            self.window.lbl_stats.setText("Review: nothing unlocked to review")
+            self._sync_review_action(False)
+            return
+        self._review_mode = True
+        self._review_queue = queue
+        self._review_total = len(queue)
+        self._review_pos = -1
+        if self._review_shortcut is None:
+            self._review_shortcut = QShortcut(
+                QKeySequence("Space"), self.window, self._review_accept)
+        self._review_shortcut.setEnabled(True)
+        log('controller.review', 'entered', n=self._review_total)
+        self._review_advance()
+
+    def _sync_review_action(self, checked):
+        act = getattr(self, '_act_review', None)
+        if act is not None:
+            act.blockSignals(True)
+            act.setChecked(checked)
+            act.blockSignals(False)
+
+    def _exit_review_mode(self, message):
+        self._review_mode = False
+        if self._review_shortcut is not None:
+            self._review_shortcut.setEnabled(False)
+        self._sync_review_action(False)
+        self._update_mode_chip()
+        self.window.lbl_stats.setText(message)
+        log('controller.review', 'exited', message=message)
+
+    def _review_advance(self):
+        """Move to the next still-unlocked annotation; exit when done."""
+        while True:
+            self._review_pos += 1
+            if self._review_pos >= len(self._review_queue):
+                self._exit_review_mode(
+                    f"Review complete — {self._review_total} annotation(s)")
+                return
+            anno = self._review_queue[self._review_pos]
+            if anno in self.annotations and not anno.is_locked:
+                break
+        if anno.frame_idx != self.window._current_frame_idx:
+            self.window.slider_timeline.setValue(anno.frame_idx)
+        self.select_annotation(anno)
+        self.zoom_to_selection()
+        self._update_mode_chip()
+
+    def _review_accept(self):
+        """Space in review mode: lock the current annotation, advance."""
+        if not getattr(self, '_review_mode', False):
+            return
+        from PyQt6.QtWidgets import (
+            QApplication, QLineEdit, QAbstractSpinBox, QAbstractButton,
+            QComboBox)
+        fw = QApplication.focusWidget()
+        if isinstance(fw, (QLineEdit, QAbstractSpinBox)):
+            fw.clearFocus()  # commit the edit; Space stays review-free
+            return
+        if isinstance(fw, (QAbstractButton, QComboBox)):
+            # Space normally activates a focused control — don't
+            # hijack it into a silent lock; just release the focus.
+            fw.clearFocus()
+            return
+        if 0 <= self._review_pos < len(self._review_queue):
+            anno = self._review_queue[self._review_pos]
+            if anno in self.annotations and not anno.is_locked:
+                self.select_annotation(anno)
+                self.lock_active()  # undoable LockCmd
+        self._review_advance()
+
+    def zoom_to_selection(self):
+        """Center + zoom the viewport on the selected annotation (Z)."""
+        anno = self.active_annotation
+        if anno is None:
+            return
+        if not anno.is_paint_only:
+            x, y = anno.roi.pos()
+            bw, bh = anno.roi.size()
+            x0, y0, x1, y1 = float(x), float(y), float(x + bw), float(y + bh)
+        else:
+            seg = self.window.seg_data
+            if seg is None or anno.instance_id is None:
+                return
+            layer = seg.get_layer(anno.class_type)
+            fi = self.window._current_frame_idx
+            if layer is None or fi >= layer.shape[0]:
+                return
+            ys, xs = np.nonzero(layer[fi] == anno.instance_id)
+            if ys.size == 0:
+                return
+            scale = self._seg_scale()
+            sx, sy = scale if scale else (1.0, 1.0)
+            # seg -> video coords (inverse of the video->seg factors)
+            x0, x1 = float(xs.min()) / sx, float(xs.max() + 1) / sx
+            y0, y1 = float(ys.min()) / sy, float(ys.max() + 1) / sy
+        pad = max(x1 - x0, y1 - y0) * 0.5 + 10
+        vb = self.window.view_frame.getView()
+        vb.setRange(xRange=(x0 - pad, x1 + pad),
+                    yRange=(y0 - pad, y1 + pad), padding=0)
+
+    # ------------------------------------------------------------------
+    # OPEN FILE IN-APP (File>Open, drag-drop, recent files, queue)
+    # ------------------------------------------------------------------
+    _RECENT_KEY = 'recent/files'
+    _RECENT_MAX = 10
+
+    @log_action('action')
+    def open_path(self, path):
+        """Open a different image/video into the running window.
+
+        The single gateway for File>Open, drag-and-drop, Recent Files,
+        and the session queue. Guards unsaved work, tears the current
+        session down, and rebinds everything the way main.py does at
+        startup. Returns True when the file is now open.
+        """
+        from core.frame_source import load_frame_source, SUPPORTED_EXTS
+        path = os.path.abspath(path)
+        if not os.path.isfile(path):
+            QMessageBox.warning(self.window, "Open",
+                                f"File not found:\n{path}")
+            return False
+        if os.path.splitext(path)[1].lower() not in SUPPORTED_EXTS:
+            QMessageBox.warning(
+                self.window, "Open",
+                f"Unsupported file type:\n{path}\n\n"
+                f"Accepted: {', '.join(sorted(SUPPORTED_EXTS))}")
+            return False
+        if path == self.window._current_file:
+            return True  # already open
+
+        # Same unsaved-work guard as closing the window.
+        if self._seg_dirty_since_save:
+            resp = QMessageBox.question(
+                self.window, "Unsaved changes",
+                "There are unsaved changes (masks / annotations).\n\n"
+                "Save before opening the next file?",
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save)
+            if resp == QMessageBox.StandardButton.Cancel:
+                return False
+            if resp == QMessageBox.StandardButton.Save:
+                self.save_seg_map()
+                if self._seg_dirty_since_save:
+                    if self.window.seg_data is None:
+                        # Bbox-only session: no masks for save_seg_map
+                        # to write — same fallback as closeEvent, so a
+                        # Save click never silently discards work.
+                        try:
+                            self._autosave()
+                        except Exception:
+                            pass
+                        QMessageBox.information(
+                            self.window, "Annotations snapshotted",
+                            "No mask layers exist yet, so only an "
+                            "annotation snapshot (autosave.json) was "
+                            "written. You'll be offered a resume when "
+                            "you reopen this file.")
+                    else:
+                        return False  # save failed; stay on current file
+
+        try:
+            data = load_frame_source(path)
+        except Exception as e:
+            log_error('controller.open', 'load failed', exc=e, path=path)
+            QMessageBox.critical(self.window, "Open failed",
+                                 f"Could not load:\n{path}\n\n"
+                                 f"{type(e).__name__}: {e}")
+            return False
+
+        # Tear down the old session, bind the new source.
+        self._loading_file = True  # gates the frame-change embed hook
+        try:
+            self._stop_embed_worker(timeout_ms=5000)
+            self._embed_pending_frame = None
+            self._cancel_sam_preview(quiet=True)
+            self._clear_all_annotations()
+            w = self.window
+            w.video_data = data
+            w.seg_data = None
+            w._current_file = path
+            self._mark_seg_clean()      # fresh session starts clean
+            self._ids_anywhere_cache = None
+            # Ownership is per-session: carrying it across files would
+            # let a later "Start fresh" retire mask files this session
+            # no longer owns.
+            self._mask_files_owned.clear()
+            w._projection_cache = None
+            w.load_video()
+            w.show_annotation_view()   # leave the landing page
+            w._update_title()
+            self._refresh_timeline_markers()
+        finally:
+            self._loading_file = False
+        self._add_recent_file(path)
+        self.state.image_loaded.emit(int(data.num_frames))
+        panel = getattr(self, '_files_panel', None)
+        if panel is not None:
+            panel.refresh()
+        # Resume prompt + first-frame embedding, exactly like startup.
+        self.on_image_loaded()
+        return True
+
+    def recent_files(self):
+        """Existing entries of the persisted recent-files list."""
+        from PyQt6.QtCore import QSettings
+        raw = QSettings().value(self._RECENT_KEY, []) or []
+        if isinstance(raw, str):
+            raw = [raw]
+        return [p for p in raw if os.path.isfile(p)]
+
+    def _add_recent_file(self, path):
+        from PyQt6.QtCore import QSettings
+        items = [p for p in self.recent_files() if p != path]
+        items.insert(0, path)
+        QSettings().setValue(self._RECENT_KEY, items[:self._RECENT_MAX])
+
+    def open_file_dialog(self):
+        """File>Open… — remembers the last-used directory."""
+        from PyQt6.QtCore import QSettings
+        start = str(QSettings().value('recent/last_dir', '')) or (
+            os.path.dirname(self.window._current_file)
+            if self.window._current_file else os.path.expanduser('~'))
+        path, _ = QFileDialog.getOpenFileName(
+            self.window, "Open Image or Video", start,
+            "All supported (*.tif *.tiff *.avi *.mp4 *.mkv *.mov);;"
+            "TIFF (*.tif *.tiff);;Video (*.avi *.mp4 *.mkv *.mov);;"
+            "All Files (*)")
+        if not path:
+            return
+        QSettings().setValue('recent/last_dir', os.path.dirname(path))
+        self.open_path(path)
+
+    def _alloc_instance_id(self, class_type='cell'):
+        """next_instance_id with the exhaustion error surfaced as a
+        dialog instead of an exception escaping a Qt slot.
+
+        Ids live in uint16 (ceiling 65535, stride 4) and are never
+        reclaimed within a session, so a very long session or repeated
+        tracking runs CAN exhaust them — next_instance_id then raises,
+        and an exception leaving a Qt slot aborts the whole app.
+        Returns None on exhaustion; callers bail out gracefully.
+        """
+        seg = self.window.seg_data
+        try:
+            return seg.next_instance_id(class_type=class_type)
+        except ValueError as e:
+            log_error('controller', 'instance-id space exhausted',
+                      exc=e, class_type=class_type)
+            QMessageBox.warning(
+                self.window, "Instance limit reached",
+                f"No more instance ids available for '{class_type}' "
+                f"(65535 ceiling).\n\nSave your work, then reload the "
+                f"project — reloading compacts the id space. Running "
+                f"the tracker repeatedly is the usual cause.")
+            return None
+
+    @staticmethod
+    def _item_anno(item):
+        """The Annotation2D a list row represents (identity-stamped at
+        row creation). None for stale rows whose C++ item was already
+        deleted by a list rebuild."""
+        if item is None:
+            return None
+        try:
+            return item.data(0, Qt.ItemDataRole.UserRole)
+        except RuntimeError:
+            return None
+
+    def _find_item_for(self, anno):
+        """The list row representing *anno*, by identity — never by the
+        user-editable (and possibly duplicated) display name."""
+        lst = self.window.list_annotations
+        for i in range(lst.topLevelItemCount()):
+            it = lst.topLevelItem(i)
+            if it is not None and it.data(0, Qt.ItemDataRole.UserRole) is anno:
+                return it
+        return None
+
     def _on_list_item_changed(self, current, previous):
-        if current:
-            name = current.text(1)
-            cur = self.window._current_frame_idx
-            for anno in self.annotations:
-                if anno.name == name and anno.frame_idx == cur:
-                    self.select_annotation(anno)
-                    break
+        anno = self._item_anno(current)
+        if anno is not None and anno in self.annotations:
+            self.select_annotation(anno)
 
     def _on_list_item_clicked(self, item, column):
         """Per-row eye/lock glyph clicks toggle anno state (D)."""
         if column not in (3, 4):
             return
-        name = item.text(1)
-        cur = self.window._current_frame_idx
-        anno = next((a for a in self.annotations
-                     if a.name == name and a.frame_idx == cur), None)
-        if anno is None:
+        anno = self._item_anno(item)
+        if anno is None or anno not in self.annotations:
             return
+        cur = self.window._current_frame_idx
         if column == 3:
             anno.is_hidden = not getattr(anno, 'is_hidden', False)
             # Bbox ROI follows hidden state immediately; seg overlay
@@ -2033,14 +2198,15 @@ class ToolController:
         # Only the Name column (1) carries rename data.
         if column != 1:
             return
+        # Rename the ROW's annotation (identity stamp), not whichever
+        # annotation happens to be selected — editing an unselected row
+        # used to rename the wrong one.
+        anno = self._item_anno(item) or self.active_annotation
+        if anno is None:
+            return
         new_name = item.text(1).strip()
         if not new_name:
-            # Revert to old name
-            if self.active_annotation:
-                item.setText(1, self.active_annotation.name)
-            return
-        anno = self.active_annotation
-        if anno is None:
+            item.setText(1, anno.name)  # revert
             return
         if new_name == anno.name:
             return
@@ -2305,14 +2471,22 @@ class ToolController:
         frame_annos = [a for a in self.annotations if a.frame_idx == cur]
         # For paint-only classes count only entries that actually have
         # pixels on this frame — a phantom entry without painted pixels
-        # is invisible and shouldn't inflate the panel count.
+        # is invisible and shouldn't inflate the panel count. One
+        # unique() pass per class instead of one full-frame comparison
+        # per annotation.
+        present = {}
+        if seg is not None:
+            for ct in ('vessel', 'capillary'):
+                layer = seg.get_layer(ct)
+                if layer is not None and cur < layer.shape[0]:
+                    present[ct] = set(np.unique(layer[cur]).tolist())
+
         def _has_pixels(a):
             if not a.is_paint_only:
                 return True
             if seg is None or a.instance_id is None:
                 return False
-            return bool(np.any(
-                seg.get_layer(a.class_type)[cur] == a.instance_id))
+            return int(a.instance_id) in present.get(a.class_type, ())
         n_cell  = sum(1 for a in frame_annos if a.class_type == 'cell')
         n_vess  = sum(1 for a in frame_annos
                        if a.class_type == 'vessel' and _has_pixels(a))
@@ -2346,9 +2520,8 @@ class ToolController:
             item = self.window.list_annotations.topLevelItem(i)
             if item is None:
                 continue
-            name = item.text(1)
-            anno = next((a for a in frame_annos if a.name == name), None)
-            if anno is None:
+            anno = self._item_anno(item)
+            if anno is None or anno not in frame_annos:
                 continue
             font = item.font(1)
             is_active = (anno == self.active_annotation)
@@ -2409,6 +2582,7 @@ class ToolController:
         self._seg_edit_mode = new_mode
         self._set_roi_interactivity(new_mode == 'select')
         self._update_brush_cursor_visibility()
+        self._update_mode_chip()
 
     @log_action('action')
     def _set_seg_mode(self, mode):
@@ -2423,6 +2597,7 @@ class ToolController:
             btns[mode].setChecked(True)
         self._set_roi_interactivity(mode == 'select')
         self._update_brush_cursor_visibility()
+        self._update_mode_chip()
 
     def _set_roi_interactivity(self, enabled):
         """Enable/disable ROI dragging for current frame's annotations."""
@@ -2459,6 +2634,16 @@ class ToolController:
                 if self.ctrl._seg_edit_mode == 'select':
                     return False
                 etype = event.type()
+                # Ctrl+wheel over the canvas = brush size (paint/erase
+                # modes only — plain wheel keeps zooming the view).
+                if etype == QEvent.Type.GraphicsSceneWheel:
+                    if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                        step = 1 if event.delta() > 0 else -1
+                        s = self.ctrl.window.slider_brush_size
+                        s.setValue(s.value() + step)
+                        event.accept()
+                        return True
+                    return False
                 if etype == QEvent.Type.GraphicsSceneMousePress:
                     if event.button() == Qt.MouseButton.LeftButton:
                         # Snapshot the active anno's class layer before the
@@ -2614,7 +2799,9 @@ class ToolController:
         # Assign an instance ID if the annotation doesn't have one — pulled
         # from the annotation's own class layer namespace.
         if anno.instance_id is None:
-            new_id = seg.next_instance_id(class_type=anno.class_type)
+            new_id = self._alloc_instance_id(anno.class_type)
+            if new_id is None:
+                return  # id space exhausted — dialog already shown
             anno.instance_id = new_id
             color = seg.register_instance_color(new_id, class_type=anno.class_type)
             anno.color = color
@@ -2717,6 +2904,9 @@ class ToolController:
         # Mark the seg layers as clean so the smart autosave knows it
         # doesn't need to re-flush masks until something changes again.
         self._mark_seg_clean()
+        panel = getattr(self, '_files_panel', None)
+        if panel is not None:
+            panel.refresh()  # queue status glyphs reflect the new save
 
         if not written:
             extra = ""
@@ -2989,7 +3179,7 @@ class ToolController:
         ct = ct.lower()
 
         try:
-            arr = mask_io.load_mask_tif(path).astype(np.int32)
+            arr = mask_io.load_mask_tif(path).astype(np.uint16)
         except Exception as e:
             QMessageBox.critical(self.window, "Load Class",
                                   f"Failed to read TIF:\n\n{e}")
@@ -3172,6 +3362,8 @@ class ToolController:
             return
         if getattr(self, '_shutting_down', False):
             return  # window is closing — no new background work
+        if getattr(self, '_predictor_busy', False):
+            return  # main thread owns the predictor (rank/box prompt)
         if self.window.video_data is None or self.window._current_file is None:
             return
         # Resolve a missing best.pt HERE, on the GUI thread, before the
@@ -3289,6 +3481,30 @@ class ToolController:
         self._close_embed_dialog()
         self._refresh_sam_status_brief()
         self._drain_pending_embed()
+        self._maybe_prefetch_next()
+
+    def _maybe_prefetch_next(self):
+        """Silently precompute the NEXT frame's embedding while the
+        user works on this one — exactly one frame ahead (each prefetch
+        re-checks and stops once current+1 is cached), so lock-and-
+        advance always lands on a warm cache."""
+        if getattr(self, '_shutting_down', False):
+            return
+        w = self._embed_worker
+        if w is not None and w.isRunning():
+            return
+        if self.window.video_data is None or self.window._current_file is None:
+            return
+        svc = self.sam_service
+        if svc.checkpoint_path and not os.path.exists(svc.checkpoint_path):
+            return  # no model resolved — never prompt from a prefetch
+        fi = self.window._current_frame_idx + 1
+        if fi >= self.window.video_data.num_frames:
+            return
+        if svc.has_cached_embedding(self.window._current_file, fi):
+            return
+        self._start_embed_worker([fi], label=f"frame {fi} (prefetch)",
+                                 interactive=False)
 
     def _drain_pending_embed(self):
         """If a frame was requested while the worker was busy, start it now."""
@@ -3407,7 +3623,7 @@ class ToolController:
                 raise ValueError(
                     f"{ct} layer shape {arr.shape} does not match "
                     f"cell shape {(T, H, W)}")
-            seg.set_layer(ct, arr.astype(np.int32))
+            seg.set_layer(ct, arr.astype(np.uint16))
             for iid in np.unique(arr):
                 if iid == 0:
                     continue
@@ -3534,9 +3750,15 @@ class ToolController:
             return
         if self.window._current_file is None:
             return
+        if getattr(self, '_loading_file', False):
+            return  # open_path teardown drives the slider; skip
         if self.sam_service.has_cached_embedding(
                 self.window._current_file, frame_idx):
             self._embed_pending_frame = None
+            # Cached frame = no worker run = no finished_ok hook — keep
+            # the one-ahead prefetch chain alive from here, or warm and
+            # cold frames alternate as the user advances.
+            self._maybe_prefetch_next()
             return
         # If a worker is already running, just remember the most recent
         # frame request and return immediately.
@@ -3731,12 +3953,36 @@ class ToolController:
         }
 
         # ---- Allocate a fresh instance_id per track --------------------
+        # Two-pass: allocate EVERYTHING first, then register colors —
+        # if the id space exhausts halfway we bail out before any
+        # shared state was touched (a mid-loop raise used to leave the
+        # color table polluted with no undo entry).
         unique_tracks = sorted({tid for tid in remap.values()})
         track_to_new_iid = {}
+        base = None
         for tid in unique_tracks:
-            new_iid = seg.next_instance_id()
-            seg.register_instance_color(new_iid)
-            track_to_new_iid[tid] = new_iid
+            try:
+                nid = (seg.next_instance_id() if base is None
+                       else base + seg.STAIR_QUANT)
+            except ValueError as e:
+                log_error('controller.track', 'id space exhausted', exc=e)
+                QMessageBox.warning(
+                    self.window, "Instance limit reached",
+                    "Tracking needs more instance ids than remain "
+                    "(65535 ceiling). Save and reload the project to "
+                    "compact the id space, then re-run the tracker.")
+                return 0, 0
+            if nid > 65535:
+                QMessageBox.warning(
+                    self.window, "Instance limit reached",
+                    "Tracking needs more instance ids than remain "
+                    "(65535 ceiling). Save and reload the project to "
+                    "compact the id space, then re-run the tracker.")
+                return 0, 0
+            base = nid
+            track_to_new_iid[tid] = nid
+        for tid, nid in track_to_new_iid.items():
+            seg.register_instance_color(nid)
 
         # ---- Pick the representative name for each track ---------------
         # First (frame, orig_id) pair for a given track determines its name.
@@ -3790,6 +4036,41 @@ class ToolController:
         }
         self._undo_stack.push(TrackingCmd(self, before, after))
 
+        # Prune colour-table entries no longer referenced by pixels or
+        # annotations. next_instance_id takes max(layer, colors), so
+        # stale entries ratchet the allocator floor up by 4 per track
+        # per run — repeated tracking would exhaust the uint16 space.
+        # (Undo restores the full pre-remap dict from its snapshot.)
+        used = set(np.unique(seg.masks).tolist())
+        used.update(int(a.instance_id) for a in self.annotations
+                    if a.instance_id is not None and a.class_type == 'cell')
+        for iid in [k for k in seg.instance_colors if k not in used]:
+            seg.instance_colors.pop(iid, None)
+
+        # ---- Per-track frame span, for the Track Lengths view ----------
+        frames_by_track = {}
+        for (f, _oid), tid in remap.items():
+            frames_by_track.setdefault(tid, set()).add(int(f))
+        rows = []
+        for tid in unique_tracks:
+            frames = sorted(frames_by_track.get(tid, ()))
+            if not frames:
+                continue
+            new_iid = track_to_new_iid[tid]
+            span = frames[-1] - frames[0] + 1
+            rows.append({
+                'name': track_to_name.get(tid, f"Track_{tid}"),
+                'color': seg.instance_colors.get(new_iid, (200, 200, 200)),
+                'iid': new_iid,             # for jump-to-track navigation
+                'length': len(frames),      # frames the cell actually appears on
+                'first': frames[0],
+                'last': frames[-1],
+                'gaps': span - len(frames),  # missing frames inside the span
+            })
+        rows.sort(key=lambda r: -r['length'])
+        self._last_track_lengths = rows
+        self.window.btn_track_lengths.setEnabled(bool(rows))
+
         # Refresh UI.
         for anno in self.annotations:
             anno.update_visuals()
@@ -3797,6 +4078,104 @@ class ToolController:
         self.window._update_seg_overlay()
         self.state.annotations_changed.emit()
         return len(unique_tracks), n_changed
+
+    def show_track_lengths(self):
+        """Table of the last tracker run's tracks: length, range, gaps."""
+        rows = self._last_track_lengths
+        if not rows:
+            QMessageBox.information(
+                self.window, "Track lengths",
+                "Run the tracker first (Tracking panel → Run Tracker).")
+            return
+        from PyQt6.QtWidgets import (
+            QDialog, QVBoxLayout, QLabel, QTreeWidget, QTreeWidgetItem,
+            QDialogButtonBox)
+        from ui.main_window import make_swatch_icon
+        dlg = QDialog(self.window)
+        dlg.setWindowTitle("Track lengths")
+        dlg.resize(460, 480)
+        lay = QVBoxLayout(dlg)
+        T = self.window.video_data.num_frames if self.window.video_data else 0
+        lengths = [r['length'] for r in rows]
+        summary = (f"{len(rows)} tracks over {T} frames · "
+                   f"longest {max(lengths)} · median "
+                   f"{int(np.median(lengths))} · "
+                   f"{sum(1 for L in lengths if L == 1)} single-frame")
+        lay.addWidget(QLabel(summary))
+        tree = QTreeWidget()
+        tree.setColumnCount(4)
+        tree.setHeaderLabels(["Track", "Length", "Frames", "Gaps"])
+        tree.setRootIsDecorated(False)
+        for r in rows:
+            it = QTreeWidgetItem([
+                r['name'], str(r['length']),
+                f"{r['first']}–{r['last']}",
+                str(r['gaps']) if r['gaps'] else "—"])
+            it.setIcon(0, make_swatch_icon(r['color']))
+            it.setData(0, Qt.ItemDataRole.UserRole, r)
+            it.setToolTip(0, "Double-click to jump to this track")
+            it.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
+            it.setTextAlignment(3, Qt.AlignmentFlag.AlignCenter)
+            tree.addTopLevelItem(it)
+        for c, wdt in ((0, 180), (1, 70), (2, 110), (3, 60)):
+            tree.setColumnWidth(c, wdt)
+        tree.itemDoubleClicked.connect(self._jump_to_track_row)
+        lay.addWidget(tree, stretch=1)
+        lay.addWidget(QLabel("Double-click a track to jump to its first "
+                             "frame and zoom to the cell."))
+
+        # Close-the-loop footer: seeing single-frame/short tracks, set a
+        # minimum and re-run the tracker to drop them.
+        from PyQt6.QtWidgets import QSpinBox, QHBoxLayout, QPushButton
+        footer = QHBoxLayout()
+        footer.addWidget(QLabel("Re-run dropping tracks shorter than"))
+        spin = QSpinBox()
+        spin.setRange(2, max(2, max(lengths)))
+        spin.setValue(2)
+        footer.addWidget(spin)
+        footer.addWidget(QLabel("frames"))
+        btn_rerun = QPushButton("Re-run tracker")
+        btn_rerun.setToolTip(
+            "Set the tracker's 'Min track length' and run it again — "
+            "shorter tracks are discarded. Undoable.")
+
+        def _rerun():
+            self.tracker_service.update_setting('min_time_extent',
+                                                int(spin.value()))
+            self._rebuild_tracker_settings()  # reflect in the panel
+            dlg.accept()
+            self.run_tracking_now()
+            self.show_track_lengths()  # reopen with the new result
+        btn_rerun.clicked.connect(_rerun)
+        footer.addWidget(btn_rerun)
+        lay.addLayout(footer)
+
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        bb.rejected.connect(dlg.reject)
+        bb.accepted.connect(dlg.accept)
+        lay.addWidget(bb)
+        dlg.show()
+
+    def _jump_to_track_row(self, item, _column=0):
+        """Double-click in the track-lengths table: navigate to the
+        track's first frame, select its cell, zoom to it."""
+        r = item.data(0, Qt.ItemDataRole.UserRole)
+        if not r:
+            return
+        self.window.slider_timeline.setValue(int(r['first']))
+        anno = next((a for a in self.annotations
+                     if a.class_type == 'cell'
+                     and a.instance_id == r['iid']
+                     and a.frame_idx == int(r['first'])), None)
+        if anno is None:  # fall back to any frame of the track
+            anno = next((a for a in self.annotations
+                         if a.class_type == 'cell'
+                         and a.instance_id == r['iid']), None)
+        if anno is not None:
+            if anno.frame_idx != self.window._current_frame_idx:
+                self.window.slider_timeline.setValue(anno.frame_idx)
+            self.select_annotation(anno)
+            self.zoom_to_selection()
 
     # ------------------------------------------------------------------
     def _refresh_sam_status(self):
@@ -3887,7 +4266,9 @@ class ToolController:
     def run_sam_box_prompt(self):
         """Run SAM with the selected cell's bbox as a prompt.
 
-        Behavior is safe by construction:
+        The result appears as a PREVIEW overlay first — Enter or a
+        second B accepts it into the data, Esc discards. Committed
+        behavior is safe by construction:
           * Only paints pixels where the current seg is 0 or already
             belongs to this cell's instance_id.
           * Never overwrites another annotation's pixels.
@@ -3896,6 +4277,10 @@ class ToolController:
           * Undoable via Cmd+Z.
         """
         log('controller.sam', 'run_sam_box_prompt: entered')
+        # B while a preview is showing = accept it (B-B rhythm).
+        if self._sam_preview is not None:
+            self._accept_sam_preview()
+            return
 
         # ---- Hard guards (clear errors, no mask changes) --------------
         if not SamService.available():
@@ -4015,6 +4400,15 @@ class ToolController:
                 "SAM Box returned an empty mask — nothing to paint.")
             return
 
+        # ---- Preview instead of committing ----------------------------
+        # The mask goes onto a preview layer; the data is untouched
+        # until the user accepts (Enter / B). Esc discards. This turns
+        # SAM into a suggestion instead of an edit-you-then-undo.
+        self._show_sam_preview(anno, mask)
+
+    def _apply_sam_box_result(self, anno, mask):
+        """Commit an accepted SAM box mask into the seg data. This is
+        the pre-preview apply logic, verbatim."""
         # ---- Apply safely: replace own pixels with SAM's new result ---
         # Clearing the cell's existing pixels first means re-running SAM
         # on the same bbox actually shows the new prediction (otherwise
@@ -4076,6 +4470,82 @@ class ToolController:
             + " · bbox fit to mask · Cmd+Z to undo")
         log('controller.sam', 'box prompt: done',
             anno=anno.name, painted=n_painted, blocked_by_other=n_blocked)
+
+    # ---- SAM preview state machine ----------------------------------
+    def _show_sam_preview(self, anno, mask):
+        self._sam_preview = {'anno': anno, 'mask': mask,
+                             'frame': int(anno.frame_idx)}
+        rgba = np.zeros((*mask.shape, 4), dtype=np.uint8)
+        rgba[mask] = (80, 220, 255, 160)  # cyan — visibly "not data yet"
+        self._sam_preview_item.setImage(rgba)
+        # Enter/Return accept only while a preview exists — a global
+        # Return binding would steal the key from inline rename edits.
+        if self._preview_shortcuts is None:
+            self._preview_shortcuts = [
+                QShortcut(QKeySequence("Return"), self.window,
+                          self._accept_sam_preview),
+                QShortcut(QKeySequence("Enter"), self.window,
+                          self._accept_sam_preview),
+            ]
+        for s in self._preview_shortcuts:
+            s.setEnabled(True)
+        n = int(mask.sum())
+        self.window.lbl_sam_status.setText(
+            f"SAM preview: {n} px — Enter / B accepts · Esc discards")
+        log('controller.sam', 'preview shown', anno=anno.name, n_px=n)
+
+    def _clear_sam_preview_ui(self):
+        self._sam_preview = None
+        self._sam_preview_item.clear()
+        for s in (self._preview_shortcuts or []):
+            s.setEnabled(False)
+
+    def _cancel_sam_preview(self, quiet=False):
+        # getattr: teardown hooks can run before __init__ reaches the
+        # preview-state block.
+        if getattr(self, '_sam_preview', None) is None:
+            return
+        self._clear_sam_preview_ui()
+        if not quiet:
+            self.window.lbl_sam_status.setText("SAM preview discarded.")
+        else:
+            # Don't leave the "Enter accepts" instruction on screen
+            # after the preview is gone.
+            self._refresh_sam_status()
+        log('controller.sam', 'preview discarded')
+
+    def _accept_sam_preview(self):
+        pv = self._sam_preview
+        if pv is None:
+            return
+        # If the user is mid-edit in a text field (inline rename), the
+        # Return that got here was meant for the editor — commit the
+        # edit via focus-out and keep the preview pending.
+        from PyQt6.QtWidgets import QApplication, QLineEdit, QAbstractSpinBox
+        fw = QApplication.focusWidget()
+        if isinstance(fw, (QLineEdit, QAbstractSpinBox)):
+            fw.clearFocus()  # item-view editors commit on focus loss
+            return
+        self._clear_sam_preview_ui()
+        anno, mask = pv['anno'], pv['mask']
+        if (anno not in self.annotations
+                or anno.frame_idx != self.window._current_frame_idx
+                or anno.is_locked):
+            self.window.lbl_sam_status.setText(
+                "SAM preview no longer applies — discarded.")
+            return
+        self._apply_sam_box_result(anno, mask)
+
+    def _escape_pressed(self):
+        """Esc: discard a pending SAM preview first, then exit review
+        mode, then fall back to select mode (the original binding)."""
+        if self._sam_preview is not None:
+            self._cancel_sam_preview()
+            return
+        if getattr(self, '_review_mode', False):
+            self._exit_review_mode("Review mode off")
+            return
+        self._set_seg_mode('select')
 
     @log_action('action')
     def run_sam_segmentation(self):
@@ -4263,8 +4733,42 @@ class ToolController:
         m[y0:y1, x0:x1] = True
         return m, False
 
+    @staticmethod
+    def _mask_window(mask):
+        """(y0, y1, x0, x1, n_pixels) tight window of a bool mask, or
+        None when empty."""
+        ys, xs = np.nonzero(mask)
+        if ys.size == 0:
+            return None
+        return (int(ys.min()), int(ys.max()) + 1,
+                int(xs.min()), int(xs.max()) + 1, int(ys.size))
+
+    def _collect_dedupe_candidates(self, frame_idx, frame_shape):
+        """Precompute (anno, mask, has_pixels, window) for every
+        annotation on the frame.
+
+        Built ONCE per SAM frame run and shared across detections —
+        the previous per-detection rescan rebuilt every annotation's
+        full-frame mask for every detection: O(detections x
+        annotations) mask builds on top of the inference cost.
+        """
+        out = []
+        for anno in self.annotations:
+            if anno.frame_idx != frame_idx or anno.instance_id is None:
+                continue
+            res = self._existing_mask_for(anno, frame_shape)
+            if res is None:
+                continue
+            existing_mask, has_pixels = res
+            win = self._mask_window(existing_mask)
+            if win is None:
+                continue
+            out.append((anno, existing_mask, has_pixels, win))
+        return out
+
     def _classify_sam_detection(self, sam_mask, frame_idx,
-                                threshold=_DUPLICATE_IOU_THRESHOLD):
+                                threshold=_DUPLICATE_IOU_THRESHOLD,
+                                candidates=None):
         """Decide what to do with one SAM-detected mask.
 
         Returns:
@@ -4274,27 +4778,38 @@ class ToolController:
                                  per the locked design choice
           ('drop',   existing) - silently drop (user already labeled this
                                  region with painted pixels)
+
+        ``candidates`` (from _collect_dedupe_candidates) lets a frame
+        run share the per-annotation masks across detections; omitted,
+        they're collected fresh (same result, more work).
         """
-        if sam_mask.sum() == 0:
+        sam_win = self._mask_window(sam_mask)
+        if sam_win is None:
             return ('drop', None)
+        sy0, sy1, sx0, sx1, n_sam = sam_win
+
+        if candidates is None:
+            candidates = self._collect_dedupe_candidates(
+                frame_idx, sam_mask.shape)
 
         best_iou = 0.0
         best_anno = None
         best_has_pixels = False
-        H, W = sam_mask.shape
 
-        for anno in self.annotations:
-            if anno.frame_idx != frame_idx or anno.instance_id is None:
+        for anno, existing_mask, has_pixels, win in candidates:
+            ay0, ay1, ax0, ax1, n_ex = win
+            # Disjoint tight windows -> intersection is exactly 0.
+            if ay0 >= sy1 or ay1 <= sy0 or ax0 >= sx1 or ax1 <= sx0:
                 continue
-            res = self._existing_mask_for(anno, (H, W))
-            if res is None:
-                continue
-            existing_mask, has_pixels = res
-            # Quick reject: if bboxes don't overlap, skip the IoU calc.
-            inter = int((sam_mask & existing_mask).sum())
+            # IoU over the window overlap only — |A∪B| = |A|+|B|-|A∩B|
+            # makes the union exact without a full-frame OR.
+            y0, y1 = max(sy0, ay0), min(sy1, ay1)
+            x0, x1 = max(sx0, ax0), min(sx1, ax1)
+            inter = int(np.count_nonzero(
+                sam_mask[y0:y1, x0:x1] & existing_mask[y0:y1, x0:x1]))
             if inter == 0:
                 continue
-            union = int((sam_mask | existing_mask).sum())
+            union = n_sam + n_ex - inter
             iou = inter / max(1, union)
             if iou > best_iou:
                 best_iou = iou
@@ -4320,7 +4835,15 @@ class ToolController:
             frame_idx=frame_idx, shape=frame.shape, dtype=str(frame.dtype))
 
         # SAM always runs on the raw frame, never the enhanced display.
-        segmentation = self.sam_service.auto_segment(frame)
+        # Detection settings (Settings > Detection): custom thresholds
+        # forwarded to the segmenter, size limits applied to results.
+        from ui.settings_dialog import read_detection_settings
+        det = read_detection_settings()
+        det_kwargs = {}
+        if det['custom']:
+            det_kwargs = {'pred_iou_thresh': det['pred_iou'],
+                          'stability_score_thresh': det['stability']}
+        segmentation = self.sam_service.auto_segment(frame, **det_kwargs)
         sam_seg = segmentation.astype(np.int32)
         sam_ids = np.unique(sam_seg)
         sam_ids = sam_ids[sam_ids != 0]
@@ -4336,17 +4859,31 @@ class ToolController:
 
         dedupe = self.window.chk_sam_avoid_dupes.isChecked()
         H, W = sam_seg.shape
+        # Per-annotation masks collected once for the whole frame run
+        # and kept exact as absorb/new mutate the frame (see below).
+        candidates = (self._collect_dedupe_candidates(frame_idx, (H, W))
+                      if dedupe else None)
 
         n_created = 0
         n_absorbed = 0
         n_dropped = 0
         is_current = (frame_idx == self.window._current_frame_idx)
 
+        n_size_dropped = 0
         for sid in sam_ids:
             sam_mask = (sam_seg == sid)
 
+            # Size gate (Settings > Detection): specks and merged blobs
+            # never become annotations. 0 = limit off.
+            n_px = int(np.count_nonzero(sam_mask))
+            if ((det['min_px'] and n_px < det['min_px'])
+                    or (det['max_px'] and n_px > det['max_px'])):
+                n_size_dropped += 1
+                continue
+
             if dedupe:
-                decision, existing = self._classify_sam_detection(sam_mask, frame_idx)
+                decision, existing = self._classify_sam_detection(
+                    sam_mask, frame_idx, candidates=candidates)
             else:
                 decision, existing = ('new', None)
 
@@ -4366,6 +4903,19 @@ class ToolController:
                 log('controller.sam', 'absorbed into bbox-only annotation',
                     frame_idx=frame_idx, sam_local_id=int(sid),
                     target=existing.name, instance_id=existing.instance_id)
+                # The absorb painted pixels into `existing` — refresh
+                # its candidate entry so later detections in this run
+                # compare against the updated mask (matching the old
+                # per-detection rescan behavior exactly).
+                if candidates is not None:
+                    for i, c in enumerate(candidates):
+                        if c[0] is existing:
+                            res = self._existing_mask_for(existing, (H, W))
+                            win = (self._mask_window(res[0])
+                                   if res is not None else None)
+                            if res is not None and win is not None:
+                                candidates[i] = (existing, res[0], res[1], win)
+                            break
                 # Refresh the existing annotation's visuals so the new
                 # painted pixels show up in the overlay.
                 if is_current:
@@ -4408,6 +4958,12 @@ class ToolController:
             self.annotations.append(anno)
             anno.roi.setVisible(is_current)
             n_created += 1
+            # New annotation joins the dedupe pool for the remaining
+            # detections in this run (matches the old rescan behavior).
+            if candidates is not None:
+                win = self._mask_window(mask_pixels)
+                if win is not None:
+                    candidates.append((anno, mask_pixels, True, win))
 
         if is_current:
             self._show_frame_annotations(self.window._current_frame_idx)
@@ -4415,7 +4971,8 @@ class ToolController:
         self.state.annotations_changed.emit()
         log('controller.sam', 'frame done',
             frame_idx=frame_idx, n_created=n_created,
-            n_absorbed=n_absorbed, n_dropped=n_dropped)
+            n_absorbed=n_absorbed, n_dropped=n_dropped,
+            n_size_dropped=n_size_dropped)
         return n_created
 
     def _on_seg_opacity_tools_changed(self, value):
@@ -4725,6 +5282,11 @@ class ToolController:
         # list widget — no need to add the row directly here.
 
     def _clear_all_annotations(self):
+        # Shared "session is gone" hook — every teardown path funnels
+        # here, so preview / review / marker cleanup belong here too.
+        self._cancel_sam_preview(quiet=True)
+        if getattr(self, '_review_mode', False):
+            self._exit_review_mode("Review cancelled — session changed")
         for anno in self.annotations:
             anno.delete_ui()
         self.annotations.clear()
@@ -4734,6 +5296,7 @@ class ToolController:
         self._undo_stack.clear()
         self.window.btn_hide_locked.setChecked(False)
         self.update_inspector()
+        self._refresh_timeline_markers()
 
     # ------------------------------------------------------------------
     # AUTO-SAVE
