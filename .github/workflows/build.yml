@@ -306,28 +306,47 @@ jobs:
           except Exception:
               traceback.print_exc()
           PY
-          echo "======== all icu DLLs on disk + System32 ================="
-          find "$ENV" -iname "icuuc*.dll" -o -iname "icuin*.dll" -o -iname "icudt*.dll" 2>/dev/null
-          echo "-- System32 icu --"; ls /c/Windows/System32/ 2>/dev/null | grep -iE "^icu" || echo "  (no icu in System32)"
-          echo "======== ICU symbols Qt6Core imports (version suffix!) ===="
+          echo "==== which icuuc.dll exports the symbols Qt6Core needs? ===="
           pip install -q pefile 2>/dev/null
           python - <<'PY'
-          import os, PyQt6, pefile
-          p = os.path.join(os.path.dirname(PyQt6.__file__), "Qt6", "bin", "Qt6Core.dll")
-          pe = pefile.PE(p, fast_load=True)
-          pe.parse_data_directories(directories=[
-              pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]])
-          for e in pe.DIRECTORY_ENTRY_IMPORT:
-              if e.dll.decode().lower().startswith("icu"):
-                  print("Qt6Core imports from", e.dll.decode(), ":")
-                  for imp in e.imports[:25]:
-                      print("   ", imp.name.decode() if imp.name else f"ord#{imp.ordinal}")
+          import os, pefile
+          env = os.path.join(os.environ["MAMBA_ROOT_PREFIX"], "envs", "eye-labeller", "Library", "bin")
+          sys32 = r"C:\Windows\System32"
+          wanted = {"UCNV_TO_U_CALLBACK_SUBSTITUTE", "UCNV_FROM_U_CALLBACK_SUBSTITUTE"}
+          def exports(p):
+              try:
+                  pe = pefile.PE(p, fast_load=True)
+                  pe.parse_data_directories(directories=[
+                      pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_EXPORT"]])
+                  names = {s.name.decode() for s in getattr(
+                      pe.DIRECTORY_ENTRY_EXPORT, "symbols", []) if s.name}
+                  pe.close(); return names
+              except Exception as ex:
+                  return None
+          for label, p in [("System32/icuuc.dll", os.path.join(sys32, "icuuc.dll")),
+                           ("conda/icuuc.dll", os.path.join(env, "icuuc.dll")),
+                           ("conda/icuuc78.dll", os.path.join(env, "icuuc78.dll"))]:
+              ex = exports(p)
+              if ex is None:
+                  print(f"{label}: MISSING/unreadable"); continue
+              print(f"{label}: total={len(ex)} hasWanted={wanted & ex or 'NONE'}")
           PY
-          echo "======== does force-reinstalling PyQt6-Qt6 ship ICU? ======"
-          pip install -q --force-reinstall --no-deps PyQt6-Qt6 2>&1 | tail -2
-          echo "-- pip Qt6/bin icu* AFTER reinstall --"; ls "$PB" 2>/dev/null | grep -iE "^icu" || echo "  (still no icu in pip Qt6/bin)"
-          echo "======== can Qt6Core import after reinstall? ============="
-          python -c "import PyQt6.QtCore as c; print('QtCore OK', c.QT_VERSION_STR)" 2>&1 | tail -2
+          echo "==== FIX TEST: preload System32 icuuc, then import QtCore ===="
+          python - <<'PY'
+          import os, ctypes, traceback
+          sys32 = r"C:\Windows\System32"
+          os.add_dll_directory(sys32)
+          for d in ("icuuc.dll", "icuin.dll"):
+              try:
+                  ctypes.WinDLL(os.path.join(sys32, d)); print("preloaded", d)
+              except OSError as e:
+                  print("preload FAIL", d, e)
+          try:
+              import PyQt6.QtCore as c
+              print("SYS32-ICU RESULT: QtCore OK, Qt", c.QT_VERSION_STR)
+          except Exception:
+              traceback.print_exc(); print("SYS32-ICU RESULT: FAIL")
+          PY
           exit 0
 
       # Run the app's own --selftest from the source tree first: if
