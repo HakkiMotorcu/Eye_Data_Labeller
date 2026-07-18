@@ -294,12 +294,27 @@ jobs:
         timeout-minutes: 15
         shell: bash -el {0}
         run: |
-          python main.py --selftest
+          # EYE_LABELLER_SELFTEST_SAM=1: actually load vit_t and run a
+          # box prompt — proves "SAM does the job", not just "imports".
+          EYE_LABELLER_SELFTEST_SAM=1 python main.py --selftest
 
       - name: Build with PyInstaller
         shell: bash -el {0}
         run: |
           pyinstaller packaging/eye_labeller.spec --clean --noconfirm
+          # TEMP DIAG (Linux): ground truth for the libdeflate fix — is
+          # a libdeflate bundled, and what does OpenEXR link against?
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            echo "== libdeflate in bundle =="
+            ls dist/EyeDataLabeller/_internal/ | grep -i deflate || echo "  NONE BUNDLED"
+            echo "== bundled libOpenEXRCore deps =="
+            ldd dist/EyeDataLabeller/_internal/libOpenEXRCore.so.33 2>/dev/null \
+              | grep -iE "deflate|not found" || true
+            echo "== env libdeflate has the symbol? =="
+            for f in "$CONDA_PREFIX"/lib/libdeflate.so*; do
+              [ -e "$f" ] && echo "$f: $(nm -D "$f" 2>/dev/null | grep -c alloc_compressor_ex) match(es)"
+            done
+          fi
 
       # Then run the BUILT bundle. Every past bundle breakage (cv2
       # config recursion, numpy/Accelerate symbols, Qt plugin paths)
@@ -319,14 +334,18 @@ jobs:
             # hung windowed exe is otherwise invisible until the job cap, so
             # the watchdog dumps every thread's stack and aborts if startup
             # ever stalls, turning a silent hang into an actionable trace.
-            PYTHONUNBUFFERED=1 EYE_LABELLER_FAULT_TIMEOUT=300 \
+            PYTHONUNBUFFERED=1 EYE_LABELLER_FAULT_TIMEOUT=600 \
+              EYE_LABELLER_SELFTEST_SAM=1 \
               ./dist/EyeDataLabeller/EyeDataLabeller.exe --selftest
           elif [ -x dist/EyeDataLabeller/EyeDataLabeller/EyeDataLabeller ]; then
-            ./dist/EyeDataLabeller/EyeDataLabeller/EyeDataLabeller --selftest
+            EYE_LABELLER_SELFTEST_SAM=1 \
+              ./dist/EyeDataLabeller/EyeDataLabeller/EyeDataLabeller --selftest
           elif [ -x dist/EyeDataLabeller/EyeDataLabeller ]; then
-            ./dist/EyeDataLabeller/EyeDataLabeller --selftest
+            EYE_LABELLER_SELFTEST_SAM=1 \
+              ./dist/EyeDataLabeller/EyeDataLabeller --selftest
           else
-            ./dist/EyeDataLabeller.app/Contents/MacOS/EyeDataLabeller --selftest
+            EYE_LABELLER_SELFTEST_SAM=1 \
+              ./dist/EyeDataLabeller.app/Contents/MacOS/EyeDataLabeller --selftest
           fi
 
       # macOS: turn the COLLECT folder into a .app + a .dmg ready to
