@@ -23,18 +23,26 @@ try:
             _plugins, 'platforms')
         os.environ['QT_PLUGIN_PATH'] = _plugins
     # Windows + conda: micro_sam pulls in napari, which drags conda's
-    # qt6-main into the env. Its Qt6Core.dll lives in <env>\Library\bin
-    # (which is on PATH) and, although it reports the same 6.11.x version
-    # as pip's Riverbank PyQt6, it's a different build with a different
-    # exported-symbol set — so it shadows pip's DLL and PyQt6's bindings
-    # die with 'DLL load failed while importing QtCore: The specified
-    # procedure could not be found'. Windows loads any DLL by base name
-    # only once per process, so pin the RIGHT ones: eagerly load pip's
-    # own Qt6 core DLLs from PyQt6's Qt6\bin by ABSOLUTE path here, before
-    # the first `from PyQt6...` import. Every later 'Qt6Core.dll' lookup
-    # then reuses these already-resident modules instead of conda's.
+    # qt6-main and a conda ICU build into the env, populating
+    # <env>\Library\bin (which is on PATH) with a DIFFERENT icuuc.dll
+    # than the one PyQt6's own Qt6Core.dll links against. ICU has no ABI
+    # stability — its exported symbols are version-suffixed — so when
+    # Qt6Core binds to conda's icuuc.dll it can't find the symbol it
+    # needs and the whole PyQt6 import dies with 'DLL load failed while
+    # importing QtCore: The specified procedure could not be found'.
+    # (The VC runtime is NOT the problem: conda ships a newer msvcp140
+    # than PyQt6, and it's backward-compatible.)
+    #
+    # Fix: put PyQt6's own Qt6\bin FIRST on the DLL search path so
+    # Qt6Core resolves icuuc.dll (and its other bundled deps) to PyQt6's
+    # copies before the conda env's. Prepend PATH and register the dir,
+    # then eagerly load the Qt6 core DLLs so the correct ICU is resident
+    # before the first `from PyQt6...` import. Windows loads a DLL by
+    # base name once per process, so this pins the right ones. Also fixes
+    # Tier B users running from the conda env, not just CI.
     _qt6_bin = os.path.join(_qt6_dir, 'bin')
     if sys.platform == 'win32' and os.path.isdir(_qt6_bin):
+        os.environ['PATH'] = _qt6_bin + os.pathsep + os.environ.get('PATH', '')
         os.add_dll_directory(_qt6_bin)
         import ctypes
         for _dll in ('Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll'):

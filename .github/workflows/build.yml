@@ -306,45 +306,30 @@ jobs:
           except Exception:
               traceback.print_exc()
           PY
-          echo "======== Qt6Core.dll import deps vs conda Library\\bin ======"
-          pip install -q pefile 2>/dev/null
+          echo "======== ICU dlls: pip Qt6/bin vs conda Library\\bin ======"
+          echo "-- pip PyQt6/Qt6/bin icu* --"; ls "$PB" 2>/dev/null | grep -iE "^icu"
+          echo "-- conda Library/bin icu* --"; ls "$ENV/Library/bin" 2>/dev/null | grep -iE "^icu"
+          echo "======== FIX VALIDATION (PATH-prepend, fresh proc) ========"
           python - <<'PY'
-          import os
+          import os, ctypes, traceback
           import PyQt6
           qt6_bin = os.path.join(os.path.dirname(PyQt6.__file__), "Qt6", "bin")
-          env = os.path.join(os.environ["MAMBA_ROOT_PREFIX"], "envs", "eye-labeller")
-          libbin = os.path.join(env, "Library", "bin")
-          conda_dlls = {f.lower() for f in os.listdir(libbin)} if os.path.isdir(libbin) else set()
+          # Mirror main.py's Windows fix exactly.
+          os.environ["PATH"] = qt6_bin + os.pathsep + os.environ.get("PATH", "")
+          os.add_dll_directory(qt6_bin)
+          for d in ("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll"):
+              try:
+                  ctypes.WinDLL(os.path.join(qt6_bin, d)); print("preloaded", d)
+              except OSError as e:
+                  print("preload FAIL", d, e)
           try:
-              import pefile
-          except Exception as e:
-              print("pefile unavailable:", e); raise SystemExit(0)
-          for name in ("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll"):
-              p = os.path.join(qt6_bin, name)
-              pe = pefile.PE(p, fast_load=True)
-              pe.parse_data_directories(directories=[
-                  pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]])
-              deps = sorted((e.dll.decode().lower()
-                             for e in getattr(pe, "DIRECTORY_ENTRY_IMPORT", [])))
-              pe.close()
-              print(f"--- {name} imports ({len(deps)}) ---")
-              print("   ", ", ".join(deps))
-              shadow = [d for d in deps if d in conda_dlls]
-              print("    SHADOW SUSPECTS (also in conda Library\\bin):", shadow or "none")
+              from PyQt6.QtWidgets import QApplication
+              import PyQt6.QtCore as c
+              print("FIX RESULT: QtWidgets import OK, Qt", c.QT_VERSION_STR)
+          except Exception:
+              traceback.print_exc()
+              print("FIX RESULT: still FAILING")
           PY
-          echo "======== VC runtime versions (conda vs pip vs system) ======"
-          for f in \
-            "$ENV/Library/bin/msvcp140.dll" \
-            "$ENV/Library/bin/vcruntime140.dll" \
-            "$ENV/Library/bin/vcruntime140_1.dll" \
-            "$PB/msvcp140.dll" "$PB/vcruntime140_1.dll" \
-            "/c/Windows/System32/msvcp140.dll"; do
-            if [ -f "$f" ]; then
-              echo "$f  ->  $(powershell -NoProfile -Command "(Get-Item '$(cygpath -w "$f")').VersionInfo.ProductVersion" 2>/dev/null | tr -d '\r')"
-            fi
-          done
-          echo "======== conda vc/ucrt packages ======"
-          micromamba list -n eye-labeller 2>/dev/null | grep -iE "vc14|vc-|ucrt|vs2015|^vc "
           exit 0
 
       # Run the app's own --selftest from the source tree first: if
