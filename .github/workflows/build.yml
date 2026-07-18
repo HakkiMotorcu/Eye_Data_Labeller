@@ -28,13 +28,17 @@ jobs:
           - os: windows-latest
             label: Windows-x86_64
             artifact: EyeDataLabeller-windows-x86_64.zip
-          # Pinned to 22.04, NOT ubuntu-latest: PyInstaller bundles link
-          # against the build machine's glibc, and 24.04's glibc 2.39
-          # floor locks out RHEL 9 / Ubuntu 22.04 lab workstations.
-          # 22.04 (glibc 2.35) keeps those working.
-          - os: ubuntu-22.04
-            label: Linux-x86_64
-            artifact: EyeDataLabeller-linux-x86_64.zip
+          # Linux DROPPED from the support matrix (2026-07-18): the
+          # collaborators only use Windows + macOS. Tier B (clone +
+          # install_linux.sh + conda env) still works on Linux — only
+          # the CI-built bundle is gone. To re-enable, restore:
+          #   - os: ubuntu-22.04     # 22.04, NOT -latest: glibc 2.35
+          #     label: Linux-x86_64  # floor keeps RHEL 9 / 22.04 labs
+          #     artifact: EyeDataLabeller-linux-x86_64.zip
+          # The runner.os == 'Linux' steps below and the Linux branches
+          # in eye_labeller.spec were left intact on purpose — they are
+          # inert without this matrix entry, and the known-open Linux
+          # bundle issue is documented in .claude/skills/ci-bundle-debugging.
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -172,6 +176,32 @@ jobs:
         run: |
           pip install --force-reinstall --no-deps pillow
 
+      # micro-sam, slim: the conda package hard-depends on napari (a full
+      # second GUI stack — the root cause of the Windows ICU/Qt DLL
+      # shadowing and most bundle excludes), and upstream's pip metadata
+      # hard-pins napari too. Install the package alone; every real
+      # runtime dep is pinned in environment.yml. Then prove the compute
+      # import surface works with the GUI stack truly absent — if the
+      # solver ever sneaks napari back in, fail HERE with a clear
+      # message, not somewhere downstream.
+      - name: Install micro_sam (slim, --no-deps)
+        shell: bash -el {0}
+        run: |
+          pip install --no-deps \
+            "git+https://github.com/computational-cell-analytics/micro-sam.git@v1.7.7"
+          python - <<'PY'
+          import importlib.util as iu
+          for m in ("napari", "magicgui", "superqt", "vispy"):
+              assert iu.find_spec(m) is None, \
+                  f"GUI stack leaked back into the env: {m}"
+          import micro_sam.util
+          import micro_sam.automatic_segmentation
+          import micro_sam.prompt_based_segmentation
+          import micro_sam
+          print(f"micro_sam {micro_sam.__version__} slim import surface OK; "
+                "napari/magicgui/superqt/vispy absent")
+          PY
+
       # NOTE: PyQt6 import is validated by the source-tree selftest
       # below (after the Linux GL libs are installed). We no longer
       # surgically rewrite Qt on Windows — a plain `conda env create`
@@ -268,12 +298,27 @@ jobs:
         timeout-minutes: 15
         shell: bash -el {0}
         run: |
-          python main.py --selftest
+          # EYE_LABELLER_SELFTEST_SAM=1: actually load vit_t and run a
+          # box prompt — proves "SAM does the job", not just "imports".
+          EYE_LABELLER_SELFTEST_SAM=1 python main.py --selftest
 
       - name: Build with PyInstaller
         shell: bash -el {0}
         run: |
           pyinstaller packaging/eye_labeller.spec --clean --noconfirm
+          # TEMP DIAG (Linux): ground truth for the libdeflate fix — is
+          # a libdeflate bundled, and what does OpenEXR link against?
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            echo "== libdeflate in bundle =="
+            ls dist/EyeDataLabeller/_internal/ | grep -i deflate || echo "  NONE BUNDLED"
+            echo "== bundled libOpenEXRCore deps =="
+            ldd dist/EyeDataLabeller/_internal/libOpenEXRCore.so.33 2>/dev/null \
+              | grep -iE "deflate|not found" || true
+            echo "== env libdeflate has the symbol? =="
+            for f in "$CONDA_PREFIX"/lib/libdeflate.so*; do
+              [ -e "$f" ] && echo "$f: $(nm -D "$f" 2>/dev/null | grep -c alloc_compressor_ex) match(es)"
+            done
+          fi
 
       # Then run the BUILT bundle. Every past bundle breakage (cv2
       # config recursion, numpy/Accelerate symbols, Qt plugin paths)
@@ -293,14 +338,18 @@ jobs:
             # hung windowed exe is otherwise invisible until the job cap, so
             # the watchdog dumps every thread's stack and aborts if startup
             # ever stalls, turning a silent hang into an actionable trace.
-            PYTHONUNBUFFERED=1 EYE_LABELLER_FAULT_TIMEOUT=300 \
+            PYTHONUNBUFFERED=1 EYE_LABELLER_FAULT_TIMEOUT=600 \
+              EYE_LABELLER_SELFTEST_SAM=1 \
               ./dist/EyeDataLabeller/EyeDataLabeller.exe --selftest
           elif [ -x dist/EyeDataLabeller/EyeDataLabeller/EyeDataLabeller ]; then
-            ./dist/EyeDataLabeller/EyeDataLabeller/EyeDataLabeller --selftest
+            EYE_LABELLER_SELFTEST_SAM=1 \
+              ./dist/EyeDataLabeller/EyeDataLabeller/EyeDataLabeller --selftest
           elif [ -x dist/EyeDataLabeller/EyeDataLabeller ]; then
-            ./dist/EyeDataLabeller/EyeDataLabeller --selftest
+            EYE_LABELLER_SELFTEST_SAM=1 \
+              ./dist/EyeDataLabeller/EyeDataLabeller --selftest
           else
-            ./dist/EyeDataLabeller.app/Contents/MacOS/EyeDataLabeller --selftest
+            EYE_LABELLER_SELFTEST_SAM=1 \
+              ./dist/EyeDataLabeller.app/Contents/MacOS/EyeDataLabeller --selftest
           fi
 
       # macOS: turn the COLLECT folder into a .app + a .dmg ready to

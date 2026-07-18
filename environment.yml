@@ -9,6 +9,10 @@
 # Create or update:
 #   conda env create -f environment.yml          # first time
 #   conda env update -f environment.yml --prune  # later, after edits
+# then ALWAYS (micro-sam is not in this file — see the micro-sam note
+# below for why it must be installed with --no-deps):
+#   conda run -n eye-labeller pip install --no-deps \
+#     "git+https://github.com/computational-cell-analytics/micro-sam.git@v1.7.7"
 #
 # Activate:
 #   conda activate eye-labeller
@@ -84,10 +88,22 @@ dependencies:
   - nifty >=1.2.3
   - imagecodecs
   - natsort
-  - magicgui          # used by some micro_sam utilities (Qt-agnostic)
+  # vigra + networkx: module-level imports of micro_sam's compute code
+  # (util.py imports vigra; multi_dimensional_segmentation.py imports
+  # networkx). They used to ride in as transitive deps of the conda
+  # micro_sam package; now that micro_sam is pip-installed --no-deps
+  # (see the micro-sam note below) they must be listed explicitly.
+  - vigra
+  - networkx
+  # matplotlib-base, NOT matplotlib: something deep in the micro_sam /
+  # torch_em import chain needs matplotlib at runtime — proven
+  # empirically: excluding it from the macOS bundle silently killed SAM
+  # (sam_service swallowed the ImportError). The -base variant skips
+  # conda's Qt backend, so it can't reintroduce the PyQt5/qt-main DLLs
+  # that the napari stack used to drag in.
+  - matplotlib-base
   # NOTE: napari and `pyqt` (= PyQt5) intentionally omitted — the labeller
-  # is PyQt6-native. Trackastra powers the default tracker; add it back
-  # here once Phase 4-tracking lands.
+  # is PyQt6-native. Trackastra powers the default tracker.
   - trackastra =0.5.3
 
   # ---- Eye Data Labeller core deps ----
@@ -104,10 +120,22 @@ dependencies:
   # "Force-replace conda opencv with pip headless" step for context.
   - pycocotools
 
-  # micro-sam from conda-forge — cross-platform, no local clone needed.
-  # (If you want the editable local clone for hacking on micro-sam,
-  #  comment this line out and add `-e <your-local-path>` under pip:.)
-  - micro_sam =1.7.7
+  # micro-sam is deliberately NOT installed from conda-forge: that
+  # package hard-depends on napari, which drags a full second GUI stack
+  # into the env (napari, vispy, superqt, qtpy, PyQt5 + qt-main, qt6-main
+  # and a conda ICU). The app never uses napari — but those DLLs are what
+  # shadowed pip PyQt6's on Windows (conda ICU lacks the unversioned
+  # symbols Qt6Core needs -> 'DLL load failed while importing QtCore')
+  # and what the PyInstaller spec had to exclude wholesale. Upstream's
+  # pip metadata hard-pins napari too, so a plain `pip install micro_sam`
+  # is just as bad — it must be installed with --no-deps, which an
+  # environment.yml pip section cannot express. The install scripts
+  # (deploy/install_*.{sh,command,bat}) and CI therefore run, after env
+  # creation:
+  #   pip install --no-deps "git+https://github.com/computational-cell-analytics/micro-sam.git@v1.7.7"
+  # Every real runtime dep of the compute modules we use (util,
+  # instance/automatic/multi_dimensional/prompt_based segmentation) is
+  # listed explicitly in this file instead.
   - numpy =2.4.6
   - pip
   - pip:

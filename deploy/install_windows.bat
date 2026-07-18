@@ -85,6 +85,16 @@ if errorlevel 1 (
     call conda deactivate
 )
 
+REM micro-sam, slim install: NOT in environment.yml because both the
+REM conda package and upstream's pip metadata hard-depend on napari (a
+REM second GUI stack the app never uses, and the source of the Windows
+REM Qt/ICU DLL conflicts). --no-deps installs just the package; its real
+REM runtime deps are pinned in the yml.
+echo [install] Installing micro-sam (slim, --no-deps)
+call conda activate "%ENV_NAME%"
+pip install --no-deps "git+https://github.com/computational-cell-analytics/micro-sam.git@v1.7.7" || goto :fail
+call conda deactivate
+
 REM ---- 3. GPU detection + CUDA PyTorch swap -----------------------
 REM env.yml ships CPU PyTorch as the baseline so every platform starts
 REM the same. On Windows + NVIDIA we swap to the CUDA wheel.

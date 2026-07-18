@@ -154,6 +154,23 @@ try:
 except Exception:
     pass
 
+# ---- Linux: bundle the env's libdeflate --------------------------------
+# The Linux bundle ships libOpenEXRCore.so.33 (linked in via vigra, a
+# micro_sam compute dep) but PyInstaller does not always collect the
+# env's libdeflate beside it. At runtime the loader then resolves
+# libdeflate.so.0 to the SYSTEM copy — Ubuntu 22.04 ships libdeflate
+# 1.10, which predates the libdeflate_alloc_compressor_ex API OpenEXR
+# needs — and micro_sam's import dies inside the bundle with:
+#   libOpenEXRCore.so.33: undefined symbol: libdeflate_alloc_compressor_ex
+# (sam_service swallows it, so SAM was silently dead on Linux.) In the
+# live env it works because the loader finds conda's newer libdeflate.
+# Same pattern as the pillow/cv2 fixes: force the matching copy in.
+if sys.platform.startswith("linux"):
+    import glob as _glob
+    for _p in sorted(_glob.glob(os.path.join(sys.prefix, "lib",
+                                             "libdeflate.so*"))):
+        binaries.append((_p, "."))
+
 # ---- Excludes ---------------------------------------------------------
 # Trim the bundle by excluding things we definitely don't use.
 #

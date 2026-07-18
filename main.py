@@ -144,6 +144,34 @@ def _selftest():
             del controller, window, data
             app.processEvents()
         print("selftest: MainWindow + ToolController constructed OK")
+
+        # Optional REAL SAM smoke (EYE_LABELLER_SELFTEST_SAM=1): the
+        # import-probe above only proves micro_sam is importable —
+        # sam_service historically swallowed deeper failures, shipping
+        # bundles where SAM was silently dead. This actually loads the
+        # smallest model (vit_t / MobileSAM, ~40 MB download on first
+        # run) and box-segments a synthetic square through the SAME
+        # code path the UI uses, so "SAM does the job" is a verified
+        # fact of the build, not an inference from imports.
+        if os.environ.get('EYE_LABELLER_SELFTEST_SAM') == '1':
+            from core.sam_service import SamService
+            if not SamService.available():
+                raise RuntimeError(
+                    'SAM smoke: micro_sam failed to import in this build '
+                    '(see the sam_service error logged above)')
+            svc = SamService(model_type='vit_t')
+            frame = np.full((64, 64), 40, dtype=np.uint8)
+            frame[20:44, 20:44] = 220
+            mask = svc.segment_from_box(frame, (16.0, 16.0, 48.0, 48.0))
+            n = int(mask.sum())
+            # The bright 24x24 square is ~576 px; accept anything
+            # square-ish rather than empty/degenerate/full-frame.
+            if mask.shape != (64, 64) or not (100 < n < 3000):
+                raise RuntimeError(
+                    f'SAM smoke: implausible mask (shape={mask.shape}, '
+                    f'true_px={n})')
+            print(f"selftest: SAM vit_t loaded + box prompt OK "
+                  f"(mask px={n})")
     except Exception:
         import traceback
         traceback.print_exc()
