@@ -261,6 +261,53 @@ jobs:
             libxcb-image0 libxcb-keysyms1 libxcb-render-util0 \
             libxcb-shape0 libxcb-xinerama0
 
+      # TEMP DIAGNOSTIC — Windows Qt "DLL load failed importing QtWidgets:
+      # specified procedure could not be found". Evidence-first: earlier
+      # scorched-earth conda-Qt removal + pip reinstall did NOT fix it, so
+      # dump the actual Qt inventory (versions, every Qt6 DLL on disk,
+      # QtCore-alone vs QtWidgets) before guessing again. Remove once green.
+      - name: DIAG — Windows Qt inventory
+        if: runner.os == 'Windows'
+        shell: bash -el {0}
+        run: |
+          set +e
+          ENV="$MAMBA_ROOT_PREFIX/envs/eye-labeller"
+          echo "===================== pip Qt/PySide/sip ====================="
+          pip list 2>/dev/null | grep -iE "pyqt|pyside|sip|^qt"
+          echo "===================== conda Qt-ish pkgs ====================="
+          micromamba list -n eye-labeller 2>/dev/null | grep -iE "qt|napari|pyside|magicgui|superqt|vispy"
+          echo "================= pip PyQt6 trio versions ==================="
+          python - <<'PY'
+          import importlib.metadata as m
+          for pkg in ("PyQt6", "PyQt6-Qt6", "PyQt6-sip"):
+              try:
+                  print(pkg, "=", m.version(pkg))
+              except Exception as e:
+                  print(pkg, "MISSING", e)
+          PY
+          echo "============ every Qt6Core/Gui/Widgets DLL on disk =========="
+          find "$ENV" -iname "Qt6Core.dll" -o -iname "Qt6Gui.dll" -o -iname "Qt6Widgets.dll" 2>/dev/null
+          echo "================== pip PyQt6/Qt6/bin listing ================"
+          PB=$(python -c "import PyQt6, os; print(os.path.join(os.path.dirname(PyQt6.__file__), 'Qt6', 'bin'))")
+          echo "pip PyQt6 bin: $PB"
+          ls "$PB" 2>/dev/null | grep -iE "Qt6Core|Qt6Widgets|Qt6Gui|msvcp|vcruntime" | head
+          echo "================== import attempt (detail) ================="
+          python - <<'PY'
+          import os, traceback
+          print("PATH head:", os.environ.get("PATH", "")[:500])
+          try:
+              import PyQt6.QtCore as c
+              print("QtCore alone OK, Qt", c.QT_VERSION_STR)
+          except Exception:
+              traceback.print_exc()
+          try:
+              from PyQt6.QtWidgets import QApplication
+              print("QtWidgets OK")
+          except Exception:
+              traceback.print_exc()
+          PY
+          exit 0
+
       # Run the app's own --selftest from the source tree first: if
       # this fails, the problem is the ENV (deps, imports), not the
       # bundling — the distinction saves an hour of guessing.
