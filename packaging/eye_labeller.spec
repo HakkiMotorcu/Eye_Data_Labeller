@@ -126,23 +126,27 @@ for pkg in ("torch", "torchvision", "micro_sam", "trackastra",
 # aborts at startup (SIGABRT / exit 134) with:
 #   'Could not find the Qt platform plugin "offscreen" in
 #    .../_internal/PyQt6/Qt6/plugins/platforms'
-# Force-collect the offscreen plugin from wherever PyQt6 keeps it into
-# the platforms dir Qt scans (PyQt6/Qt6/plugins/platforms in the bundle).
-# Linux already passes because the hook happens to collect it there; the
-# explicit add is a harmless de-dupe on that platform.
+# Force-collect the offscreen plugin from the PyQt6 package into the
+# platforms dir Qt scans (PyQt6/Qt6/plugins/platforms in the bundle).
+# On Windows a missing offscreen plugin doesn't abort — Qt pops a modal
+# "no Qt platform plugin could be initialized" dialog that hangs a
+# headless run forever. Linux already passes because the hook collects
+# it; the explicit add is a harmless de-dupe there.
+#
+# IMPORTANT: locate the plugin via the PyQt6 PACKAGE path only — do NOT
+# `import PyQt6.QtCore` / use QLibraryInfo here. During the Windows build
+# `import PyQt6.QtCore` fails (conda's ICU shadows PyQt6's — see main.py's
+# runtime fix, which the spec process does NOT run), and that exception
+# would skip this whole block, leaving the Windows bundle without the
+# offscreen plugin. `import PyQt6` (the bare package) loads no Qt DLL and
+# works everywhere.
 try:
     import PyQt6
-    from PyQt6.QtCore import QLibraryInfo
-    _qt_plugin_srcs = [
-        Path(PyQt6.__file__).parent / "Qt6" / "plugins" / "platforms",
-        Path(QLibraryInfo.path(
-            QLibraryInfo.LibraryPath.PluginsPath)) / "platforms",
-    ]
+    _plat_dir = Path(PyQt6.__file__).parent / "Qt6" / "plugins" / "platforms"
     _offscreen = next(
-        (d / n
-         for d in _qt_plugin_srcs
+        (_plat_dir / n
          for n in ("libqoffscreen.dylib", "qoffscreen.dll", "libqoffscreen.so")
-         if (d / n).is_file()),
+         if (_plat_dir / n).is_file()),
         None,
     )
     if _offscreen is not None:
