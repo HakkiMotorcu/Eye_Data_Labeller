@@ -3,13 +3,17 @@
 ## Workflow
 
 1. **Launch** — double-click the Desktop launcher (or `python main.py`).
-   The app opens on a **landing page**: an Open button, your recent
-   files, a drop target, and a shortcut to the session queue.
+   The app opens on a **landing page**: an Open button, a drop target,
+   your recent files (double-click or Enter opens; right-click to
+   remove), and — once it has entries — your **session queue**.
+   Editor shortcuts and file-dependent menus stay disabled until a
+   file is open.
 2. **Open a file** — click **Open image / video…** (or drop a
-   TIFF/AVI onto the window, double-click a recent, or pick one from
-   the queue). You never need to relaunch to switch files: `Ctrl+O`,
-   drag-and-drop, **File → Open Recent**, or the **Files sidebar**
-   (below) all open a new stack in place.
+   TIFF/video onto the window, double-click a recent, or hit the
+   queue's **Next ▶**). You never need to relaunch to switch files:
+   `Ctrl+O`, drag-and-drop, **File → Open Recent**, or the **Files
+   sidebar** (below) all open a new stack in place, and **File →
+   Close** (`Ctrl+W`) takes you back to the landing page.
 3. **Annotate** — click on a frame to place a cell, drag corners to
    resize the bbox. Add vessels / capillaries with their dedicated
    buttons (or `V` / `C`).
@@ -36,7 +40,7 @@
    the next / previous frame with no annotations. The tick bar above
    the timeline shows which frames carry work.
 8. **Save** — `Ctrl+S` writes the segmentation map. Auto-save runs in
-   the background every 30 sec (configurable in I/O Settings).
+   the background every 30 sec (configurable in Settings).
 
 ## Working through many files — the Files sidebar
 
@@ -48,7 +52,8 @@
   its state — `●` saved masks exist, `◐` autosave only, `○` untouched.
   **Next ▶** opens the first unfinished entry; double-click opens any;
   right-click removes entries or clears finished ones. The queue and
-  statuses persist across launches.
+  statuses persist across launches, and the same queue appears on the
+  landing page whenever it has entries.
 
 ### Ranking the queue (optional, model-heavy)
 
@@ -162,6 +167,7 @@ mask TIF snapshots, `Overlay.mp4` (annotations burned into the video
 | Key | Action |
 | --- | --- |
 | `Ctrl+O` | Open image / video in place |
+| `Ctrl+W` | Close file — back to the landing page |
 | `Ctrl+S` | Save segmentation map |
 | `Ctrl+I` | Import / load annotations |
 | `Ctrl+Z` | Undo |
@@ -180,7 +186,7 @@ any button for a tooltip showing the action + its shortcut.
 | **Filters** | Show All / Cells / Vessels / Capillaries |
 | **Modes** | Select / Paint / Erase, Fill bbox, Force paint, Propagate mask |
 | **Frames** | First / Prev / Next / Last, frame slider |
-| **File** | Save seg, Load project, Import, I/O settings |
+| **File** | Save seg, Load project, Import, Settings |
 | **Image** | Auto-levels (contrast), fit bbox to content |
 
 ## Settings (gear icon / File → Settings)
@@ -236,7 +242,7 @@ whole feature or individual checks in **Settings → Annotation**.
 
 | Thing | Path |
 | --- | --- |
-| Segmentation maps | Configured in I/O Settings — defaults to a subfolder of the input file's folder |
+| Segmentation maps | Configured in Settings — defaults to a subfolder of the input file's folder |
 | Project JSON | Same folder as the seg maps |
 | Auto-save scratch | In the output folder, prefixed with `.autosave_` |
 | SAM-HeLa checkpoint | `models/checkpoints/sam_hela/best.pt` (or wherever you pointed) |
@@ -246,12 +252,12 @@ whole feature or individual checks in **Settings → Annotation**.
 ## Troubleshooting
 
 - **`No SAM-HeLa checkpoint`** — drop `best.pt` at
-  `models/checkpoints/sam_hela/best.pt` or set it via I/O Settings.
+  `models/checkpoints/sam_hela/best.pt` or set it via Settings → SAM Model.
   See `INSTALL.md`.
 - **SAM is slow** — confirm device with
   `python -c "from core.device import describe_device; print(describe_device())"`
   in the activated env. Should print `cuda (...)` or `mps (...)`.
-- **App opens but no main window** — a file picker dialog opens
-  first; check Mission Control / Cmd-Tab if it's hidden.
+- **App opens but no main window** — the window (landing page) can
+  open behind other apps; check Mission Control / Cmd-Tab.
 - **Anything else** — `python main.py --debug` enables verbose
   logging (sets `EYE_LABELLER_DEBUG=1`).

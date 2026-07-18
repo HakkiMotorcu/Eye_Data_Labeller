@@ -322,7 +322,7 @@ class SamService:
                 f"SAM checkpoint not found at:\n"
                 f"  {self.checkpoint_path}\n\n"
                 f"Either pick the file when prompted, configure a "
-                f"download URL in I/O Settings, or drop best.pt "
+                f"download URL in Settings → SAM Model, or drop best.pt "
                 f"at the path above.\n\n{e}") from e
         except InterruptedError:
             raise FileNotFoundError(

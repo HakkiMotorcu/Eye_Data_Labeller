@@ -13,8 +13,8 @@ bash deploy/install_linux.sh
 deploy\install_windows.bat
 ```
 
-The installer drops a launcher on your Desktop. Double-click it. First
-launch asks for an image file (TIFF or AVI), then the main window opens.
+The installer drops a launcher on your Desktop. Double-click it. The
+app opens on a landing page; open a stack (TIFF or video) from there.
 
 If you have an NVIDIA GPU on Linux/Windows, the installer auto-detects
 it and swaps in CUDA-enabled PyTorch. On macOS, Apple Silicon GPU (MPS)
@@ -29,7 +29,7 @@ support is automatic.
 - **~3.5 GB free disk** for the conda environment.
 - **Internet** for the initial install (downloads conda + dependencies).
 - **A `best.pt` SAM-HeLa checkpoint file** *(optional)* — you can
-  configure this later via the app's I/O Settings dialog.
+  configure this later via the app's Settings dialog.
 
 ---
 
@@ -158,10 +158,9 @@ of recreating. Takes a couple of minutes if no major deps changed.
 
 - **`install_mac.command` won't open ("damaged or can't be opened"):**
   `xattr -dr com.apple.quarantine install_mac.command` then try again.
-- **App launches but I see nothing:** the launch flow opens a file
-  picker dialog before showing any window. On Mac it can hide behind
+- **App launches but I see nothing:** the window can open behind
   other apps — check Mission Control / cmd-Tab for `Python` or
-  `python3.12`. Picking a file shows the main window.
+  `python3.12`. (It opens on a landing page, not a file dialog.)
 - **SAM is using CPU and is slow:** in a terminal, `conda activate
   eye-labeller && python -c "import torch; print(torch.backends.mps.is_available())"`.
   Should print `True`. If `False`, your PyTorch wasn't built with MPS
@@ -170,8 +169,8 @@ of recreating. Takes a couple of minutes if no major deps changed.
 
 ### Linux
 
-- **App launches but I see nothing:** same file-picker UX as macOS.
-  The picker should pop up on your active monitor.
+- **App launches but I see nothing:** the window (landing page)
+  should open on your active monitor; check other workspaces.
 - **Wayland: black window:** `QT_QPA_PLATFORM=xcb eye-labeller` (forces
   X11 instead of Wayland — Qt6 Wayland support is still patchy).
 - **CUDA install failed:** the installer prints a clear "FAILED" line

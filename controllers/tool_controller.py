@@ -1375,7 +1375,8 @@ class ToolController:
         m_file.addAction(act)
         home_off.append(act)
         m_file.addSeparator()
-        act = QAction("I/O && Autosave Settings…", self.window)
+        # Same dialog as the landing page's Settings button — one name.
+        act = QAction("&Settings…", self.window)
         act.triggered.connect(self.open_io_settings)
         m_file.addAction(act)
         m_file.addSeparator()
@@ -1557,10 +1558,15 @@ class ToolController:
                 ("Esc", "Exit review mode"),
             ]),
             ("File", [
-                ("Ctrl+O", "Open image/video"), ("Ctrl+S", "Save project"),
+                ("Ctrl+O", "Open image/video"),
+                ("Ctrl+W", "Close file (back to the landing page)"),
+                ("Ctrl+S", "Save project"),
                 ("Ctrl+I", "Import annotations"),
                 ("Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y", "Undo / redo"),
                 ("Ctrl+Q", "Quit"),
+            ]),
+            ("Help", [
+                ("F1", "This cheat sheet"),
             ]),
         ]
         rows = []
@@ -3514,8 +3520,8 @@ class ToolController:
                 log_error('controller.sam',
                           'checkpoint unresolved — precompute skipped', exc=e)
                 self.window.lbl_sam_status.setText(
-                    "SAM checkpoint needed — pick best.pt in I/O Settings "
-                    "(SAM Box will ask again).")
+                    "SAM checkpoint needed — pick best.pt in Settings → "
+                    "SAM Model (SAM Box will ask again).")
                 return
         frames = self._frames_to_compute(frame_indices)
         if not frames:
