@@ -69,16 +69,9 @@ class LandingPage(QWidget):
         drop.setStyleSheet("color:#70707a;font-size:12px;padding:2px;")
         cl.addWidget(drop)
 
-        row = QHBoxLayout()
-        btn_queue = QPushButton("Open the session queue")
-        btn_queue.setToolTip("Work through a folder of stacks with "
-                             "done / in-progress status")
-        btn_queue.clicked.connect(self._show_queue)
-        row.addWidget(btn_queue)
         btn_settings = QPushButton("Settings")
         btn_settings.clicked.connect(self.ctrl.open_io_settings)
-        row.addWidget(btn_settings)
-        cl.addLayout(row)
+        cl.addWidget(btn_settings)
 
         rlbl = QLabel("Recent")
         rlbl.setStyleSheet("color:#70707a;font-size:11px;"
@@ -93,9 +86,37 @@ class LandingPage(QWidget):
         self.recent.itemDoubleClicked.connect(self._open_recent)
         cl.addWidget(self.recent)
 
+        # Session queue card — the same widget as the Files dock's
+        # bottom half (one persisted list, ui/session_queue.py). Only
+        # shown when the queue has entries, so a first run stays clean.
+        from ui.session_queue import SessionQueueWidget
+        qcard = QFrame()
+        qcard.setObjectName("landingQueueCard")
+        qcard.setStyleSheet(
+            "#landingQueueCard{background:#1c1c22;border:1px solid #2c2c33;"
+            "border-radius:14px;}"
+            "#landingQueueCard QLabel{color:#d7d7dd;background:transparent;}")
+        qcard.setMaximumWidth(380)
+        ql = QVBoxLayout(qcard)
+        ql.setContentsMargins(24, 24, 24, 24)
+        ql.setSpacing(10)
+        qtitle = QLabel("Session queue")
+        qtitle.setStyleSheet("font-size:16px;font-weight:600;color:#f0f0f4;")
+        ql.addWidget(qtitle)
+        qsub = QLabel("Your work list — Next ▶ opens the first "
+                      "unfinished stack.")
+        qsub.setWordWrap(True)
+        qsub.setStyleSheet("color:#9a9aa4;font-size:12px;")
+        ql.addWidget(qsub)
+        self.queue = SessionQueueWidget(controller, self, show_title=False)
+        ql.addWidget(self.queue, stretch=1)
+        self._queue_card = qcard
+
         outer = QHBoxLayout()
+        outer.setSpacing(18)
         outer.addStretch(1)
         outer.addWidget(card)
+        outer.addWidget(qcard)
         outer.addStretch(1)
         root.addLayout(outer)
         root.addStretch(1)
@@ -103,6 +124,9 @@ class LandingPage(QWidget):
         self.refresh_recent()
 
     def refresh_recent(self):
+        # Queue card: refresh statuses; hidden entirely when empty.
+        self.queue.refresh()
+        self._queue_card.setVisible(bool(self.queue.queue_paths()))
         self.recent.clear()
         files = self.ctrl.recent_files()
         if not files:
@@ -123,12 +147,6 @@ class LandingPage(QWidget):
         p = item.data(Qt.ItemDataRole.UserRole)
         if p:
             self.ctrl.open_path(p)
-
-    def _show_queue(self):
-        dock = getattr(self.ctrl, '_files_dock', None)
-        if dock is not None:
-            dock.setVisible(True)
-            dock.raise_()
 
     # Drag-drop straight onto the landing card.
     def dragEnterEvent(self, event):
