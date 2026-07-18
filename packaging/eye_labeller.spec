@@ -231,26 +231,6 @@ a = Analysis(
     noarchive=False,
 )
 
-# ---- macOS: do NOT bundle conda's libiconv ----------------------------
-# Two libiconv flavors exist with the SAME install name: Apple's (in the
-# dyld shared cache, exports _iconv/_iconv_open) and conda's GNU build
-# (exports the prefixed _libiconv* symbols only). pip's cv2 wheel vendors
-# a libintl.8.dylib that was delocate-built against APPLE's flavor; when
-# the bundle also ships conda's libiconv.2.dylib, dyld binds cv2's
-# libintl to it and dies at first (lazy) use:
-#   dyld: Symbol not found: _iconv
-#     Referenced from: _internal/cv2/.dylibs/libintl.8.dylib
-#     Expected in:     _internal/libiconv.2.dylib
-# This bind is lazy, so it fired nondeterministically — including AFTER
-# 'selftest: PASS' was printed (the "flaky teardown segfault" on CI).
-# Dropping conda's copy from the bundle makes dyld fall back to the
-# system libiconv in the shared cache, which exports what cv2 expects.
-# (macOS is guaranteed to provide it — it lives in the dyld cache on
-# every supported macOS, so the bundle stays self-contained in practice.)
-if sys.platform == "darwin":
-    a.binaries = [b for b in a.binaries
-                  if not os.path.basename(b[0]).startswith("libiconv")]
-
 pyz = PYZ(a.pure, a.zipped_data)
 
 # ---- One-folder build (faster startup) -------------------------------
@@ -280,6 +260,47 @@ coll = COLLECT(
     upx=False,
     name=APP_NAME,
 )
+
+# ---- macOS: reconcile the two libiconv flavors ------------------------
+# Two libiconv builds share the install name libiconv.2.dylib but export
+# DIFFERENT symbols: Apple's system copy (dyld shared cache) exports
+# _iconv/_iconv_open; conda's GNU build exports only the prefixed
+# _libiconv* names. The bundle contains consumers of BOTH flavors:
+#   - conda-built dylibs (libarchive, ffmpeg family, …) need conda's
+#     GNU copy -> it must STAY bundled (removing it crashes them);
+#   - pip cv2's wheel-vendored dylibs (cv2/.dylibs/libintl.8.dylib &
+#     friends) were delocate-built against APPLE's copy -> bound to
+#     conda's, they die at first lazy use with
+#       dyld: Symbol not found: _iconv
+#     which surfaced as the "random" macOS bundle segfault, sometimes
+#     even after 'selftest: PASS' had been printed.
+# Resolution: keep conda's copy for conda consumers, and REWRITE every
+# cv2-vendored dylib's libiconv reference to /usr/lib/libiconv.2.dylib
+# (always present via the dyld shared cache). macOS two-level namespaces
+# bind each consumer to the library it names, so both flavors coexist.
+# Ad-hoc re-sign afterwards — arm64 refuses to load modified code with
+# a stale signature. Runs post-COLLECT so the .app BUNDLE below (built
+# from the collected dir) inherits the fix; local builds get it too.
+if sys.platform == "darwin":
+    import glob as _g
+    import subprocess as _sp
+    _cv2_dylibs = _g.glob(os.path.join(
+        DISTPATH, APP_NAME, "_internal", "cv2", ".dylibs", "*.dylib"))  # noqa: F821
+    for _f in _cv2_dylibs:
+        try:
+            _out = _sp.run(["otool", "-L", _f], capture_output=True,
+                           text=True, check=True).stdout
+            _refs = [ln.split()[0] for ln in _out.splitlines()[1:]
+                     if "libiconv" in ln]
+            for _ref in _refs:
+                if _ref != "/usr/lib/libiconv.2.dylib":
+                    print(f"iconv-fix: {os.path.basename(_f)}: {_ref} "
+                          f"-> /usr/lib/libiconv.2.dylib")
+                    _sp.run(["install_name_tool", "-change", _ref,
+                             "/usr/lib/libiconv.2.dylib", _f], check=True)
+                    _sp.run(["codesign", "-f", "-s", "-", _f], check=True)
+        except Exception as _e:
+            print(f"iconv-fix: WARNING: {_f}: {_e}")
 
 # macOS .app bundle wrapper.
 if sys.platform == "darwin":

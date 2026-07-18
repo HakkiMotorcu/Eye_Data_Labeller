@@ -101,6 +101,15 @@ def _selftest():
     """
     import platform
     import tempfile
+    # Line-buffer stdio explicitly: the PyInstaller bootloader does not
+    # reliably honor PYTHONUNBUFFERED, and a native crash mid-run
+    # otherwise discards every buffered print — CI then shows a bare
+    # segfault with no verdict, which cost real diagnosis time.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except Exception:
+        pass
     print(f"selftest: python {sys.version.split()[0]} "
           f"on {platform.platform()} frozen={getattr(sys, 'frozen', False)}")
     try:
