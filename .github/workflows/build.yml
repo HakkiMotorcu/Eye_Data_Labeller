@@ -287,36 +287,14 @@ jobs:
         shell: bash -el {0}
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
-            # The windowed (console=False) exe discards stdout on Windows,
-            # so run it in the background, self-kill if it hangs (instead
-            # of eating the 15-min cap), and ALWAYS dump the session log
-            # the app writes to %LOCALAPPDATA%\EyeDataLabeller\logs.
-            EXE=./dist/EyeDataLabeller/EyeDataLabeller.exe
-            echo "launching: $EXE --selftest"
-            # PYTHONUNBUFFERED so the windowed exe's stdout isn't lost to
-            # block-buffering; EYE_LABELLER_FAULT_TIMEOUT makes main.py
-            # dump every thread's stack to stderr and abort if it hangs,
-            # pinpointing where the bundle stalls.
-            PYTHONUNBUFFERED=1 EYE_LABELLER_FAULT_TIMEOUT=90 "$EXE" --selftest &
-            PID=$!
-            RC=""
-            for i in $(seq 1 75); do
-              if ! kill -0 "$PID" 2>/dev/null; then wait "$PID"; RC=$?; break; fi
-              sleep 2
-            done
-            if [ -z "$RC" ]; then
-              echo "::warning:: bundle --selftest still running after 150s — killing (hang)"
-              kill "$PID" 2>/dev/null || true
-              taskkill //F //IM EyeDataLabeller.exe 2>/dev/null || true
-              RC=124
-            fi
-            echo "bundle --selftest exit code: $RC"
-            LOGDIR="$(cygpath -u "$LOCALAPPDATA" 2>/dev/null)/EyeDataLabeller/logs"
-            echo "=== latest session log ($LOGDIR) ==="
-            LATEST=$(ls -t "$LOGDIR"/session_*.log 2>/dev/null | head -1)
-            if [ -n "$LATEST" ]; then echo "log file: $LATEST"; cat "$LATEST"; \
-              else echo "(no session log found)"; ls -la "$LOGDIR" 2>/dev/null || echo "(no log dir)"; fi
-            exit "$RC"
+            # The windowed (console=False) exe block-buffers stdout, so run
+            # it unbuffered to keep the selftest's output visible. And arm
+            # main.py's in-process watchdog (EYE_LABELLER_FAULT_TIMEOUT): a
+            # hung windowed exe is otherwise invisible until the job cap, so
+            # the watchdog dumps every thread's stack and aborts if startup
+            # ever stalls, turning a silent hang into an actionable trace.
+            PYTHONUNBUFFERED=1 EYE_LABELLER_FAULT_TIMEOUT=300 \
+              ./dist/EyeDataLabeller/EyeDataLabeller.exe --selftest
           elif [ -x dist/EyeDataLabeller/EyeDataLabeller/EyeDataLabeller ]; then
             ./dist/EyeDataLabeller/EyeDataLabeller/EyeDataLabeller --selftest
           elif [ -x dist/EyeDataLabeller/EyeDataLabeller ]; then
