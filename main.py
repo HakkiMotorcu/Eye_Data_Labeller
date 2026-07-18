@@ -1,6 +1,17 @@
 import sys
 import os
 
+# PyInstaller + multiprocessing: torch / kornia / micro_sam spawn worker
+# processes, and on Windows (the 'spawn' start method) every child
+# re-launches the frozen exe from the top. Without freeze_support() the
+# child's argv doesn't carry --selftest, so it falls through to the
+# normal GUI launch (app.exec()) and hangs forever — which is exactly
+# how the bundled --selftest hung on Windows. Handle mp children here,
+# before any heavy import, so only the real parent process continues.
+if __name__ == '__main__':
+    import multiprocessing
+    multiprocessing.freeze_support()
+
 # Honor --debug BEFORE importing anything else, so the debug flag is
 # already live by the time submodules read it.
 if '--debug' in sys.argv:

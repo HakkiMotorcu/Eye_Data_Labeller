@@ -293,7 +293,9 @@ jobs:
             # the app writes to %LOCALAPPDATA%\EyeDataLabeller\logs.
             EXE=./dist/EyeDataLabeller/EyeDataLabeller.exe
             echo "launching: $EXE --selftest"
-            "$EXE" --selftest &
+            # PYTHONUNBUFFERED so the windowed exe's stdout isn't lost to
+            # block-buffering if we have to kill it.
+            PYTHONUNBUFFERED=1 "$EXE" --selftest &
             PID=$!
             RC=""
             for i in $(seq 1 75); do
