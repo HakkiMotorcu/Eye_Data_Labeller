@@ -117,6 +117,39 @@ for pkg in ("torch", "torchvision", "micro_sam", "trackastra",
 # this is the place to drop assets if we add icons / theme files.
 # datas += [(str(PROJECT_ROOT / "assets" / "*"), "assets")]
 
+# ---- Qt platform plugins (headless "offscreen") -----------------------
+# main.py --selftest (run by CI on the built bundle) forces
+# QT_QPA_PLATFORM=offscreen so it can build real widgets with no display.
+# PyInstaller's PyQt6 hook bundles the on-screen platform plugin
+# (libqcocoa.dylib on macOS, qwindows.dll on Windows) but on some PyQt6
+# layouts it does NOT collect the offscreen plugin, so the built app
+# aborts at startup (SIGABRT / exit 134) with:
+#   'Could not find the Qt platform plugin "offscreen" in
+#    .../_internal/PyQt6/Qt6/plugins/platforms'
+# Force-collect the offscreen plugin from wherever PyQt6 keeps it into
+# the platforms dir Qt scans (PyQt6/Qt6/plugins/platforms in the bundle).
+# Linux already passes because the hook happens to collect it there; the
+# explicit add is a harmless de-dupe on that platform.
+try:
+    import PyQt6
+    from PyQt6.QtCore import QLibraryInfo
+    _qt_plugin_srcs = [
+        Path(PyQt6.__file__).parent / "Qt6" / "plugins" / "platforms",
+        Path(QLibraryInfo.path(
+            QLibraryInfo.LibraryPath.PluginsPath)) / "platforms",
+    ]
+    _offscreen = next(
+        (d / n
+         for d in _qt_plugin_srcs
+         for n in ("libqoffscreen.dylib", "qoffscreen.dll", "libqoffscreen.so")
+         if (d / n).is_file()),
+        None,
+    )
+    if _offscreen is not None:
+        binaries.append((str(_offscreen), "PyQt6/Qt6/plugins/platforms"))
+except Exception:
+    pass
+
 # ---- Excludes ---------------------------------------------------------
 # Trim the bundle by excluding things we definitely don't use.
 #
@@ -129,15 +162,22 @@ for pkg in ("torch", "torchvision", "micro_sam", "trackastra",
 # at runtime is dead code for us.
 excludes = [
     "PyQt5", "PySide2", "PySide6",
-    # matplotlib: the app never imports it — it only sneaks in because
-    # pyqtgraph's colormap menu lazily loads it WHEN PRESENT. Bundled,
-    # it dragged in a conda libtiff whose 12-bit libjpeg symbols were
-    # missing at runtime ('undefined symbol: jpeg12_write_raw_data'),
-    # crashing ImageView construction. Excluded, pyqtgraph cleanly
-    # skips matplotlib colormaps (the app's get_colormap already
-    # guards its optional matplotlib fallback), and the bundle loses
-    # ~60 MB of dead weight.
-    "matplotlib", "matplotlib.tests", "scipy.tests",
+    # matplotlib is NOT excluded: micro_sam imports it from deeper
+    # submodules (e.g. micro_sam.util, which core/sam_service.py loads),
+    # so excluding it makes that import raise ModuleNotFoundError.
+    # sam_service catches the ImportError and silently disables SAM — so
+    # the shipped app runs but SAM is dead, a quieter and worse failure
+    # than a crash. (Top-level `import micro_sam` and main.py's selftest
+    # probe don't need it, which is why excluding it never tripped the
+    # selftest — it only killed SAM at runtime.) So keep matplotlib.
+    #
+    # Regression watch: bundling matplotlib previously dragged in a conda
+    # libtiff whose 12-bit libjpeg symbols were missing at runtime
+    # ('undefined symbol: jpeg12_write_raw_data'), crashing ImageView
+    # construction on Linux. If that resurfaces, scope this exclusion
+    # per-platform (Linux only) rather than dropping matplotlib on all
+    # OSes. matplotlib.tests stays excluded — it's pure dead weight.
+    "matplotlib.tests", "scipy.tests",
     "tornado", "notebook", "jupyter", "jupyterlab",
     "IPython", "pytest",
     # Unused heavy GUI/vis stacks that ride in transitively (napari /
