@@ -28,13 +28,17 @@ jobs:
           - os: windows-latest
             label: Windows-x86_64
             artifact: EyeDataLabeller-windows-x86_64.zip
-          # Pinned to 22.04, NOT ubuntu-latest: PyInstaller bundles link
-          # against the build machine's glibc, and 24.04's glibc 2.39
-          # floor locks out RHEL 9 / Ubuntu 22.04 lab workstations.
-          # 22.04 (glibc 2.35) keeps those working.
-          - os: ubuntu-22.04
-            label: Linux-x86_64
-            artifact: EyeDataLabeller-linux-x86_64.zip
+          # Linux DROPPED from the support matrix (2026-07-18): the
+          # collaborators only use Windows + macOS. Tier B (clone +
+          # install_linux.sh + conda env) still works on Linux — only
+          # the CI-built bundle is gone. To re-enable, restore:
+          #   - os: ubuntu-22.04     # 22.04, NOT -latest: glibc 2.35
+          #     label: Linux-x86_64  # floor keeps RHEL 9 / 22.04 labs
+          #     artifact: EyeDataLabeller-linux-x86_64.zip
+          # The runner.os == 'Linux' steps below and the Linux branches
+          # in eye_labeller.spec were left intact on purpose — they are
+          # inert without this matrix entry, and the known-open Linux
+          # bundle issue is documented in .claude/skills/ci-bundle-debugging.
     runs-on: ${{ matrix.os }}
 
     steps:
