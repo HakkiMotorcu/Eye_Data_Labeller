@@ -1506,6 +1506,10 @@ class ToolController:
             act.setToolTip(p)
             act.triggered.connect(lambda _c=False, path=p: self.open_path(path))
             self._menu_recent.addAction(act)
+        self._menu_recent.addSeparator()
+        act = QAction("Clear Menu", self.window)
+        act.triggered.connect(self.clear_recent_files)
+        self._menu_recent.addAction(act)
 
     def _open_log_folder(self):
         from PyQt6.QtGui import QDesktopServices
@@ -2113,6 +2117,15 @@ class ToolController:
         items = [p for p in self.recent_files() if p != path]
         items.insert(0, path)
         QSettings().setValue(self._RECENT_KEY, items[:self._RECENT_MAX])
+
+    def remove_recent_file(self, path):
+        from PyQt6.QtCore import QSettings
+        items = [p for p in self.recent_files() if p != path]
+        QSettings().setValue(self._RECENT_KEY, items)
+
+    def clear_recent_files(self):
+        from PyQt6.QtCore import QSettings
+        QSettings().setValue(self._RECENT_KEY, [])
 
     def open_file_dialog(self):
         """File>Open… — remembers the last-used directory."""

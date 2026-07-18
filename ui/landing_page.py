@@ -35,11 +35,13 @@ class LandingPage(QWidget):
         # background:transparent on the labels matters: qdarktheme's
         # app-wide QWidget rule otherwise paints each label as an
         # opaque lighter slab across the card.
-        card.setStyleSheet(
-            "#landingCard{background:#1c1c22;border:1px solid #2c2c33;"
-            "border-radius:14px;}"
-            "#landingCard QLabel{color:#d7d7dd;background:transparent;}")
+        self._card_ss = (
+            "#landingCard{{background:#1c1c22;border:1px solid {border};"
+            "border-radius:14px;}}"
+            "#landingCard QLabel{{color:#d7d7dd;background:transparent;}}")
+        card.setStyleSheet(self._card_ss.format(border="#2c2c33"))
         card.setMaximumWidth(560)
+        self._card = card
         cl = QVBoxLayout(card)
         cl.setContentsMargins(36, 32, 36, 32)
         cl.setSpacing(14)
@@ -73,17 +75,20 @@ class LandingPage(QWidget):
         btn_settings.clicked.connect(self.ctrl.open_io_settings)
         cl.addWidget(btn_settings)
 
-        rlbl = QLabel("Recent")
+        rlbl = QLabel("Recent — double-click or Enter opens")
         rlbl.setStyleSheet("color:#70707a;font-size:11px;"
-                           "text-transform:uppercase;letter-spacing:.06em;"
-                           "padding-top:6px;")
+                           "letter-spacing:.04em;padding-top:6px;")
         cl.addWidget(rlbl)
         self.recent = QListWidget()
         self.recent.setMaximumHeight(150)
         self.recent.setStyleSheet(
             "QListWidget{background:#17171c;border:1px solid #2c2c33;"
             "border-radius:6px;} QListWidget::item{padding:4px 8px;}")
-        self.recent.itemDoubleClicked.connect(self._open_recent)
+        # itemActivated covers double-click AND the Enter key.
+        self.recent.itemActivated.connect(self._open_recent)
+        self.recent.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self.recent.customContextMenuRequested.connect(self._recent_menu)
         cl.addWidget(self.recent)
 
         # Session queue card — the same widget as the Files dock's
@@ -134,8 +139,16 @@ class LandingPage(QWidget):
             it.setFlags(Qt.ItemFlag.NoItemFlags)
             self.recent.addItem(it)
             return
+        # Identical basenames (same stack name from two experiment
+        # folders) get their parent folder appended so they're
+        # distinguishable without hovering for the tooltip.
+        from collections import Counter
+        names = Counter(os.path.basename(p) for p in files)
         for p in files:
-            it = QListWidgetItem(os.path.basename(p))
+            name = os.path.basename(p)
+            label = name if names[name] == 1 else (
+                f"{name}  —  {os.path.basename(os.path.dirname(p)) or p}")
+            it = QListWidgetItem(label)
             it.setData(Qt.ItemDataRole.UserRole, p)
             it.setToolTip(p)
             self.recent.addItem(it)
@@ -145,19 +158,47 @@ class LandingPage(QWidget):
 
     def _open_recent(self, item):
         p = item.data(Qt.ItemDataRole.UserRole)
-        if p:
-            self.ctrl.open_path(p)
+        if p and not self.ctrl.open_path(p):
+            # Failed open (e.g. the file vanished): re-filter so a dead
+            # entry doesn't stay clickable under the error dialog.
+            self.refresh_recent()
 
-    # Drag-drop straight onto the landing card.
+    def _recent_menu(self, pos):
+        from PyQt6.QtWidgets import QMenu
+        item = self.recent.itemAt(pos)
+        menu = QMenu(self)
+        p = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if p:
+            menu.addAction("Open", lambda: self._open_recent(item))
+            menu.addAction("Remove from list", lambda: (
+                self.ctrl.remove_recent_file(p), self.refresh_recent()))
+            menu.addSeparator()
+        if self.ctrl.recent_files():
+            menu.addAction("Clear list", lambda: (
+                self.ctrl.clear_recent_files(), self.refresh_recent()))
+        if menu.actions():
+            menu.exec(self.recent.viewport().mapToGlobal(pos))
+
+    # Drag-drop straight onto the landing card. The card border lights
+    # up while a droppable file is over the window.
+    def _set_drag_highlight(self, on):
+        self._card.setStyleSheet(
+            self._card_ss.format(border="#3b82c4" if on else "#2c2c33"))
+
     def dragEnterEvent(self, event):
         md = event.mimeData()
         if md.hasUrls() and any(
                 os.path.splitext(u.toLocalFile())[1].lower() in SUPPORTED_EXTS
                 for u in md.urls()):
+            self._set_drag_highlight(True)
             event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event):
+        self._set_drag_highlight(False)
 
     def dropEvent(self, event):
         from PyQt6.QtCore import QTimer
+        self._set_drag_highlight(False)
         for u in event.mimeData().urls():
             p = u.toLocalFile()
             if p and os.path.splitext(p)[1].lower() in SUPPORTED_EXTS:
