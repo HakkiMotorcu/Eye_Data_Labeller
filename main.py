@@ -12,6 +12,14 @@ if __name__ == '__main__':
     import multiprocessing
     multiprocessing.freeze_support()
 
+# Optional hang watchdog (CI/debug): if EYE_LABELLER_FAULT_TIMEOUT is set,
+# dump every thread's Python stack to stderr and abort after that many
+# seconds. Lets a hung headless run reveal exactly where it stalled.
+_fault_timeout = os.environ.get('EYE_LABELLER_FAULT_TIMEOUT')
+if _fault_timeout:
+    import faulthandler
+    faulthandler.dump_traceback_later(int(_fault_timeout), exit=True)
+
 # Honor --debug BEFORE importing anything else, so the debug flag is
 # already live by the time submodules read it.
 if '--debug' in sys.argv:

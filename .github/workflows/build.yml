@@ -294,8 +294,10 @@ jobs:
             EXE=./dist/EyeDataLabeller/EyeDataLabeller.exe
             echo "launching: $EXE --selftest"
             # PYTHONUNBUFFERED so the windowed exe's stdout isn't lost to
-            # block-buffering if we have to kill it.
-            PYTHONUNBUFFERED=1 "$EXE" --selftest &
+            # block-buffering; EYE_LABELLER_FAULT_TIMEOUT makes main.py
+            # dump every thread's stack to stderr and abort if it hangs,
+            # pinpointing where the bundle stalls.
+            PYTHONUNBUFFERED=1 EYE_LABELLER_FAULT_TIMEOUT=90 "$EXE" --selftest &
             PID=$!
             RC=""
             for i in $(seq 1 75); do
