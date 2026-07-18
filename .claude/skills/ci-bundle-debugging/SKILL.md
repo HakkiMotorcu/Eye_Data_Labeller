@@ -32,6 +32,7 @@ a plain pip section — upstream's pip metadata hard-pins napari too.
 | Windows source tree: `DLL load failed while importing QtCore: The specified procedure could not be found` | conda ICU in `<env>\Library\bin` (on PATH) lacks the **unversioned** `UCNV_TO/FROM_U_CALLBACK_SUBSTITUTE` symbols; PyQt6's Qt6Core is built against **System32's ICU**, which has them. NOT the VC runtime (conda's msvcp140 is newer = compatible). NOT Qt-vs-Qt (absolute-path load of pip's Qt6Core also failed) | main.py preloads `System32\icuuc.dll`/`icuin.dll` before first Qt import. Keep even though napari is gone — icu can persist via boost/vigra |
 | Linux bundle: `libOpenEXRCore.so.33: undefined symbol: libdeflate_alloc_compressor_ex` → SAM dead on Linux | PyInstaller shipped OpenEXR (linked by conda **vigra**) without the env's libdeflate, so the loader fell back to Ubuntu's system libdeflate 1.10 (predates the `_ex` API). Spec now force-bundles the env's libdeflate | spec (Linux block). NOTE: **Linux was dropped from the CI matrix 2026-07-18** (collaborators are Win+mac only) — the fix and this row are kept for a possible future re-enable; Tier B Linux (conda env) still works |
 | cv2 "recursion is detected", pillow `jpeg12` crash, numpy `_ctrsyl3_` on mac | conda/pip duplicate flavors or wrong BLAS | build.yml has dedicated steps; read their comments before touching |
+| macOS bundle: "random" segfault (exit 139), sometimes AFTER `selftest: PASS`; stderr shows `dyld: Symbol not found: _iconv` | TWO libiconv flavors, same install name, different exports: Apple's (`_iconv`, dyld shared cache) vs conda's GNU (`_libiconv*` only). cv2's wheel-vendored dylibs need Apple's; conda-built dylibs (libarchive, ffmpeg family) need conda's. The bind is LAZY → nondeterministic timing, which masqueraded first as a teardown flake, then as an MPS flake — two wrong fixes before the real one | spec post-COLLECT "iconv-fix" block: keep conda's copy bundled, rewrite every `cv2/.dylibs/*.dylib` libiconv ref to `/usr/lib/libiconv.2.dylib` (`install_name_tool` + ad-hoc `codesign`; two-level namespaces let both coexist). CI guard asserts both halves after every build — don't remove it |
 
 ## Method — evidence first (two blind fixes failed before this worked)
 
@@ -56,6 +57,19 @@ a plain pip section — upstream's pip metadata hard-pins napari too.
    ~15–35 min; budget several iterations for anything Windows-DLL-shaped.
 7. **A green job ≠ working SAM.** Always grep the bundle-selftest output for
    `micro_sam import failed` before declaring victory (sam_service swallows it).
+8. **Read the RAW step tail, not just filtered greps.** The macOS iconv root
+   cause (`dyld[pid]: Symbol not found: _iconv`) survived three debugging
+   rounds because the log extraction grepped for `Error|Traceback|selftest`
+   — dyld messages match none of those. The user found it by reading the
+   raw output. After any grep-based extraction, also look at the last ~30
+   raw lines of the failing step.
+9. **The PyInstaller bootloader ignores `PYTHONUNBUFFERED`.** A native crash
+   mid-selftest silently discards all buffered prints — you see a bare
+   segfault and no verdict. `_selftest` force line-buffers stdio via
+   `sys.stdout.reconfigure(line_buffering=True)`; keep that.
+10. **The SAM smoke runs on CPU by design** (`device='cpu'`): deterministic
+    mask (576 px on both OSes) and no GPU-driver teardown variance in CI.
+    The real app still auto-picks MPS/CUDA.
 
 ## Guardrails already in CI (don't remove)
 
