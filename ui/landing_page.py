@@ -103,6 +103,17 @@ class LandingPage(QWidget):
         drop.setStyleSheet("color:#70707a;font-size:12px;padding:2px;")
         cl.addWidget(drop)
 
+        # Shown only while no SAM checkpoint is configured — the model
+        # is never demanded at startup, but it's one click from here.
+        self.btn_model = QPushButton(
+            "Add SAM model…   (segmentation assist is off until set)")
+        self.btn_model.setStyleSheet(
+            "QPushButton{background:transparent;border:1px dashed #3d3d46;"
+            "border-radius:6px;color:#9a9aa4;font-size:12px;padding:6px;}"
+            "QPushButton:hover{color:#d7d7dd;border-color:#55555f;}")
+        self.btn_model.clicked.connect(self._add_model)
+        cl.addWidget(self.btn_model)
+
         rlbl = QLabel("Recent — click to open   ·   ✓ complete   "
                       "● in progress")
         rlbl.setStyleSheet("color:#70707a;font-size:11px;"
@@ -131,6 +142,15 @@ class LandingPage(QWidget):
 
         self.refresh_recent()
 
+    def _model_missing(self):
+        svc = getattr(self.ctrl, 'sam_service', None)
+        ck = getattr(svc, 'checkpoint_path', None)
+        return bool(ck) and not os.path.exists(ck)
+
+    def _add_model(self):
+        self.ctrl.choose_model_checkpoint()
+        self.refresh_recent()
+
     def _status_for(self, path):
         from core import project_io
         try:
@@ -140,6 +160,7 @@ class LandingPage(QWidget):
             return None
 
     def refresh_recent(self):
+        self.btn_model.setVisible(self._model_missing())
         self.recent.clear()
         files = self.ctrl.recent_files()
         if not files:

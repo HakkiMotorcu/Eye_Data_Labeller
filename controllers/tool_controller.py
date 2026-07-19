@@ -1448,6 +1448,23 @@ class ToolController:
             lambda v: QSettings().setValue('ui/files_dock_visible', bool(v)))
         self._files_dock = dock
 
+        # Model menu — usable from the landing page too (configuring
+        # the model is a home-screen concern; opening files is not
+        # required first). Never blocks: the checkpoint is asked for
+        # ONCE here (or on the first SAM Box press) and remembered.
+        m_model = mb.addMenu("&Model")
+        self._act_model_current = QAction("(model status)", self.window)
+        self._act_model_current.setEnabled(False)
+        m_model.addAction(self._act_model_current)
+        m_model.addSeparator()
+        act = QAction("&Choose checkpoint file…", self.window)
+        act.triggered.connect(self.choose_model_checkpoint)
+        m_model.addAction(act)
+        act = QAction("Model &settings…", self.window)
+        act.triggered.connect(self.open_io_settings)
+        m_model.addAction(act)
+        m_model.aboutToShow.connect(self._refresh_model_menu)
+
         m_help = mb.addMenu("&Help")
         act = QAction("&Keyboard Shortcuts", self.window)
         act.setShortcut(QKeySequence("F1"))
@@ -3467,6 +3484,36 @@ class ToolController:
         ('vit_l', None),
     ]
 
+    def _refresh_model_menu(self):
+        svc = self.sam_service
+        ckpt = svc.checkpoint_path
+        if ckpt and os.path.exists(ckpt):
+            txt = f"Current: {svc.model_type} — {os.path.basename(ckpt)}"
+        elif ckpt:
+            txt = "Current: no checkpoint set — SAM off"
+        else:
+            txt = f"Current: {svc.model_type} (registry download)"
+        self._act_model_current.setText(txt)
+
+    def choose_model_checkpoint(self):
+        """Model > Choose checkpoint…: ask once, remember forever.
+
+        prompt_for_local_path persists the picked file to QSettings, so
+        future launches resolve it without asking. Never forced — SAM
+        stays off (with a status hint) until the user comes here or
+        presses SAM Box.
+        """
+        from core import model_download
+        picked = model_download.prompt_for_local_path(self.window)
+        if not picked:
+            return
+        self._stop_embed_worker(timeout_ms=5000)
+        self.sam_service = SamService(model_type='vit_b',
+                                      checkpoint_path=picked)
+        self._refresh_sam_status()
+        if self.window.video_data is not None:
+            self.on_image_loaded()
+
     def _on_sam_model_changed(self, idx):
         # Stop any in-flight embed worker — the new service has its own cache.
         self._stop_embed_worker(timeout_ms=5000)
@@ -3548,6 +3595,10 @@ class ToolController:
         svc = self.sam_service
         if svc.checkpoint_path and not os.path.exists(svc.checkpoint_path):
             if not interactive:
+                # Visible, non-modal: annotation works fine without SAM.
+                self.window.lbl_sam_status.setText(
+                    "SAM model not set — Model menu → Choose checkpoint… "
+                    "(annotation works without it)")
                 return
             try:
                 svc.ensure_checkpoint_ready(self.window)
@@ -3718,7 +3769,12 @@ class ToolController:
         if self.window._current_file is None:
             return
         fi = self.window._current_frame_idx
-        self._start_embed_worker([fi], label=f"frame {fi}")
+        # interactive=False: opening a file must never interrogate the
+        # user about models or block on a modal progress dialog — the
+        # embed runs silently; SAM Box (B) remains the explicit path
+        # that may ask (once) for a checkpoint.
+        self._start_embed_worker([fi], label=f"frame {fi}",
+                                 interactive=False)
 
     def _maybe_prompt_resume(self):
         """If the current video has a saved session in its out folder,
