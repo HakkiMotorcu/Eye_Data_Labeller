@@ -98,7 +98,11 @@ def _hint(text):
 class SettingsDialog(QDialog):
     """Elegant tabless settings panel: nav list + stacked pages."""
 
-    def __init__(self, parent=None):
+    # Page names in nav order — callers open a specific one by name.
+    PAGES = ("Output & Autosave", "SAM Model", "Detection",
+             "Annotation", "Debugging")
+
+    def __init__(self, parent=None, page=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setModal(True)
@@ -115,13 +119,20 @@ class SettingsDialog(QDialog):
                 ("Annotation", self._page_annotation),
                 ("Debugging", self._page_debug)):
             self._nav.addItem(name)
-            page = QWidget()
-            lay = QVBoxLayout(page)
+            page_w = QWidget()
+            lay = QVBoxLayout(page_w)
             builder(lay)
             lay.addStretch(1)
-            self._stack.addWidget(page)
+            self._stack.addWidget(page_w)
         self._nav.currentRowChanged.connect(self._stack.setCurrentIndex)
-        self._nav.setCurrentRow(0)
+        # Open on the requested page (by name or index) — e.g. the Model
+        # menu opens straight to "SAM Model", not the first tab.
+        start = 0
+        if isinstance(page, str) and page in self.PAGES:
+            start = self.PAGES.index(page)
+        elif isinstance(page, int) and 0 <= page < len(self.PAGES):
+            start = page
+        self._nav.setCurrentRow(start)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok

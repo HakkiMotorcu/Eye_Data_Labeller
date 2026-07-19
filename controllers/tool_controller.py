@@ -578,12 +578,12 @@ class ToolController:
     # ------------------------------------------------------------------
     # ANNOTATION CRUD HELPERS
     # ------------------------------------------------------------------
-    def open_io_settings(self):
-        """Open the modal output / autosave settings dialog. On accept,
-        re-apply the autosave timer interval so changes take effect
-        without a restart."""
+    def open_io_settings(self, page=None):
+        """Open the modal settings dialog, optionally on a specific page
+        (e.g. 'SAM Model'). On accept, re-apply the autosave timer
+        interval so changes take effect without a restart."""
         from ui.settings_dialog import SettingsDialog
-        dlg = SettingsDialog(self.window)
+        dlg = SettingsDialog(self.window, page=page)
         if dlg.exec():
             self._apply_autosave_interval()
             self._reload_quality_settings()
@@ -1465,7 +1465,8 @@ class ToolController:
         act.triggered.connect(self.choose_model_checkpoint)
         m_model.addAction(act)
         act = QAction("Model &settings…", self.window)
-        act.triggered.connect(self.open_io_settings)
+        act.triggered.connect(
+            lambda _c=False: self.open_io_settings('SAM Model'))
         m_model.addAction(act)
         m_model.aboutToShow.connect(self._refresh_model_menu)
 
