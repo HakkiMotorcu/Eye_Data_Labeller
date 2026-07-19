@@ -3581,9 +3581,18 @@ class ToolController:
         if not picked:
             return
         self._stop_embed_worker(timeout_ms=5000)
+        # A picked local checkpoint is the fine-tuned sam_hela slot
+        # (index 0; prompt_for_local_path persisted it there). Sync the
+        # sidebar combo so it can't drift from the Model menu — block
+        # its signal so we don't rebuild the service twice.
+        combo = self.window.combo_sam_model
+        combo.blockSignals(True)
+        combo.setCurrentIndex(0)
+        combo.blockSignals(False)
         self.sam_service = SamService(model_type='vit_b',
                                       checkpoint_path=picked)
         self._refresh_sam_status()
+        self._refresh_model_menu()
         if self.window.video_data is not None:
             self.on_image_loaded()
 
