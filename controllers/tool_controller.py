@@ -1432,6 +1432,11 @@ class ToolController:
         act.triggered.connect(self.export_bundle)
         m_file.addAction(act)
         home_off.append(act)
+        # Collate works over a whole folder of projects — usable on the
+        # landing page too, so NOT home-disabled.
+        act = QAction("&Collate masks by class…", self.window)
+        act.triggered.connect(self.collate_masks_by_class)
+        m_file.addAction(act)
         m_file.addSeparator()
         # Same dialog as the landing page's Settings button — one name.
         act = QAction("&Settings…", self.window)
@@ -1827,6 +1832,58 @@ class ToolController:
                 reasons.append(f"area {n}px far from frame median "
                                f"{int(med_area)}px")
         return tuple(reasons)
+
+    @log_action('action')
+    def collate_masks_by_class(self):
+        """File > Collate masks by class: copy every stack's per-class
+        mask TIFs from a source tree into Cells/ Vessels/ Capillaries/
+        folders — the type-grouped layout for feeding a training
+        pipeline, without disturbing the per-video save layout."""
+        from PyQt6.QtCore import QSettings
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtGui import QCursor
+        from core import project_io
+        start = (str(QSettings().value(project_io.SETTING_OUTPUT_CUSTOM_ROOT, ""))
+                 or (os.path.dirname(self.window._current_file)
+                     if self.window._current_file else os.path.expanduser("~")))
+        source = QFileDialog.getExistingDirectory(
+            self.window, "Folder of projects to collate (searched recursively)",
+            start)
+        if not source:
+            return
+        dest = QFileDialog.getExistingDirectory(
+            self.window, "Destination for the Cells / Vessels / Capillaries "
+            "folders", source)
+        if not dest:
+            return
+        if os.path.abspath(dest).startswith(os.path.abspath(source) + os.sep):
+            QMessageBox.warning(
+                self.window, "Collate masks",
+                "Pick a destination OUTSIDE the source folder so the "
+                "collated copies aren't re-scanned.")
+            return
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
+        try:
+            summary = project_io.collate_masks_by_class(source, dest)
+        except Exception as e:
+            log_error('controller.collate', 'collate failed', exc=e)
+            QMessageBox.critical(self.window, "Collate masks",
+                                 f"Could not collate:\n{type(e).__name__}: {e}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        bc = summary['by_class']
+        note = ""
+        if summary['collisions']:
+            note = ("\n\nDuplicate stack names were suffixed (_2, _3…): "
+                    + ", ".join(summary['collisions'][:6])
+                    + ("…" if len(summary['collisions']) > 6 else ""))
+        QMessageBox.information(
+            self.window, "Collate masks",
+            f"Collated {summary['stacks']} stack(s) into:\n{dest}\n\n"
+            f"  Cells:        {bc.get('cell', 0)}\n"
+            f"  Vessels:      {bc.get('vessel', 0)}\n"
+            f"  Capillaries:  {bc.get('capillary', 0)}{note}")
 
     @log_action('action')
     def export_bundle(self):

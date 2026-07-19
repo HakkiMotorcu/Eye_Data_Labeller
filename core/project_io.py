@@ -333,6 +333,59 @@ def file_status(out_folder: str) -> Optional[str]:
     return STATUS_IN_PROGRESS
 
 
+# Class → export subfolder name for the by-class collate.
+_CLASS_EXPORT_DIR = {
+    'cell': 'Cells', 'vessel': 'Vessels', 'capillary': 'Capillaries',
+}
+
+
+def find_stack_folders(source_root: str):
+    """Every folder under ``source_root`` that holds at least one class
+    mask TIF — i.e. a per-stack output folder. Recursive, so it finds
+    both ``<root>/<stem>/`` and the default ``<videos>/out/<stem>/``."""
+    import shutil  # noqa: F401  (kept near collate for locality)
+    found = []
+    for dirpath, _dirs, files in os.walk(source_root):
+        if any(f in files for f in CLASS_MASK_FILES.values()):
+            found.append(dirpath)
+    return sorted(found)
+
+
+def collate_masks_by_class(source_root: str, dest_root: str):
+    """Copy every stack's per-class masks into class folders:
+    ``<dest>/Cells/<stem>.tif``, ``<dest>/Vessels/<stem>.tif``, … .
+
+    Non-destructive (copies, never moves). Duplicate stem names get a
+    numeric suffix so nothing is overwritten. Returns a summary dict:
+    ``{'stacks': N, 'by_class': {'cell': n, ...}, 'collisions': [...]}``.
+    """
+    import shutil
+    stacks = find_stack_folders(source_root)
+    by_class = {ct: 0 for ct in CLASS_MASK_FILES}
+    used = {ct: set() for ct in CLASS_MASK_FILES}
+    collisions = []
+    for folder in stacks:
+        stem = os.path.basename(folder.rstrip(os.sep)) or 'stack'
+        for ct, fname in CLASS_MASK_FILES.items():
+            src = os.path.join(folder, fname)
+            if not os.path.isfile(src):
+                continue
+            dest_dir = os.path.join(dest_root, _CLASS_EXPORT_DIR[ct])
+            ensure_dir(dest_dir)
+            name = stem
+            n = 1
+            while name in used[ct]:
+                n += 1
+                name = f"{stem}_{n}"
+                if n == 2:
+                    collisions.append(stem)
+            used[ct].add(name)
+            shutil.copy2(src, os.path.join(dest_dir, name + '.tif'))
+            by_class[ct] += 1
+    return {'stacks': len(stacks), 'by_class': by_class,
+            'collisions': sorted(set(collisions))}
+
+
 def read_project_manifest(out_folder: str) -> Optional[dict]:
     """Return parsed project.json or None if absent / unreadable."""
     path = os.path.join(out_folder, FILE_PROJECT)
