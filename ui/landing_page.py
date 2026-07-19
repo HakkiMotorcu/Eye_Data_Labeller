@@ -91,37 +91,9 @@ class LandingPage(QWidget):
         self.recent.customContextMenuRequested.connect(self._recent_menu)
         cl.addWidget(self.recent)
 
-        # Session queue card — the same widget as the Files dock's
-        # bottom half (one persisted list, ui/session_queue.py). Only
-        # shown when the queue has entries, so a first run stays clean.
-        from ui.session_queue import SessionQueueWidget
-        qcard = QFrame()
-        qcard.setObjectName("landingQueueCard")
-        qcard.setStyleSheet(
-            "#landingQueueCard{background:#1c1c22;border:1px solid #2c2c33;"
-            "border-radius:14px;}"
-            "#landingQueueCard QLabel{color:#d7d7dd;background:transparent;}")
-        qcard.setMaximumWidth(380)
-        ql = QVBoxLayout(qcard)
-        ql.setContentsMargins(24, 24, 24, 24)
-        ql.setSpacing(10)
-        qtitle = QLabel("Session queue")
-        qtitle.setStyleSheet("font-size:16px;font-weight:600;color:#f0f0f4;")
-        ql.addWidget(qtitle)
-        qsub = QLabel("Your work list — Next ▶ opens the first "
-                      "unfinished stack.")
-        qsub.setWordWrap(True)
-        qsub.setStyleSheet("color:#9a9aa4;font-size:12px;")
-        ql.addWidget(qsub)
-        self.queue = SessionQueueWidget(controller, self, show_title=False)
-        ql.addWidget(self.queue, stretch=1)
-        self._queue_card = qcard
-
         outer = QHBoxLayout()
-        outer.setSpacing(18)
         outer.addStretch(1)
         outer.addWidget(card)
-        outer.addWidget(qcard)
         outer.addStretch(1)
         root.addLayout(outer)
         root.addStretch(1)
@@ -129,9 +101,6 @@ class LandingPage(QWidget):
         self.refresh_recent()
 
     def refresh_recent(self):
-        # Queue card: refresh statuses; hidden entirely when empty.
-        self.queue.refresh()
-        self._queue_card.setVisible(bool(self.queue.queue_paths()))
         self.recent.clear()
         files = self.ctrl.recent_files()
         if not files:
