@@ -270,8 +270,8 @@ whole feature or individual checks in **Settings → Annotation**.
 
 ## Troubleshooting
 
-- **`No SAM-HeLa checkpoint`** — **Model → Choose checkpoint file…**
-  (asks once, remembered), or drop `best.pt` at
+- **`No SAM-HeLa checkpoint`** — **Model → Add model…** (register your
+  `best.pt`, remembered), or drop it at
   `models/checkpoints/sam_hela/best.pt`. See `INSTALL.md`.
 - **SAM is slow** — confirm device with
   `python -c "from core.device import describe_device; print(describe_device())"`

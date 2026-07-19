@@ -45,15 +45,23 @@ Using the app (workflows, all keyboard shortcuts, tips) →
 - **SAM Box** — one-click bounding-box → segmentation mask via a
   fine-tuned SAM-HeLa checkpoint. Pre-computed embeddings make
   subsequent boxes on the same frame near-instant.
+- **Model registry** — register multiple named checkpoints
+  (Model → Add model…), each with a base architecture, and switch
+  the active one from the sidebar. No model is ever forced.
+- **Batch-friendly workflow** — a Home screen with recent files, a
+  Files explorer sidebar, and explicit **✓ complete / ● in progress**
+  status per stack (drawing marks a file in progress; `Next ▶` opens
+  the first unfinished one) — built for folders of 1000+ videos.
 - **Paint / erase brush** for manual edits on top of (or instead of)
   SAM output.
 - **Lock + advance** workflow — `Ctrl+L` marks an annotation final
   and jumps to the next, so a session has a consistent rhythm.
-- **Size presets** (`1`–`4` + capture `0`) for quickly applying a
-  known cell / vessel size to a new annotation.
-- **Auto-save** — periodic writes of the seg map + project JSON,
-  configurable interval, atomic rename so a crash never leaves a
-  half-written file.
+- **Organized saves** — one folder per video (masks + meta + status +
+  rolling backups); **File → Collate masks by class** exports
+  type-grouped masks for a training pipeline on demand.
+- **Auto-save** — periodic snapshot writes, configurable interval,
+  atomic rename so a crash never leaves a half-written file; a real
+  save self-cleans the snapshot.
 - **GPU-aware** — CUDA on Win/Linux + NVIDIA, MPS on Apple Silicon,
   CPU fallback. Device auto-detected at startup; override with
   `EYE_LABELLER_DEVICE=cpu` / `cuda` / `mps`.
@@ -91,6 +99,7 @@ Eye_Data_Labeller/
 ├── core/                  # Domain logic (no Qt deps)
 │   ├── device.py            # cuda / mps / cpu picker
 │   ├── sam_service.py       # micro-sam wrapper + embedding cache
+│   ├── model_registry.py    # named checkpoints (add/edit/remove/active)
 │   ├── model_download.py    # SAM-HeLa checkpoint resolver
 │   ├── app_paths.py         # bundled / user-data path helpers
 │   ├── volume_data.py       # TIFF / AVI loaders

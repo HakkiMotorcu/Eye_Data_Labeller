@@ -16,9 +16,21 @@ deploy\install_windows.bat
 The installer drops a launcher on your Desktop. Double-click it. The
 app opens on a landing page; open a stack (TIFF or video) from there.
 
+**Add the SAM model (one-time):** the ~400 MB `best.pt` checkpoint
+does **not** ship with the app. Get it from whoever runs your lab (a
+shared drive / Box / USB), then in the app: **Model → Add model…**,
+give it a tag, and browse to the `best.pt`. That's it — it's
+remembered across launches. Without a model, manual annotation still
+works; only the one-click **SAM Box** is disabled.
+
 If you have an NVIDIA GPU on Linux/Windows, the installer auto-detects
 it and swaps in CUDA-enabled PyTorch. On macOS, Apple Silicon GPU (MPS)
 support is automatic.
+
+**Prefer no terminal?** Download a pre-built bundle from the
+[Releases page](https://github.com/HakkiMotorcu/Eye_Data_Labeller/releases)
+instead — see [Standalone bundles](#standalone-bundles-alternative-install)
+below.
 
 ---
 
@@ -28,8 +40,9 @@ support is automatic.
   everything goes under your home directory.
 - **~3.5 GB free disk** for the conda environment.
 - **Internet** for the initial install (downloads conda + dependencies).
-- **A `best.pt` SAM-HeLa checkpoint file** *(optional)* — you can
-  configure this later via the app's Settings dialog.
+- **A `best.pt` SAM-HeLa checkpoint file** *(optional)* — register it
+  later via **Model → Add model…** in the app. Without it, manual
+  annotation works; only SAM Box is disabled.
 
 ---
 
@@ -99,25 +112,34 @@ If you don't have a `best.pt` yet, ask whoever runs your lab — they
 should have it on a USB / Box / Drive / network share, or hand you a
 `models.zip` containing it.
 
-### Alternative: point at a file somewhere else
+### Recommended: register it in the app (the model registry)
 
-If the file lives on a network drive, you want to share it across
-multiple project clones, or it's just somewhere else on disk:
+Works for both install paths (Tier A bundle and Tier B source):
+
+- **Model → Add model…** → give it a tag (e.g. `sam_hela`), pick the
+  base architecture (`vit_b` for the standard SAM-HeLa fine-tune), and
+  browse to `best.pt`. It's remembered across launches, and you can
+  register several and switch between them with the sidebar combo.
+- **Settings → SAM Model** shows the full registry — add / edit /
+  remove models and choose which is active.
+
+The file is read in place — nothing is copied, so the original can
+live anywhere readable (network drive, read-only volume, etc.). Tags
+and file paths are each unique, so two models can't collide.
+
+### Other ways to point at the file
 
 - **At install time:** every installer prompts —
-  `Path to best.pt (or empty to skip):`. Paste the full path.
-- **In the app:** I/O → Output settings… → SAM-HeLa checkpoint →
-  Local file → Browse… → pick the file.
+  `Path to best.pt (or empty to skip):`. Paste the full path (it's
+  registered for you).
 - **Via env var:** `EYE_LABELLER_SAM_HELA_LOCAL_PATH=/full/path` before
-  launching (useful on shared lab machines).
-
-The file is read in place — nothing copied, original can live anywhere
-readable (network drive, read-only volume, etc.).
+  launching (useful on shared lab machines) — migrated into the
+  registry on first run.
 
 ### If your lab has a public download URL for `best.pt`
 
-- **In the app:** I/O → Output settings… → SAM-HeLa checkpoint →
-  or URL → paste a public HTTPS URL.
+- **In the app:** Settings → SAM Model → **Download URL** → paste a
+  public HTTPS URL (used by the built-in variants on first use).
 - **Via env var:** `EYE_LABELLER_SAM_HELA_URL=<url>` before launching.
 
 The app downloads on first SAM use, streams into a `.part` sibling
@@ -130,9 +152,12 @@ with a half-file). Downloads land under your per-user data dir:
 
 ### Resolution order at runtime
 
-1. Configured local file path (settings → env var)
-2. Configured download URL → downloads on first use
-3. Friendly error asking you to configure one of the two
+1. The **active model** in the registry (Model → Add model / Settings
+   → SAM Model), including a path migrated from the old setting / env
+   var
+2. Configured download URL → downloads on first use (built-in variants)
+3. SAM stays off with a status-line hint — manual annotation still
+   works; register a model to enable SAM Box
 
 ---
 
@@ -191,9 +216,9 @@ of recreating. Takes a couple of minutes if no major deps changed.
 
 ### Anywhere
 
-- **`No SAM-HeLa checkpoint URL configured`:** open I/O → Output
-  settings… → SAM-HeLa checkpoint → either Browse… to a local file
-  or paste a download URL.
+- **`No SAM-HeLa checkpoint`:** **Model → Add model…** and browse to
+  your `best.pt` (or Settings → SAM Model → Download URL for a
+  built-in variant).
 - **Embedding precompute too slow:** check your device with
   `conda activate eye-labeller && python -c "from core.device import
   describe_device; print(describe_device())"`. Should print `cuda
@@ -210,13 +235,13 @@ Built automatically by `.github/workflows/build.yml` on every tag
 push (`git tag vX.Y.Z && git push --tags`) and attached to the
 matching GitHub Release.
 
-**Status (as of v0.2.0):**
+**Status (as of v0.3.0):**
 
 | Platform | Status |
 | --- | --- |
-| macOS Apple Silicon | ✓ Verified working |
-| Windows x86_64 | Builds successfully — launch behavior unverified by us, needs a Windows collaborator |
-| Linux x86_64 | Same — builds, untested launch |
+| macOS Apple Silicon | ✓ CI builds the bundle and runs a headless launch (`--selftest`) on it every release |
+| Windows x86_64 | ✓ Same — CI builds + headless-launches the bundle |
+| Linux x86_64 | Source install only (no bundle job in CI) — use `deploy/install_linux.sh` |
 
 ### Downloading a bundle
 
@@ -231,8 +256,8 @@ Bundle limitations vs. Tier B install:
 - **GPU support is whatever PyTorch's CPU wheel includes.** No CUDA
   in bundles (Win/Linux). On macOS, MPS works (it's runtime-detected,
   no special build needed).
-- **Model weights (`best.pt`, ~400 MB) are NOT in the bundle.** First
-  launch you'll get an error pointing you to configure either a local
-  file path or a download URL (same UI as the Tier B install).
+- **Model weights (`best.pt`, ~400 MB) are NOT in the bundle.** After
+  launch, register it via **Model → Add model…** (same as the Tier B
+  install). Until then, manual annotation works and SAM Box is off.
 - **Larger disk footprint** (~600 MB unzipped vs. Tier B's ~3.5 GB
   shared conda env — but the bundle is fully self-contained).
