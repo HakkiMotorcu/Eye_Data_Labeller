@@ -1,21 +1,36 @@
-"""Landing page — the first thing you see, instead of a bare dialog.
+"""Landing page — a simple recent-files hub.
 
-Shown as the central widget when no file is open: a titled hero with
-the primary Open action, a drag-and-drop target, the recent-files
-list, and a shortcut to the session queue. Opening a file (here, via
-drag-drop, or the queue) switches the central stack to the annotation
-view.
+Shown as the central widget when no file is open: the Open action, a
+drag-and-drop target, and the recent list with work-status glyphs
+(✓ complete / ● in progress, untouched files sorted to the bottom).
+A single click opens a file. The gear opens Settings.
 """
 
 import os
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
     QPushButton, QVBoxLayout, QWidget,
 )
 
 from core.frame_source import SUPPORTED_EXTS
+
+
+def _glyph_icon(glyph, color):
+    """16px icon with a colored ✓ / ● — list rows show status at a
+    glance without per-character rich text."""
+    px = QPixmap(16, 16)
+    px.fill(Qt.GlobalColor.transparent)
+    p = QPainter(px)
+    p.setPen(QColor(color))
+    f = p.font()
+    f.setPointSize(11)
+    p.setFont(f)
+    p.drawText(px.rect(), Qt.AlignmentFlag.AlignCenter, glyph)
+    p.end()
+    return QIcon(px)
 
 
 class LandingPage(QWidget):
@@ -48,11 +63,28 @@ class LandingPage(QWidget):
 
         title = QLabel("Eye Data Labeller")
         title.setStyleSheet("font-size:26px;font-weight:700;color:#f0f0f4;")
+        btn_gear = QPushButton()
+        btn_gear.setToolTip("Settings")
+        btn_gear.setFixedSize(30, 30)
+        btn_gear.setStyleSheet(
+            "QPushButton{background:transparent;border:none;color:#9a9aa4;"
+            "font-size:17px;}QPushButton:hover{color:#d7d7dd;}")
+        try:
+            import qtawesome as qta
+            btn_gear.setIcon(qta.icon('fa5s.cog', color='#9a9aa4'))
+            btn_gear.setIconSize(QSize(17, 17))
+        except Exception:
+            btn_gear.setText("⚙")
+        btn_gear.clicked.connect(self.ctrl.open_io_settings)
+        trow = QHBoxLayout()
+        trow.addWidget(title)
+        trow.addStretch(1)
+        trow.addWidget(btn_gear)
+        cl.addLayout(trow)
         subtitle = QLabel("Annotate cells, vessels and capillaries in "
                           "retinal microscopy stacks.")
         subtitle.setWordWrap(True)
         subtitle.setStyleSheet("color:#9a9aa4;font-size:13px;")
-        cl.addWidget(title)
         cl.addWidget(subtitle)
 
         exts = ' / '.join(sorted(e.lstrip('.') for e in SUPPORTED_EXTS))
@@ -71,20 +103,19 @@ class LandingPage(QWidget):
         drop.setStyleSheet("color:#70707a;font-size:12px;padding:2px;")
         cl.addWidget(drop)
 
-        btn_settings = QPushButton("Settings")
-        btn_settings.clicked.connect(self.ctrl.open_io_settings)
-        cl.addWidget(btn_settings)
-
-        rlbl = QLabel("Recent — double-click or Enter opens")
+        rlbl = QLabel("Recent — click to open   ·   ✓ complete   "
+                      "● in progress")
         rlbl.setStyleSheet("color:#70707a;font-size:11px;"
                            "letter-spacing:.04em;padding-top:6px;")
         cl.addWidget(rlbl)
         self.recent = QListWidget()
-        self.recent.setMaximumHeight(150)
+        self.recent.setMaximumHeight(190)
         self.recent.setStyleSheet(
             "QListWidget{background:#17171c;border:1px solid #2c2c33;"
             "border-radius:6px;} QListWidget::item{padding:4px 8px;}")
-        # itemActivated covers double-click AND the Enter key.
+        # Single click opens (user decision: no confirm when nothing is
+        # open — the leave dialog guards live sessions). Enter works too.
+        self.recent.itemClicked.connect(self._open_recent)
         self.recent.itemActivated.connect(self._open_recent)
         self.recent.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
@@ -100,6 +131,14 @@ class LandingPage(QWidget):
 
         self.refresh_recent()
 
+    def _status_for(self, path):
+        from core import project_io
+        try:
+            out = self.ctrl._resolve_out_folder(path)
+            return project_io.file_status(out) if out else None
+        except Exception:
+            return None
+
     def refresh_recent(self):
         self.recent.clear()
         files = self.ctrl.recent_files()
@@ -108,16 +147,29 @@ class LandingPage(QWidget):
             it.setFlags(Qt.ItemFlag.NoItemFlags)
             self.recent.addItem(it)
             return
+        # Worked-on files first (recency order), untouched at the
+        # bottom — the top of the list is always "continue where you
+        # left off".
+        statuses = {p: self._status_for(p) for p in files}
+        files = ([p for p in files if statuses[p] is not None]
+                 + [p for p in files if statuses[p] is None])
         # Identical basenames (same stack name from two experiment
         # folders) get their parent folder appended so they're
         # distinguishable without hovering for the tooltip.
         from collections import Counter
         names = Counter(os.path.basename(p) for p in files)
+        icon_done = _glyph_icon('✓', '#4caf82')
+        icon_wip = _glyph_icon('●', '#e6b84c')
         for p in files:
             name = os.path.basename(p)
             label = name if names[name] == 1 else (
                 f"{name}  —  {os.path.basename(os.path.dirname(p)) or p}")
             it = QListWidgetItem(label)
+            status = statuses[p]
+            if status == 'complete':
+                it.setIcon(icon_done)
+            elif status == 'in_progress':
+                it.setIcon(icon_wip)
             it.setData(Qt.ItemDataRole.UserRole, p)
             it.setToolTip(p)
             self.recent.addItem(it)
