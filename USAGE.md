@@ -43,8 +43,23 @@
    `Home` / `End` for first / last, `Ctrl+→` / `Ctrl+←` to jump to
    the next / previous frame with no annotations. The tick bar above
    the timeline shows which frames carry work.
-8. **Save** — `Ctrl+S` writes the segmentation map. Auto-save runs in
-   the background every 30 sec (configurable in Settings).
+8. **Save** — `Ctrl+S` writes the project (mask TIFs + Meta.json +
+   project.json) atomically. The **status bar** shows the state at all
+   times, Word-style: *● Unsaved changes* → *✓ Saved 2 min ago*.
+   Auto-save runs in the background every 30 sec (configurable in
+   Settings). Two safety nets: every save keeps the previous file as
+   `<file>.bak`, and the first save of each editing session snapshots
+   the folder's existing masks into `backup/session-<timestamp>/` (so
+   resuming and saving twice can't destroy what you resumed from). If
+   you were working boxes-only and never saved masks, reopening the
+   video offers to **restore** the autosaved annotation snapshot.
+
+The **toolbar** (top-left) has the sidebar toggle (`Ctrl+B`), Open,
+and Save; the **File** menu holds Open / Open Recent / Close / Save /
+Load Project Folder / Import Annotations / Load Single-Class TIF /
+Export Bundle. There is one dialog for leaving a session (switch file,
+Close, or quit): **Save & mark complete / in progress / Discard /
+Cancel**.
 
 ## Working through many files — the Files sidebar
 
@@ -156,6 +171,7 @@ mask TIF snapshots, `Overlay.mp4` (annotations burned into the video
 | Key | Action |
 | --- | --- |
 | `Ctrl+O` | Open image / video in place |
+| `Ctrl+B` | Show / hide the Files sidebar |
 | `Ctrl+W` | Close file — back to the landing page |
 | `Ctrl+S` | Save segmentation map |
 | `Ctrl+I` | Import / load annotations |

@@ -1609,6 +1609,7 @@ class ToolController:
             ]),
             ("File", [
                 ("Ctrl+O", "Open image/video"),
+                ("Ctrl+B", "Show / hide the Files sidebar"),
                 ("Ctrl+W", "Close file (back to the landing page)"),
                 ("Ctrl+S", "Save project"),
                 ("Ctrl+I", "Import annotations"),
