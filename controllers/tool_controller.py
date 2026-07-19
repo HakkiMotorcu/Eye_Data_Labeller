@@ -57,6 +57,9 @@ class ToolController:
         self._brush_snapshot_class = None # class layer that snapshot came from
         # Auto-save dirty tracking for smart-mode mask flushing.
         self._seg_dirty_since_save = False
+        # Explicit work status of the current session (None until known;
+        # 'in_progress' the moment you draw; 'complete' when you say so).
+        self._session_status = None
         # (out_folder, class_type) pairs whose mask file THIS session
         # has loaded or written. Only owned files may be retired when
         # their layer empties — every fresh seg_data allocates all
@@ -611,6 +614,8 @@ class ToolController:
     # Defined as an instance attribute in __init__; helpers below.
     def _mark_seg_dirty(self):
         self._seg_dirty_since_save = True
+        # Working on a file marks it "in progress" (● glyph) immediately.
+        self._mark_working()
         # Any seg mutation may add/remove instances — drop the cached
         # anywhere-in-stack id sets (rebuilt lazily on next lookup).
         self._ids_anywhere_cache = None
@@ -663,6 +668,43 @@ class ToolController:
         self._last_mask_save_ts = time.monotonic()
         self._last_save_at = time.time()
         self._refresh_save_status()
+
+    # ----- Work status (✓ complete / ● in progress) ------------------
+    def _set_session_status(self, status):
+        """Persist the session's work status to project.json and refresh
+        the ✓/● glyphs. No-op without an open file / out folder."""
+        from core import project_io
+        self._session_status = status
+        if self.window._current_file is None:
+            return
+        out = self._resolve_out_folder()
+        if out:
+            try:
+                project_io.write_status(out, status)
+            except OSError as e:
+                log_error('controller.status', 'status write failed', exc=e)
+        self._refresh_file_surfaces()
+
+    def _mark_working(self):
+        """Drawing/editing marks the file 'in progress' on disk so the ●
+        glyph appears the moment you start working (and demotes a
+        previously 'complete' file back to in-progress). Cheap: writes
+        only on the transition, then short-circuits."""
+        if self._session_status == 'in_progress':
+            return
+        if self.window._current_file is None:
+            return
+        self._set_session_status('in_progress')
+
+    def _delete_autosave(self):
+        """Remove autosave.json — it's redundant once a real save (or a
+        save-on-leave) has written the full project."""
+        path = self._get_autosave_path()
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
     def _refresh_save_status(self):
         """Update the I/O panel's save status label + title dirty dot."""
@@ -2079,9 +2121,11 @@ class ToolController:
         if dirty:
             options.append(('discard', "Discard changes", 'danger'))
         options.append(('cancel', "Cancel", 'normal'))
+        default_key = ('complete' if self._session_status == 'complete'
+                       else 'in_progress')
         choice = ChoiceDialog.ask(
             self.window, f"How should {name} be recorded before {verb}?",
-            message, options, default_key='in_progress')
+            message, options, default_key=default_key)
 
         if choice == 'discard':
             return True  # leave as-is on disk, status untouched
@@ -2093,27 +2137,24 @@ class ToolController:
                 # Bbox-only session: no masks for save_seg_map to write
                 # (calling it would pop a spurious "No segmentation data
                 # loaded" warning). Snapshot annotations instead so a
-                # Save click never silently discards work.
+                # Save click never silently discards work — and KEEP the
+                # autosave.json (it's the only record of these boxes).
                 try:
                     self._autosave()
                 except Exception:
                     pass
-                QMessageBox.information(
-                    self.window, "Annotations snapshotted",
-                    "No mask layers exist yet, so only an "
-                    "annotation snapshot (autosave.json) was "
-                    "written. You'll be offered a resume when "
-                    "you reopen this file.")
             else:
-                self.save_seg_map()
+                # ask_status=False: the leave dialog already asked.
+                self.save_seg_map(ask_status=False)
                 if self._seg_dirty_since_save:
                     return False  # save failed; keep the session
+        status = (project_io.STATUS_COMPLETE if choice == 'complete'
+                  else project_io.STATUS_IN_PROGRESS)
+        self._session_status = status
         out = self._resolve_out_folder()
         if out:
             try:
-                project_io.write_status(
-                    out, project_io.STATUS_COMPLETE if choice == 'complete'
-                    else project_io.STATUS_IN_PROGRESS)
+                project_io.write_status(out, status)
             except OSError as e:
                 log_error('controller.status', 'status write failed', exc=e)
         # The ✓/● just changed on disk — refresh the surfaces that show
@@ -2202,6 +2243,7 @@ class ToolController:
             # no longer owns.
             self._mask_files_owned.clear()
             self._session_backup_done = False  # new file = new session
+            self._session_status = None        # unknown until read/drawn
             w._projection_cache = None
             w.load_video()
             w.show_annotation_view()   # leave the landing page
@@ -3089,13 +3131,17 @@ class ToolController:
         self.window._update_seg_overlay()
 
     @log_action('action')
-    def save_seg_map(self):
+    def save_seg_map(self, ask_status=True):
         """Save the project — 3 per-class TIFs + Meta.json + project.json.
 
         All artifacts land in the per-video output folder resolved from
         QSettings (default: ``<video_dir>/out/<stem>/``). Writes are
         atomic; existing files are backed up to ``<file>.bak`` before
         overwrite. Empty class layers are skipped.
+
+        ``ask_status`` (explicit Ctrl+S / Save) pops the "mark in
+        progress / complete" prompt afterwards; the leave-guard passes
+        False because it already asked.
         """
         from core import sidecar, project_io
 
@@ -3172,31 +3218,38 @@ class ToolController:
         # Mark the seg layers as clean so the smart autosave knows it
         # doesn't need to re-flush masks until something changes again.
         self._mark_seg_clean()
-        panel = getattr(self, '_files_panel', None)
-        if panel is not None:
-            panel.refresh()  # queue status glyphs reflect the new save
+        # A real save exists now — the autosave snapshot in THIS folder
+        # is redundant (out_folder may be a loaded project's folder, so
+        # target it directly rather than re-resolving from current_file).
+        auto = os.path.join(out_folder, project_io.FILE_AUTOSAVE)
+        if os.path.exists(auto):
+            try:
+                os.remove(auto)
+            except OSError:
+                pass
 
-        if not written:
-            extra = ""
-            if removed:
-                extra = "\nRetired to .bak (layer now empty):\n" + "\n".join(
-                    f"  {os.path.basename(p)}" for p in removed)
-            QMessageBox.information(
-                self.window, "Save Seg",
-                f"No mask layers had pixels — wrote only Meta.json + "
-                f"project.json:\n{out_folder}{extra}")
-            return
+        # Explicit Save asks how to record the file; the status write +
+        # glyph refresh happen there. Otherwise just refresh the glyphs.
+        if ask_status:
+            self._prompt_save_status()
+        else:
+            self._refresh_file_surfaces()
 
-        lines = "\n".join(f"  {os.path.basename(p)}" for p in written)
-        if removed:
-            lines += "\n" + "\n".join(
-                f"  (retired emptied {os.path.basename(p)} to .bak)"
-                for p in removed)
-        QMessageBox.information(
-            self.window, "Save Seg",
-            f"Saved into {out_folder}:\n{lines}\n"
-            f"  {project_io.FILE_META}\n"
-            f"  {project_io.FILE_PROJECT}")
+    def _prompt_save_status(self):
+        """After an explicit Save, ask how to mark the file. Default keeps
+        it in progress, so a quick Enter just checkpoints and moves on."""
+        from ui.choice_dialog import ChoiceDialog
+        name = os.path.basename(self.window._current_file or '') or 'this file'
+        choice = ChoiceDialog.ask(
+            self.window, f"Saved {name} — mark it how?",
+            "In progress ● keeps it in the rotation; complete ✓ shows the "
+            "check and Next skips it. You can change this any time.",
+            [('in_progress', "Keep in progress   ●", 'primary'),
+             ('complete', "Mark complete   ✓", 'normal')],
+            default_key=('complete' if self._session_status == 'complete'
+                         else 'in_progress'))
+        self._set_session_status(
+            'complete' if choice == 'complete' else 'in_progress')
 
     @log_action('action')
     def propagate_vein_mask(self):
@@ -4140,6 +4193,9 @@ class ToolController:
 
         self._normalize_anno_names_and_colors()
         self._mark_seg_clean()
+        # Adopt the saved work status so editing demotes correctly and
+        # the leave dialog defaults to it.
+        self._session_status = project_io.read_status(out_folder)
         # Preserve the manifest timestamp on the status label so the
         # user sees "Saved 2 days ago" rather than "Saved 0s ago" right
         # after a resume.
