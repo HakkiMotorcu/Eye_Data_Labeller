@@ -258,6 +258,37 @@ def write_project_manifest(out_folder: str, *,
     return path
 
 
+def snapshot_existing_masks(out_folder: str, keep: int = 3):
+    """Copy the folder's current mask TIFs + Meta.json into
+    ``backup/session-<timestamp>/``.
+
+    Called once per editing session before the first overwrite: the
+    rolling ``.bak`` written by every save only survives until the
+    NEXT save, so resuming an old session and saving twice used to
+    silently destroy the resumed-from state. Keeps the newest ``keep``
+    snapshots. Returns the snapshot dir, or None when there was
+    nothing to back up.
+    """
+    import shutil
+    if not out_folder or not os.path.isdir(out_folder):
+        return None
+    names = [*CLASS_MASK_FILES.values(), FILE_META]
+    present = [n for n in names
+               if os.path.exists(os.path.join(out_folder, n))]
+    if not present:
+        return None
+    stamp = _dt.datetime.now().strftime('%Y%m%d-%H%M%S')
+    dest = os.path.join(out_folder, 'backup', f'session-{stamp}')
+    os.makedirs(dest, exist_ok=True)
+    for n in present:
+        shutil.copy2(os.path.join(out_folder, n), os.path.join(dest, n))
+    root = os.path.join(out_folder, 'backup')
+    snaps = sorted(d for d in os.listdir(root) if d.startswith('session-'))
+    for d in snaps[:-keep]:
+        shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+    return dest
+
+
 # Explicit work status, set by the user at file-switch/close time
 # ("Save & mark complete" / "Save & mark in progress"). Lives in
 # project.json so it travels with the data.

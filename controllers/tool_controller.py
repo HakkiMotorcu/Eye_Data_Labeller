@@ -141,11 +141,6 @@ class ToolController:
         self.window.btn_unlock_all.clicked.connect(self.unlock_all)
         self.window.btn_hide_locked.clicked.connect(self.toggle_hide_locked)
         self.window.btn_label_colors.clicked.connect(self.toggle_label_colors)
-        self.window.btn_import.clicked.connect(self.load_annotations)
-        # Load actions: Project (folder picker) vs Single Class (file picker).
-        self.window.btn_load_project.clicked.connect(self.load_project_folder)
-        self.window.btn_load_class.clicked.connect(self.load_single_class_tif)
-        self.window.btn_io_settings.clicked.connect(self.open_io_settings)
         self.window.btn_run_sam.clicked.connect(self.run_sam_segmentation)
         self.window.combo_sam_model.currentIndexChanged.connect(self._on_sam_model_changed)
         self.window.btn_sam_precompute.clicked.connect(self.precompute_all_frames)
@@ -183,7 +178,6 @@ class ToolController:
         self.window.btn_fill_bbox.clicked.connect(self.fill_bbox_cmd)
         self.window.btn_sam_box.clicked.connect(self.run_sam_box_prompt)
         self.window.btn_clear_seg_mask.clicked.connect(self.clear_seg_mask_for_selected)
-        self.window.btn_save_seg.clicked.connect(self.save_seg_map)
         self.window.btn_propagate_mask.clicked.connect(self.propagate_vein_mask)
 
         # Display controls
@@ -1350,6 +1344,7 @@ class ToolController:
         act.setShortcut(QKeySequence("Ctrl+O"))
         act.triggered.connect(self.open_file_dialog)
         m_file.addAction(act)
+        self._act_open = act  # reused by the toolbar
         self._menu_recent = m_file.addMenu("Open &Recent")
         self._menu_recent.aboutToShow.connect(self._populate_recent_menu)
         act = QAction("&Close", self.window)
@@ -1362,11 +1357,16 @@ class ToolController:
         act.triggered.connect(self.save_seg_map)
         m_file.addAction(act)
         home_off.append(act)
+        self._act_save = act  # reused by the toolbar
         act = QAction("Load Project &Folder…", self.window)
         act.triggered.connect(self.load_project_folder)
         m_file.addAction(act)
         act = QAction("&Import Annotations…\tCtrl+I", self.window)
         act.triggered.connect(self.load_annotations)
+        m_file.addAction(act)
+        home_off.append(act)
+        act = QAction("Load Single-Class &TIF…", self.window)
+        act.triggered.connect(self.load_single_class_tif)
         m_file.addAction(act)
         home_off.append(act)
         act = QAction("&Export Bundle (masks + overlay video + CSV)…",
@@ -1474,6 +1474,36 @@ class ToolController:
         act.triggered.connect(self._open_log_folder)
         m_help.addAction(act)
 
+        # ---- Toolbar: sidebar toggle + the two most-used actions ----
+        # A slim editor-style toolbar; hidden on the landing page by
+        # set_home_mode along with the rest of the annotation chrome.
+        from PyQt6.QtWidgets import QToolBar
+        from PyQt6.QtCore import QSize
+        tb = getattr(self, '_toolbar', None)
+        if tb is None:
+            tb = QToolBar("Main")
+            tb.setObjectName("main_toolbar")
+            tb.setMovable(False)
+            tb.setIconSize(QSize(16, 16))
+            self.window.addToolBar(tb)
+            self._toolbar = tb
+        else:
+            tb.clear()
+        toggle.setShortcut(QKeySequence("Ctrl+B"))  # editor muscle memory
+        toggle.setToolTip("Show / hide the Files sidebar  (Ctrl+B)")
+        try:
+            import qtawesome as qta
+            toggle.setIcon(qta.icon('fa5s.columns', color='#9a9aa4'))
+            self._act_open.setIcon(
+                qta.icon('fa5s.folder-open', color='#9a9aa4'))
+            self._act_save.setIcon(qta.icon('fa5s.save', color='#9a9aa4'))
+        except Exception:
+            pass  # no qtawesome → text buttons, still functional
+        tb.addAction(toggle)
+        tb.addSeparator()
+        tb.addAction(self._act_open)
+        tb.addAction(self._act_save)
+
     def set_home_mode(self, on):
         """Landing page ⇄ annotation view: disarm/arm the editor.
 
@@ -1493,6 +1523,9 @@ class ToolController:
         for act in getattr(self, '_home_disabled_actions', ()):
             act.setEnabled(not on)
         self.window.statusBar().setVisible(not on)
+        tbar = getattr(self, '_toolbar', None)
+        if tbar is not None:
+            tbar.setVisible(not on)
         dock = getattr(self, '_files_dock', None)
         if dock is not None:
             from PyQt6.QtCore import QSettings
@@ -3025,6 +3058,20 @@ class ToolController:
         out_folder = self._resolve_out_folder(source)
         project_io.ensure_dir(out_folder)
 
+        # One-time-per-session safety net: before the FIRST overwrite,
+        # snapshot the folder's existing masks/meta to backup/. The
+        # rolling .bak only survives one save — this survives the
+        # whole session, so resuming + saving twice can't destroy the
+        # resumed-from state.
+        if not getattr(self, '_session_backup_done', False):
+            try:
+                dest = project_io.snapshot_existing_masks(out_folder)
+                if dest:
+                    log('controller.save', 'session backup', dest=dest)
+            except Exception as e:
+                log_error('controller.save', 'session backup failed', exc=e)
+            self._session_backup_done = True
+
         written = []
         removed = []
         try:
@@ -3291,13 +3338,22 @@ class ToolController:
             src = (manifest.get('source_video') or {}).get(
                 'absolute_path') or ''
             if not src or not os.path.isfile(src):
-                QMessageBox.warning(
+                # Folders saved by older versions have no manifest (or
+                # the video moved). Don't dead-end — let the user
+                # locate the video, then proceed exactly the same way.
+                QMessageBox.information(
                     self.window, "Load Project",
                     f"This project folder doesn't record a source video "
                     f"that still exists:\n{src or '(none recorded)'}\n\n"
-                    f"Open the image/video it belongs to first, then use "
-                    f"Load Project Folder to attach these masks.")
-                return
+                    f"Pick the image/video these masks belong to.")
+                from core.frame_source import SUPPORTED_EXTS
+                pats = ' '.join(f'*{e}' for e in sorted(SUPPORTED_EXTS))
+                src, _ = QFileDialog.getOpenFileName(
+                    self.window, "Locate the project's source video",
+                    os.path.dirname(folder),
+                    f"Supported ({pats});;All Files (*)")
+                if not src:
+                    return
             self._pending_project_folder = folder
             try:
                 self.open_path(src)
@@ -3305,19 +3361,10 @@ class ToolController:
                 self._pending_project_folder = None
             return  # session loaded inside open_path; view switched
 
-        if self.annotations:
-            reply = QMessageBox.question(
-                self.window, "Replace current session?",
-                f"Loading this project will replace the current session "
-                f"(annotations, masks, meta).\n\n"
-                f"  Folder:  {folder}\n"
-                f"  Saved:   {summary.get('updated_at', '?')}\n\n"
-                f"Continue?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
+        # Same status-aware guard as every other way of leaving a
+        # session (File > Open, Close, quit) — one dialog, one habit.
+        if not self._confirm_leave_session("loading this project"):
+            return
 
         try:
             self._load_session_from_out_folder(folder)
@@ -3327,10 +3374,6 @@ class ToolController:
                 self.window, "Load Project",
                 f"Could not load project:\n\n{type(e).__name__}: {e}")
             return
-
-        QMessageBox.information(
-            self.window, "Load Project",
-            f"Loaded:\n{folder}")
 
     @log_action('action')
     def load_single_class_tif(self):
@@ -3803,9 +3846,13 @@ class ToolController:
         out_folder = self._resolve_out_folder()
         summary = project_io.session_summary(out_folder)
         if summary is None or not summary.get('has_masks'):
-            # Also consider the legacy next-to-video sidecars: load_segmentation
-            # already handles them via the file picker, but for resume we keep
-            # it simple — only prompt when the new layout has artifacts.
+            # No masks — but light autosave may still hold bbox
+            # annotations from a session that never saved masks.
+            # That snapshot used to be write-only; offer it back.
+            auto = (os.path.join(out_folder, project_io.FILE_AUTOSAVE)
+                    if out_folder else '')
+            if auto and os.path.exists(auto):
+                self._offer_autosave_restore(auto)
             return
 
         manifest = summary.get('manifest') or {}
@@ -3841,6 +3888,47 @@ class ToolController:
             QMessageBox.critical(
                 self.window, "Resume failed",
                 f"Could not load saved session:\n\n{type(e).__name__}: {e}")
+
+    def _offer_autosave_restore(self, path):
+        """Offer the light-autosave annotation snapshot back on reopen.
+
+        Bbox-only sessions never write masks, so the resume prompt
+        (which requires has_masks) never fired for them and their
+        autosave.json was effectively write-only — crash or quit lost
+        the boxes unless the user manually imported the file.
+        """
+        try:
+            records = self._parse_annotation_file(path)
+        except Exception as e:
+            log_error('controller.resume', 'autosave parse failed', exc=e,
+                      path=path)
+            return
+        if not records:
+            return
+        msg = QMessageBox(self.window)
+        msg.setWindowTitle("Restore snapshot?")
+        msg.setIcon(QMessageBox.Icon.Question)
+        msg.setText(
+            f"Found an autosaved annotation snapshot for this video "
+            f"({len(records)} annotations, no saved masks).")
+        msg.setInformativeText(
+            "Restore brings the boxes back where you left off. "
+            "Start fresh leaves the snapshot file alone.")
+        btn_restore = msg.addButton("Restore",
+                                    QMessageBox.ButtonRole.AcceptRole)
+        msg.addButton("Start fresh", QMessageBox.ButtonRole.RejectRole)
+        msg.setDefaultButton(btn_restore)
+        msg.exec()
+        if msg.clickedButton() is not btn_restore:
+            return
+        for rec in records:
+            self._create_annotation_from_record(rec)
+        self._normalize_anno_names_and_colors()
+        self._show_frame_annotations(self.window._current_frame_idx)
+        self._update_stats()
+        # Restored work exists only as a snapshot — keep the session
+        # dirty so saving/leaving records it properly.
+        self._mark_seg_dirty()
 
     def _load_session_from_out_folder(self, out_folder):
         """Programmatic load equivalent to load_segmentation, but
@@ -5523,6 +5611,8 @@ class ToolController:
     def _clear_all_annotations(self):
         # Shared "session is gone" hook — every teardown path funnels
         # here, so preview / review / marker cleanup belong here too.
+        # Next editing session gets a fresh one-time mask backup.
+        self._session_backup_done = False
         self._cancel_sam_preview(quiet=True)
         if getattr(self, '_review_mode', False):
             self._exit_review_mode("Review cancelled — session changed")
