@@ -76,11 +76,13 @@ class ToolController:
         self._save_status_timer = QTimer()
         self._save_status_timer.timeout.connect(self._refresh_save_status)
         self._save_status_timer.start(10_000)
-        # SAM service — lazy-loaded on first use. Default model is the
-        # collaborators' fine-tuned ViT-B (sam_hela). User can swap via
-        # the SAM section in the View panel.
-        self.sam_service = SamService(
-            model_type='vit_b', checkpoint_path=default_sam_hela_path())
+        # SAM service — lazy-loaded on first use. The model comes from
+        # the model registry's active entry (migrated from the legacy
+        # single-checkpoint setting on first run). User swaps it via the
+        # sidebar combo or the Model menu.
+        from core import model_registry
+        model_registry.ensure_migrated()
+        self.sam_service = self._make_sam_service(model_registry.get_active())
         # Tracker service — default Trackastra via micro-sam.
         self.tracker_service = make_tracker(get_default_tracker_name())
         # Embedding precompute worker (only one alive at a time — SAM
@@ -142,6 +144,7 @@ class ToolController:
         self.window.btn_hide_locked.clicked.connect(self.toggle_hide_locked)
         self.window.btn_label_colors.clicked.connect(self.toggle_label_colors)
         self.window.btn_run_sam.clicked.connect(self.run_sam_segmentation)
+        self._populate_model_combo()
         self.window.combo_sam_model.currentIndexChanged.connect(self._on_sam_model_changed)
         self.window.btn_sam_precompute.clicked.connect(self.precompute_all_frames)
         self.window.btn_sam_precompute.setEnabled(SamService.available())
@@ -1461,10 +1464,10 @@ class ToolController:
         self._act_model_current.setEnabled(False)
         m_model.addAction(self._act_model_current)
         m_model.addSeparator()
-        act = QAction("&Choose checkpoint file…", self.window)
-        act.triggered.connect(self.choose_model_checkpoint)
+        act = QAction("&Add model…", self.window)
+        act.triggered.connect(self.add_model_dialog)
         m_model.addAction(act)
-        act = QAction("Model &settings…", self.window)
+        act = QAction("&Manage models…", self.window)
         act.triggered.connect(
             lambda _c=False: self.open_io_settings('SAM Model'))
         m_model.addAction(act)
@@ -3557,16 +3560,33 @@ class ToolController:
             f"Imported {ct} layer from:\n{os.path.basename(path)}")
 
     # ------------------------------------------------------------------
-    # SAM panel helpers (Phase 4.1)
+    # SAM panel helpers — model registry driven
     # ------------------------------------------------------------------
-    # Map combo-box index -> (model_type, checkpoint_path | None).
-    _SAM_MODEL_CHOICES = [
-        ('vit_b', 'sam_hela'),   # fine-tuned default; checkpoint resolved at runtime
-        ('vit_b_lm', None),
-        ('vit_t', None),
-        ('vit_b', None),
-        ('vit_l', None),
-    ]
+    @staticmethod
+    def _make_sam_service(entry):
+        """Build a SamService from a registry entry. A '' path means a
+        registry-download variant (no local checkpoint)."""
+        path = entry.get('path') or None
+        return SamService(model_type=entry.get('base', 'vit_b'),
+                          checkpoint_path=path)
+
+    def _populate_model_combo(self):
+        """Fill the sidebar combo from the model registry (registered
+        models first, then built-in variants) and select the active
+        one. Signals blocked so it never triggers a service rebuild."""
+        from core import model_registry
+        combo = self.window.combo_sam_model
+        combo.blockSignals(True)
+        combo.clear()
+        active_tag = model_registry.get_active_tag()
+        active_row = 0
+        for i, m in enumerate(model_registry.all_models()):
+            label = m['tag'] if m.get('builtin') else f"{m['tag']}  ({m['base']})"
+            combo.addItem(label, m)
+            if m['tag'] == active_tag:
+                active_row = i
+        combo.setCurrentIndex(active_row)
+        combo.blockSignals(False)
 
     def _refresh_model_surfaces(self):
         """Every widget that mirrors the SAM model, in one call — the
@@ -3591,58 +3611,56 @@ class ToolController:
             lp.refresh_recent()
 
     def _refresh_model_menu(self):
+        from core import model_registry
         svc = self.sam_service
+        tag = model_registry.get_active_tag() or svc.model_type
         ckpt = svc.checkpoint_path
         if ckpt and os.path.exists(ckpt):
-            txt = f"Current: {svc.model_type} — {os.path.basename(ckpt)}"
+            txt = f"Active: {tag} — {os.path.basename(ckpt)}"
         elif ckpt:
-            txt = "Current: no checkpoint set — SAM off"
+            txt = f"Active: {tag} — checkpoint missing (SAM off)"
         else:
-            txt = f"Current: {svc.model_type} (registry download)"
+            txt = f"Active: {tag} (registry download)"
         self._act_model_current.setText(txt)
 
-    def choose_model_checkpoint(self):
-        """Model > Choose checkpoint…: ask once, remember forever.
-
-        prompt_for_local_path persists the picked file to QSettings, so
-        future launches resolve it without asking. Never forced — SAM
-        stays off (with a status hint) until the user comes here or
-        presses SAM Box.
-        """
-        from core import model_download
-        picked = model_download.prompt_for_local_path(self.window)
-        if not picked:
-            return
+    def _activate_model_entry(self, entry):
+        """Make a registry entry the live model and sync every surface."""
+        from core import model_registry
         self._stop_embed_worker(timeout_ms=5000)
-        # A picked local checkpoint is the fine-tuned sam_hela slot
-        # (index 0; prompt_for_local_path persisted it there). Sync the
-        # sidebar combo so it can't drift from the Model menu — block
-        # its signal so we don't rebuild the service twice.
-        combo = self.window.combo_sam_model
-        combo.blockSignals(True)
-        combo.setCurrentIndex(0)
-        combo.blockSignals(False)
-        self.sam_service = SamService(model_type='vit_b',
-                                      checkpoint_path=picked)
+        model_registry.set_active(entry['tag'])
+        self.sam_service = self._make_sam_service(entry)
+        self._populate_model_combo()   # reflect the active selection
         self._refresh_model_surfaces()
         if self.window.video_data is not None:
             self.on_image_loaded()
 
+    def add_model_dialog(self):
+        """Model > Add model…: register a new named checkpoint (tag +
+        base + path, all validated) and make it active. Reachable from
+        the landing page too."""
+        from ui.model_edit_dialog import ModelEditDialog
+        from core import model_registry
+        res = ModelEditDialog.get_new(self.window)
+        if res is None:
+            return
+        try:
+            entry = model_registry.add_model(
+                res['tag'], res['path'], res['base'])
+        except ValueError as e:
+            QMessageBox.warning(self.window, "Add model", str(e))
+            return
+        self._activate_model_entry(entry)
+
+    # Back-compat alias: the landing "Add SAM model…" button and the
+    # Model menu both point here.
+    choose_model_checkpoint = add_model_dialog
+
     def _on_sam_model_changed(self, idx):
-        # Stop any in-flight embed worker — the new service has its own cache.
-        self._stop_embed_worker(timeout_ms=5000)
-        model_type, hint = self._SAM_MODEL_CHOICES[
-            idx if 0 <= idx < len(self._SAM_MODEL_CHOICES) else 0]
-        if hint == 'sam_hela':
-            ckpt = default_sam_hela_path()
-        else:
-            ckpt = None
-        self.sam_service = SamService(model_type=model_type, checkpoint_path=ckpt)
-        self._refresh_model_surfaces()
-        # If we have an image loaded, kick off precompute for the current
-        # frame with the new model (the previous model's embeddings are
-        # in a different cache dir so this is fresh work).
-        self.on_image_loaded()
+        combo = self.window.combo_sam_model
+        entry = combo.itemData(idx)
+        if not isinstance(entry, dict):
+            return
+        self._activate_model_entry(entry)
 
     # ------------------------------------------------------------------
     # Embedding precompute (Phase 1a) — async background worker
