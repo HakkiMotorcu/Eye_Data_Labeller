@@ -44,20 +44,27 @@
    the next / previous frame with no annotations. The tick bar above
    the timeline shows which frames carry work.
 8. **Save** — `Ctrl+S` writes the project (mask TIFs + Meta.json +
-   project.json) atomically. The **status bar** shows the state at all
-   times, Word-style: *● Unsaved changes* → *✓ Saved 2 min ago*.
-   Auto-save runs in the background every 30 sec (configurable in
-   Settings). Two safety nets: every save keeps the previous file as
-   `<file>.bak`, and the first save of each editing session snapshots
-   the folder's existing masks into `backup/session-<timestamp>/` (so
-   resuming and saving twice can't destroy what you resumed from). If
-   you were working boxes-only and never saved masks, reopening the
-   video offers to **restore** the autosaved annotation snapshot.
+   project.json) atomically, then asks how to record it: **Keep in
+   progress ●** (default — a quick Enter just checkpoints) or **Mark
+   complete ✓**. Work status tracks reality: the moment you draw
+   anything a file is marked **● in progress**, and editing a file
+   that was ✓ complete demotes it back to in progress. The **status
+   bar** shows the save state Word-style: *● Unsaved changes* →
+   *✓ Saved 2 min ago*. Auto-save runs every 30 sec; a real Save (or a
+   save-on-leave) deletes its now-redundant snapshot. Two safety nets:
+   every save keeps the previous file as `<file>.bak`, and the first
+   save of each session snapshots the folder's existing masks into
+   `backup/session-<timestamp>/` (so resuming and saving twice can't
+   destroy what you resumed from).
 
 The **toolbar** (top-left) has the sidebar toggle (`Ctrl+B`), Open,
 and Save; the **File** menu holds Open / Open Recent / Close / Save /
 Load Project Folder / Import Annotations / Load Single-Class TIF /
-Export Bundle. There is one dialog for leaving a session (switch file,
+Export Bundle / **Collate masks by class**. Saved outputs stay in one
+folder per video (`<out>/<stem>/Cells.tif …`); **Collate masks by
+class** copies every stack's masks into `Cells/ Vessels/ Capillaries/`
+folders when a training pipeline wants them type-grouped. There is one
+dialog for leaving a session (switch file,
 Close, or quit): **Save & mark complete / in progress / Discard /
 Cancel**.
 
@@ -201,13 +208,15 @@ One panel, four pages (category list on the left):
 - **Output & Autosave** — where seg maps + project JSON get saved
   (subfolder of input, custom prefix, or fully custom path) and the
   auto-save mode/intervals.
-- **SAM Model** — point at a local `best.pt` (Browse) OR paste a
-  download URL. See `INSTALL.md` for details. The **Model** menu in
-  the menu bar (available on the landing page too) is the quick path:
-  it shows the current model and *Choose checkpoint file…* asks once
-  and remembers. The app never demands a model — without one, SAM
-  assist is simply off (status line says so) and manual annotation
-  works normally.
+- **SAM Model** — a **model registry**: add / edit / remove named
+  checkpoints, each with a unique tag, a base architecture
+  (vit_b/l/h/t), and a local `best.pt` path (tags and paths are each
+  unique). Pick one and **Make active**. The sidebar combo and the
+  **Model** menu (*Add model…* / *Manage models…*, available on the
+  landing page too) drive the same registry. The app never demands a
+  model — without one, SAM assist is simply off (status line says so)
+  and manual annotation works normally. The download URL is used for
+  built-in variants that fetch weights on first use.
 - **Detection** — SAM auto-segmentation tuning: custom quality /
   stability thresholds (stricter = fewer, cleaner cells) and a
   min/max pixel-area size filter that drops specks and merged blobs
