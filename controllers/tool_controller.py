@@ -2609,16 +2609,21 @@ class ToolController:
             self.spawn_new_annotation(start_pos=start_pos)
         else:
             # Single click that wasn't already claimed by a ROI → try
-            # to select the annotation whose seg mask pixel was clicked.
+            # to select the annotation whose seg mask pixel was clicked,
+            # then fall back to bbox geometry. The fallback is what makes
+            # a LOCKED bbox with an empty mask selectable: its ROI
+            # rejects mouse input and it has no pixels to hit.
             if not ev.isAccepted():
-                self._try_select_by_seg_pixel(pos.x(), pos.y())
+                if not self._try_select_by_seg_pixel(pos.x(), pos.y()):
+                    self._try_select_by_bbox(pos.x(), pos.y())
 
     def _try_select_by_seg_pixel(self, vx, vy):
         """Select the annotation whose instance-ID occupies pixel (vx, vy)
-        in the segmentation mask.  Works for veins and cells alike."""
+        in the segmentation mask.  Works for veins and cells alike.
+        Returns True when an annotation was selected."""
         seg = self.window.seg_data
         if seg is None:
-            return
+            return False
 
         frame = self.window._current_frame_idx
         scale = self._seg_scale()
@@ -2629,7 +2634,7 @@ class ToolController:
             cx, cy = int(round(vx)), int(round(vy))
 
         if cx < 0 or cy < 0 or cx >= seg.width or cy >= seg.height:
-            return
+            return False
 
         # Walk class layers top-down (cell wins over capillary over vessel
         # by default) so the click goes to whatever the user actually sees
@@ -2648,8 +2653,37 @@ class ToolController:
                         and anno.instance_id == iid
                         and anno.class_type == ct):
                     self.select_annotation(anno)
-                    return
+                    return True
             # No annotation owns these pixels — keep looking down.
+        return False
+
+    def _try_select_by_bbox(self, vx, vy):
+        """Fallback: select the visible bbox annotation containing
+        (vx, vy). Locked ROIs reject mouse input, so a locked bbox with
+        an empty mask can't be reached any other way on the canvas.
+
+        Unlocked ROIs already claim their own clicks (so the click never
+        reaches here for them), and hidden / paint-only annotations have
+        no visible rect — so the smallest visible box containing the
+        point, which reads as topmost, is the right target.
+        """
+        frame = self.window._current_frame_idx
+        best, best_area = None, None
+        for anno in self.annotations:
+            if anno.frame_idx != frame or anno.is_paint_only:
+                continue
+            if not anno.roi.isVisible():
+                continue
+            x, y = anno.roi.pos()
+            bw, bh = anno.roi.size()
+            if x <= vx <= x + bw and y <= vy <= y + bh:
+                area = abs(float(bw) * float(bh))
+                if best_area is None or area < best_area:
+                    best, best_area = anno, area
+        if best is not None:
+            self.select_annotation(best)
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # STATISTICS
