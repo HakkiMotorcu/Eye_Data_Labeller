@@ -2044,32 +2044,27 @@ class ToolController:
         if not dirty and (not self.annotations or status is not None):
             return True
 
+        from ui.choice_dialog import ChoiceDialog
         name = os.path.basename(self.window._current_file or '') or 'session'
-        prefix = "Save && mark" if dirty else "Mark"
-        msg = QMessageBox(self.window)
-        msg.setWindowTitle(f"Leaving {name}")
-        msg.setIcon(QMessageBox.Icon.Question)
-        msg.setText(f"How should {name} be recorded before {verb}?")
-        msg.setInformativeText(
+        prefix = "Save & mark" if dirty else "Mark"
+        message = (
             "Complete shows ✓ in the file list and Next skips it; "
             "in progress shows ● and stays in the rotation."
-            + ("\nThere are unsaved changes." if dirty else ""))
-        btn_done = msg.addButton(f"{prefix} complete",
-                                 QMessageBox.ButtonRole.AcceptRole)
-        btn_wip = msg.addButton(f"{prefix} in progress",
-                                QMessageBox.ButtonRole.AcceptRole)
-        btn_discard = None
+            + ("\n\nThere are unsaved changes." if dirty else ""))
+        options = [
+            ('complete', f"{prefix} complete   ✓", 'primary'),
+            ('in_progress', f"{prefix} in progress   ●", 'normal'),
+        ]
         if dirty:
-            btn_discard = msg.addButton(
-                "Discard changes", QMessageBox.ButtonRole.DestructiveRole)
-        msg.addButton(QMessageBox.StandardButton.Cancel)
-        msg.setDefaultButton(btn_wip)
-        msg.exec()
-        clicked = msg.clickedButton()
+            options.append(('discard', "Discard changes", 'danger'))
+        options.append(('cancel', "Cancel", 'normal'))
+        choice = ChoiceDialog.ask(
+            self.window, f"How should {name} be recorded before {verb}?",
+            message, options, default_key='in_progress')
 
-        if clicked is btn_discard:
+        if choice == 'discard':
             return True  # leave as-is on disk, status untouched
-        if clicked not in (btn_done, btn_wip):
+        if choice not in ('complete', 'in_progress'):
             return False  # Cancel / closed
 
         if dirty:
@@ -2095,7 +2090,7 @@ class ToolController:
         if out:
             try:
                 project_io.write_status(
-                    out, project_io.STATUS_COMPLETE if clicked is btn_done
+                    out, project_io.STATUS_COMPLETE if choice == 'complete'
                     else project_io.STATUS_IN_PROGRESS)
             except OSError as e:
                 log_error('controller.status', 'status write failed', exc=e)
@@ -3863,23 +3858,19 @@ class ToolController:
         n_vess = counts.get('vessel', '?')
         n_cap  = counts.get('capillary', '?')
 
-        msg = QMessageBox(self.window)
-        msg.setWindowTitle("Resume session?")
-        msg.setIcon(QMessageBox.Icon.Question)
-        msg.setText(
-            f"Found a saved session for this video.\n\n"
-            f"  Folder:  {out_folder}\n"
-            f"  Saved:   {when}\n"
-            f"  Counts:  {n_cell} cells · {n_vess} vessels · {n_cap} capillaries\n")
-        msg.setInformativeText(
-            "Resume picks up where you left off (masks + names + locks).\n"
-            "Start fresh leaves the saved files alone — you can still "
-            "save over them later.")
-        btn_resume = msg.addButton("Resume", QMessageBox.ButtonRole.AcceptRole)
-        msg.addButton("Start fresh", QMessageBox.ButtonRole.RejectRole)
-        msg.setDefaultButton(btn_resume)
-        msg.exec()
-        if msg.clickedButton() is not btn_resume:
+        from ui.choice_dialog import ChoiceDialog
+        choice = ChoiceDialog.ask(
+            self.window, "Resume this session?",
+            f"A saved session exists for this video.\n\n"
+            f"Saved:  {when}\n"
+            f"Counts:  {n_cell} cells · {n_vess} vessels · {n_cap} capillaries"
+            f"\n\nResume picks up where you left off (masks + names + locks). "
+            f"Start fresh leaves the saved files alone — you can still save "
+            f"over them later.",
+            [('resume', "Resume", 'primary'),
+             ('fresh', "Start fresh", 'normal')],
+            default_key='resume')
+        if choice != 'resume':
             return
 
         try:
@@ -3906,21 +3897,17 @@ class ToolController:
             return
         if not records:
             return
-        msg = QMessageBox(self.window)
-        msg.setWindowTitle("Restore snapshot?")
-        msg.setIcon(QMessageBox.Icon.Question)
-        msg.setText(
-            f"Found an autosaved annotation snapshot for this video "
-            f"({len(records)} annotations, no saved masks).")
-        msg.setInformativeText(
-            "Restore brings the boxes back where you left off. "
-            "Start fresh leaves the snapshot file alone.")
-        btn_restore = msg.addButton("Restore",
-                                    QMessageBox.ButtonRole.AcceptRole)
-        msg.addButton("Start fresh", QMessageBox.ButtonRole.RejectRole)
-        msg.setDefaultButton(btn_restore)
-        msg.exec()
-        if msg.clickedButton() is not btn_restore:
+        from ui.choice_dialog import ChoiceDialog
+        choice = ChoiceDialog.ask(
+            self.window, "Restore autosaved snapshot?",
+            f"An autosaved annotation snapshot exists for this video "
+            f"({len(records)} annotations, no saved masks).\n\n"
+            f"Restore brings the boxes back where you left off. "
+            f"Start fresh leaves the snapshot file alone.",
+            [('restore', "Restore", 'primary'),
+             ('fresh', "Start fresh", 'normal')],
+            default_key='restore')
+        if choice != 'restore':
             return
         for rec in records:
             self._create_annotation_from_record(rec)
