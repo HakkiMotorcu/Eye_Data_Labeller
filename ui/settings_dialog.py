@@ -22,8 +22,8 @@ from PyQt6.QtCore import QSettings, Qt
 from PyQt6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QPushButton, QRadioButton, QSpinBox, QStackedWidget,
-    QVBoxLayout, QWidget,
+    QListWidget, QListWidgetItem, QMessageBox, QPushButton, QRadioButton,
+    QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from core import project_io
@@ -98,7 +98,11 @@ def _hint(text):
 class SettingsDialog(QDialog):
     """Elegant tabless settings panel: nav list + stacked pages."""
 
-    def __init__(self, parent=None):
+    # Page names in nav order — callers open a specific one by name.
+    PAGES = ("Output & Autosave", "SAM Model", "Detection",
+             "Annotation", "Debugging")
+
+    def __init__(self, parent=None, page=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setModal(True)
@@ -115,13 +119,20 @@ class SettingsDialog(QDialog):
                 ("Annotation", self._page_annotation),
                 ("Debugging", self._page_debug)):
             self._nav.addItem(name)
-            page = QWidget()
-            lay = QVBoxLayout(page)
+            page_w = QWidget()
+            lay = QVBoxLayout(page_w)
             builder(lay)
             lay.addStretch(1)
-            self._stack.addWidget(page)
+            self._stack.addWidget(page_w)
         self._nav.currentRowChanged.connect(self._stack.setCurrentIndex)
-        self._nav.setCurrentRow(0)
+        # Open on the requested page (by name or index) — e.g. the Model
+        # menu opens straight to "SAM Model", not the first tab.
+        start = 0
+        if isinstance(page, str) and page in self.PAGES:
+            start = self.PAGES.index(page)
+        elif isinstance(page, int) and 0 <= page < len(self.PAGES):
+            start = page
+        self._nav.setCurrentRow(start)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -231,38 +242,129 @@ class SettingsDialog(QDialog):
         lay.addLayout(form)
         self._update_preview()
 
-    # ---- Page: SAM Model -------------------------------------------
+    # ---- Page: SAM Model (registry editor) -------------------------
     def _page_model(self, lay):
         from core import model_download
         s = self._settings
         model_url = str(s.value(model_download.SETTINGS_KEY,
                                 model_download.DEFAULT_SAM_HELA_URL))
-        model_local = str(s.value(model_download.LOCAL_PATH_SETTINGS_KEY, ""))
 
-        lay.addWidget(_bold("SAM-HeLa checkpoint"))
+        lay.addWidget(_bold("SAM models"))
         lay.addWidget(_hint(
-            "The fine-tuned weights (best.pt) that power SAM Box. A local "
-            "file takes precedence; the URL is used to download on first "
-            "use when no file is set."))
-        self.ed_model_local = QLineEdit(model_local)
-        self.ed_model_local.setPlaceholderText(
-            "/path/to/sam_hela/best.pt  (optional; bypasses download)")
-        btn_local = QPushButton("Browse…")
-        btn_local.clicked.connect(self._browse_model_local)
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Local file:"))
-        row.addWidget(self.ed_model_local, stretch=1)
-        row.addWidget(btn_local)
-        lay.addLayout(row)
+            "Registered checkpoints and built-in variants. Select one and "
+            "Make active, or Add / Edit / Remove. Tags and file paths are "
+            "each unique. Changes apply immediately."))
+        self.list_models = QListWidget()
+        self.list_models.setMinimumHeight(170)
+        self.list_models.itemDoubleClicked.connect(
+            lambda _i: self._model_make_active())
+        lay.addWidget(self.list_models)
 
+        btns = QHBoxLayout()
+        b_add = QPushButton("Add…"); b_add.clicked.connect(self._model_add)
+        b_edit = QPushButton("Edit…"); b_edit.clicked.connect(self._model_edit)
+        b_rm = QPushButton("Remove"); b_rm.clicked.connect(self._model_remove)
+        b_act = QPushButton("Make active")
+        b_act.clicked.connect(self._model_make_active)
+        for b in (b_add, b_edit, b_rm):
+            btns.addWidget(b)
+        btns.addStretch(1)
+        btns.addWidget(b_act)
+        lay.addLayout(btns)
+        self._refresh_model_list()
+
+        lay.addWidget(_bold("Download URL (built-in variants)"))
+        lay.addWidget(_hint(
+            "Used to fetch a built-in variant's weights on first use "
+            "when no local checkpoint is registered."))
         self.ed_model_url = QLineEdit(model_url)
-        self.ed_model_url.setPlaceholderText(
-            "https://huggingface.co/…/best.pt   "
-            "(downloaded on first use if not already on disk)")
-        row2 = QHBoxLayout()
-        row2.addWidget(QLabel("or URL:    "))
-        row2.addWidget(self.ed_model_url, stretch=1)
-        lay.addLayout(row2)
+        self.ed_model_url.setPlaceholderText("https://…/best.pt")
+        lay.addWidget(self.ed_model_url)
+
+    def _refresh_model_list(self):
+        from core import model_registry
+        self.list_models.clear()
+        active = model_registry.get_active_tag()
+        for m in model_registry.all_models():
+            mark = "● " if m['tag'] == active else "   "
+            if m.get('builtin'):
+                tail = "  (built-in · download)"
+            elif m.get('path'):
+                tail = f"  ·  {os.path.basename(m['path'])}"
+            else:
+                tail = "  (no checkpoint)"
+            it = QListWidgetItem(f"{mark}{m['tag']}   [{m['base']}]{tail}")
+            it.setData(Qt.ItemDataRole.UserRole, m)
+            it.setToolTip(m.get('path') or "built-in registry variant")
+            self.list_models.addItem(it)
+
+    def _selected_model(self):
+        it = self.list_models.currentItem()
+        return it.data(Qt.ItemDataRole.UserRole) if it is not None else None
+
+    def _model_add(self):
+        from ui.model_edit_dialog import ModelEditDialog
+        from core import model_registry
+        res = ModelEditDialog.get_new(self)
+        if res is None:
+            return
+        try:
+            entry = model_registry.add_model(res['tag'], res['path'],
+                                             res['base'])
+        except ValueError as e:
+            QMessageBox.warning(self, "Add model", str(e))
+            return
+        model_registry.set_active(entry['tag'])  # newly added = active
+        self._refresh_model_list()
+
+    def _model_edit(self):
+        from ui.model_edit_dialog import ModelEditDialog
+        from core import model_registry
+        m = self._selected_model()
+        if m is None:
+            return
+        if m.get('builtin'):
+            QMessageBox.information(
+                self, "Edit model",
+                "Built-in variants can't be edited — Add a model to "
+                "register your own checkpoint.")
+            return
+        res = ModelEditDialog.get_edit(self, m)
+        if res is None:
+            return
+        try:
+            model_registry.update_model(m['tag'], res['tag'], res['path'],
+                                        res['base'])
+        except ValueError as e:
+            QMessageBox.warning(self, "Edit model", str(e))
+            return
+        self._refresh_model_list()
+
+    def _model_remove(self):
+        from core import model_registry
+        m = self._selected_model()
+        if m is None:
+            return
+        if m.get('builtin'):
+            QMessageBox.information(
+                self, "Remove model", "Built-in variants can't be removed.")
+            return
+        if QMessageBox.question(
+                self, "Remove model",
+                f"Remove '{m['tag']}' from the registry?\n"
+                f"(The checkpoint file on disk is left untouched.)") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        model_registry.remove_model(m['tag'])
+        self._refresh_model_list()
+
+    def _model_make_active(self):
+        from core import model_registry
+        m = self._selected_model()
+        if m is None:
+            return
+        model_registry.set_active(m['tag'])
+        self._refresh_model_list()
 
     # ---- Page: Detection -------------------------------------------
     def _page_detection(self, lay):
@@ -381,14 +483,6 @@ class SettingsDialog(QDialog):
         self.lbl_preview.setText(f"Preview: {out}")
         self.ed_custom.setEnabled(self.rb_cust.isChecked())
 
-    def _browse_model_local(self):
-        start = self.ed_model_local.text() or os.path.expanduser("~")
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Pick SAM-HeLa checkpoint", start,
-            "PyTorch checkpoint (*.pt *.pth);;All files (*)")
-        if path:
-            self.ed_model_local.setText(path)
-
     def _browse_custom_root(self):
         start = os.path.expanduser(self.ed_custom.text() or "~")
         path = QFileDialog.getExistingDirectory(
@@ -418,8 +512,8 @@ class SettingsDialog(QDialog):
                    int(self.spin_mask_min.value()))
         s.setValue(model_download.SETTINGS_KEY,
                    self.ed_model_url.text().strip())
-        s.setValue(model_download.LOCAL_PATH_SETTINGS_KEY,
-                   self.ed_model_local.text().strip())
+        # Model checkpoints now live in the registry (edited live on the
+        # SAM Model page), not a single LOCAL_PATH setting.
         s.setValue(DET_CUSTOM, bool(self.chk_det_custom.isChecked()))
         s.setValue(DET_PRED_IOU, float(self.spin_pred_iou.value()))
         s.setValue(DET_STABILITY, float(self.spin_stability.value()))

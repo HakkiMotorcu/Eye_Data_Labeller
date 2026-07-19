@@ -74,7 +74,7 @@ except Exception:
     # a clearer error than anything we could craft here.
     pass
 
-from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PyQt6.QtWidgets import QApplication
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QPainterPath, QColor, QPen
 from PyQt6.QtCore import Qt, QRectF, QSettings, QTimer
 from core.volume_data import VideoData
@@ -265,18 +265,6 @@ def _make_eye_icon(size=64):
 
     p.end()
     return QIcon(px)
-
-
-def pick_video_file(parent=None):
-    """Open a file dialog and return the selected path (or None if cancelled)."""
-    path, _ = QFileDialog.getOpenFileName(
-        parent,
-        "Open Image or Video",
-        os.getcwd(),
-        "All supported (*.tif *.tiff *.avi *.mp4 *.mkv *.mov);;"
-        "TIFF (*.tif *.tiff);;Video (*.avi *.mp4 *.mkv *.mov);;All Files (*)",
-    )
-    return path if path else None
 
 
 def main():

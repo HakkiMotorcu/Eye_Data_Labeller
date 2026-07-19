@@ -567,16 +567,6 @@ class MainWindow(QMainWindow):
         action_row.addWidget(self.btn_clear_seg_mask)
         tools_layout.addLayout(action_row)
 
-        # Save Seg is a whole-stack save action, not a per-cell tool —
-        # it lives in the I/O panel below, next to Load Seg.
-        self.btn_save_seg = QPushButton("Save Seg")
-        self.btn_save_seg.setToolTip(
-            "Write the whole project to the output folder:\n"
-            "  Cells.tif, Vessels.tif, Capillaries.tif (ZLIB-compressed)\n"
-            "  Meta.json, project.json\n"
-            "Atomic + backup-on-overwrite. Resets the 'unsaved' indicator.")
-        self.btn_save_seg.setStyleSheet("color: #2a9d8f; font-weight: bold;")
-
         # Force paint toggle (bypasses safe-paint mode)
         force_row = QHBoxLayout()
         force_row.setSpacing(3)
@@ -792,65 +782,10 @@ class MainWindow(QMainWindow):
 
         tracking_group.setLayout(tracking_layout)
 
-        # 5. File I/O
-        io_group = self._make_collapsible_group("Import / Export", _COMPACT_SS)
-        io_layout = QVBoxLayout()
-        io_layout.setContentsMargins(4, 2, 4, 4)
-        io_layout.setSpacing(4)
-
-        # ----- Primary actions (modern project I/O) -------------------
-        # Save status indicator: "Saved …" / "Unsaved changes". Updated
-        # by the controller on save / dirty / on a periodic timer.
-        self.lbl_save_status = QLabel("—")
-        self.lbl_save_status.setStyleSheet(
-            "color: #888; font-family: monospace; font-size: 11px;")
-        self.lbl_save_status.setWordWrap(True)
-        io_layout.addWidget(self.lbl_save_status)
-
-        # Top action row: Output settings + Load Seg + Save Seg.
-        # Save/Load are the most common ops so they get to the top.
-        primary_row = QHBoxLayout()
-        primary_row.setSpacing(4)
-        self.btn_io_settings = QPushButton("Output settings…")
-        self.btn_io_settings.setToolTip(
-            "Where exports / autosave files land + autosave cadence.\n"
-            "Persists across launches via QSettings.")
-        self.btn_load_project = QPushButton("Load Project")
-        self.btn_load_project.setToolTip(
-            "Open a project output folder (Cells.tif + Vessels.tif +\n"
-            "Capillaries.tif + Meta.json). Loads every class layer plus\n"
-            "the metadata in one shot — replaces the current session.")
-        self.btn_load_project.setStyleSheet("color: #e9c46a; font-weight: bold;")
-        primary_row.addWidget(self.btn_io_settings)
-        primary_row.addWidget(self.btn_load_project)
-        primary_row.addWidget(self.btn_save_seg)
-        io_layout.addLayout(primary_row)
-
-        # Secondary load row — single-class TIF that merges into the
-        # current session without touching the other class layers.
-        load_class_row = QHBoxLayout()
-        load_class_row.setSpacing(4)
-        self.btn_load_class = QPushButton("Load Single Class…")
-        self.btn_load_class.setToolTip(
-            "Import one mask TIF into a single class layer (cell / vessel\n"
-            "/ capillary) of your choice. Leaves the other classes alone.\n"
-            "Use this when you want to merge a separately-saved layer\n"
-            "into the current project.")
-        self.btn_load_class.setStyleSheet("color: #e9c46a;")
-        load_class_row.addWidget(self.btn_load_class)
-        load_class_row.addStretch(1)
-        io_layout.addLayout(load_class_row)
-
-
-        # Import annotations from JSON/CSV (always-visible).
-        import_row = QHBoxLayout()
-        import_row.setSpacing(4)
-        self.btn_import = QPushButton("Import Annotations  [Ctrl+I]")
-        self.btn_import.setStyleSheet("color: #457b9d; font-weight: bold;")
-        import_row.addWidget(self.btn_import)
-        io_layout.addLayout(import_row)
-
-        io_group.setLayout(io_layout)
+        # (The old "Import / Export" panel is gone — every action in it
+        # duplicated the File menu, per the one-concept-per-surface
+        # design rule. Save status lives in the status bar; Load Single
+        # Class moved to the File menu.)
 
         # 4. View (display + segmentation overlay; Phase 3 will add image-enhancement controls here)
         display_group = self._make_collapsible_group("View", _COMPACT_SS)
@@ -1227,7 +1162,6 @@ class MainWindow(QMainWindow):
         right_panel.addWidget(sam_group)        # SAM (model + auto + future prompts)
         right_panel.addWidget(tracking_group)   # Tracking (link cells across frames)
         right_panel.addWidget(display_group)    # View
-        right_panel.addWidget(io_group)         # I/O (Phase 2 will rework)
         right_panel.addStretch(1)
 
         scroll_area.setWidget(right_panel_widget)
@@ -1322,6 +1256,13 @@ class MainWindow(QMainWindow):
         # Add a leading info label on the left, others on the right
         sb.addWidget(self.lbl_status_image)
         sb.addWidget(self.lbl_status_mode)
+        # Word-style save indicator — always visible, updated by the
+        # controller's _refresh_save_status ("● Unsaved changes",
+        # "✓ Saved 2 min ago", "✗ Autosave FAILED").
+        self.lbl_save_status = QLabel("—")
+        self.lbl_save_status.setStyleSheet(
+            "font-family: monospace; color: #888; padding: 0 10px;")
+        sb.addPermanentWidget(self.lbl_save_status)
         sb.addPermanentWidget(self.lbl_status_frame)
         sb.addPermanentWidget(self.lbl_status_coords)
         sb.addPermanentWidget(self.lbl_status_value)
@@ -2007,61 +1948,22 @@ class MainWindow(QMainWindow):
                 return
 
     def closeEvent(self, event):
-        """Guard the close button: unsaved work gets a Save / Discard /
-        Cancel prompt instead of silently vanishing. (In Light autosave
-        mode mask pixels are NEVER auto-flushed, so closing without
-        this prompt used to lose all painted work since the last
-        Ctrl+S.)"""
-        from PyQt6.QtWidgets import QMessageBox
+        """Guard the close button with the SAME status-aware leave
+        dialog as switching files (Save & mark complete / in progress /
+        Discard / Cancel) \u2014 one dialog for every way of leaving a
+        session. (In Light autosave mode mask pixels are NEVER
+        auto-flushed, so closing without this used to lose all painted
+        work since the last Ctrl+S.)"""
         ctrl = getattr(self, '_controller', None)
         # Block any NEW embed work first \u2014 the prompt below can pump
         # the event loop, and a frame-change precompute starting while
         # we're tearing down would guarantee a terminate() later.
         if ctrl is not None:
             ctrl._shutting_down = True
-        dirty = ctrl is not None and getattr(ctrl, '_seg_dirty_since_save',
-                                             False)
-        if dirty:
-            resp = QMessageBox.question(
-                self, "Unsaved changes",
-                "There are unsaved changes (masks / annotations).\n\n"
-                "Save before closing?",
-                QMessageBox.StandardButton.Save
-                | QMessageBox.StandardButton.Discard
-                | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Save)
-            if resp == QMessageBox.StandardButton.Cancel:
-                if ctrl is not None:
-                    ctrl._shutting_down = False  # user is staying
+            if not ctrl._confirm_leave_session("quitting"):
+                ctrl._shutting_down = False  # user is staying
                 event.ignore()
                 return
-            if resp == QMessageBox.StandardButton.Save:
-                ctrl.save_seg_map()
-                if getattr(ctrl, '_seg_dirty_since_save', False):
-                    if self.seg_data is None:
-                        # Bbox-only session: there are no masks for
-                        # save_seg_map to write, so Save can never
-                        # clear the flag \u2014 don't trap the user in a
-                        # close/ignore loop. The light autosave
-                        # snapshot preserves the annotations for the
-                        # resume prompt.
-                        try:
-                            ctrl._autosave()
-                        except Exception:
-                            pass
-                        QMessageBox.information(
-                            self, "Annotations snapshotted",
-                            "No mask layers exist yet, so only an "
-                            "annotation snapshot (autosave.json) was "
-                            "written. You'll be offered a resume on "
-                            "next open.")
-                    else:
-                        # Save failed (its own dialog explained why) \u2014
-                        # don't close on top of unsaved work.
-                        if ctrl is not None:
-                            ctrl._shutting_down = False
-                        event.ignore()
-                        return
         # Stop the embedding worker gracefully \u2014 tearing down the app
         # around a live QThread aborts on some platforms. 10s covers a
         # slow cold-cache CPU frame; the worker checks its stop flag
@@ -2242,10 +2144,16 @@ class MainWindow(QMainWindow):
             self._landing_page.refresh_recent()
             self._central_stack.setCurrentWidget(self._landing_page)
             self._update_title()
+            c = getattr(self, '_controller', None)
+            if c is not None:
+                c.set_home_mode(True)
 
     def show_annotation_view(self):
         # Index 0 is always the annotation view.
         self._central_stack.setCurrentIndex(0)
+        c = getattr(self, '_controller', None)
+        if c is not None:
+            c.set_home_mode(False)
 
     def is_on_landing(self):
         return (self._landing_page is not None

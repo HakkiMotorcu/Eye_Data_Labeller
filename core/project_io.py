@@ -220,11 +220,13 @@ def write_project_manifest(out_folder: str, *,
     ensure_dir(out_folder)
     path = os.path.join(out_folder, FILE_PROJECT)
     created_at = _now_iso()
+    prev_status = None
     if os.path.exists(path):
         try:
             with open(path, encoding='utf-8') as f:
                 prev = json.load(f) or {}
             created_at = prev.get('created_at', created_at)
+            prev_status = prev.get('status')
         except (json.JSONDecodeError, OSError):
             pass  # corrupt manifest — overwrite cleanly
 
@@ -232,6 +234,8 @@ def write_project_manifest(out_folder: str, *,
         "version": PROJECT_SCHEMA_VERSION,
         "created_at": created_at,
         "updated_at": _now_iso(),
+        # Explicit user-set work status — survives full rewrites.
+        "status": prev_status,
         "source_video": {
             "absolute_path": os.path.abspath(source_video_path)
                               if source_video_path else "",
@@ -252,6 +256,134 @@ def write_project_manifest(out_folder: str, *,
         manifest.update(extra)
     atomic_write_json(path, manifest, keep_backup=False)
     return path
+
+
+def snapshot_existing_masks(out_folder: str, keep: int = 3):
+    """Copy the folder's current mask TIFs + Meta.json into
+    ``backup/session-<timestamp>/``.
+
+    Called once per editing session before the first overwrite: the
+    rolling ``.bak`` written by every save only survives until the
+    NEXT save, so resuming an old session and saving twice used to
+    silently destroy the resumed-from state. Keeps the newest ``keep``
+    snapshots. Returns the snapshot dir, or None when there was
+    nothing to back up.
+    """
+    import shutil
+    if not out_folder or not os.path.isdir(out_folder):
+        return None
+    names = [*CLASS_MASK_FILES.values(), FILE_META]
+    present = [n for n in names
+               if os.path.exists(os.path.join(out_folder, n))]
+    if not present:
+        return None
+    stamp = _dt.datetime.now().strftime('%Y%m%d-%H%M%S')
+    dest = os.path.join(out_folder, 'backup', f'session-{stamp}')
+    os.makedirs(dest, exist_ok=True)
+    for n in present:
+        shutil.copy2(os.path.join(out_folder, n), os.path.join(dest, n))
+    root = os.path.join(out_folder, 'backup')
+    snaps = sorted(d for d in os.listdir(root) if d.startswith('session-'))
+    for d in snaps[:-keep]:
+        shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+    return dest
+
+
+# Explicit work status, set by the user at file-switch/close time
+# ("Save & mark complete" / "Save & mark in progress"). Lives in
+# project.json so it travels with the data.
+STATUS_COMPLETE = 'complete'
+STATUS_IN_PROGRESS = 'in_progress'
+
+
+def read_status(out_folder: str) -> Optional[str]:
+    """The manifest's explicit status field, or None."""
+    m = read_project_manifest(out_folder)
+    s = (m or {}).get('status')
+    return s if s in (STATUS_COMPLETE, STATUS_IN_PROGRESS) else None
+
+
+def write_status(out_folder: str, status: Optional[str]) -> None:
+    """Update just the status field of project.json, creating a minimal
+    manifest when none exists yet (bbox-only sessions have artifacts
+    but no full save)."""
+    ensure_dir(out_folder)
+    path = os.path.join(out_folder, FILE_PROJECT)
+    manifest = read_project_manifest(out_folder) or {
+        "version": PROJECT_SCHEMA_VERSION,
+        "created_at": _now_iso(),
+    }
+    manifest['status'] = status
+    manifest['updated_at'] = _now_iso()
+    atomic_write_json(path, manifest, keep_backup=False)
+
+
+def file_status(out_folder: str) -> Optional[str]:
+    """Display status for a stack's out folder.
+
+    'complete' only when the user explicitly marked it so;
+    'in_progress' when any session artifacts exist without that mark;
+    None when untouched.
+    """
+    summary = session_summary(out_folder)
+    if summary is None:
+        return None
+    if (summary.get('manifest') or {}).get('status') == STATUS_COMPLETE:
+        return STATUS_COMPLETE
+    return STATUS_IN_PROGRESS
+
+
+# Class → export subfolder name for the by-class collate.
+_CLASS_EXPORT_DIR = {
+    'cell': 'Cells', 'vessel': 'Vessels', 'capillary': 'Capillaries',
+}
+
+
+def find_stack_folders(source_root: str):
+    """Every folder under ``source_root`` that holds at least one class
+    mask TIF — i.e. a per-stack output folder. Recursive, so it finds
+    both ``<root>/<stem>/`` and the default ``<videos>/out/<stem>/``."""
+    import shutil  # noqa: F401  (kept near collate for locality)
+    found = []
+    for dirpath, _dirs, files in os.walk(source_root):
+        if any(f in files for f in CLASS_MASK_FILES.values()):
+            found.append(dirpath)
+    return sorted(found)
+
+
+def collate_masks_by_class(source_root: str, dest_root: str):
+    """Copy every stack's per-class masks into class folders:
+    ``<dest>/Cells/<stem>.tif``, ``<dest>/Vessels/<stem>.tif``, … .
+
+    Non-destructive (copies, never moves). Duplicate stem names get a
+    numeric suffix so nothing is overwritten. Returns a summary dict:
+    ``{'stacks': N, 'by_class': {'cell': n, ...}, 'collisions': [...]}``.
+    """
+    import shutil
+    stacks = find_stack_folders(source_root)
+    by_class = {ct: 0 for ct in CLASS_MASK_FILES}
+    used = {ct: set() for ct in CLASS_MASK_FILES}
+    collisions = []
+    for folder in stacks:
+        stem = os.path.basename(folder.rstrip(os.sep)) or 'stack'
+        for ct, fname in CLASS_MASK_FILES.items():
+            src = os.path.join(folder, fname)
+            if not os.path.isfile(src):
+                continue
+            dest_dir = os.path.join(dest_root, _CLASS_EXPORT_DIR[ct])
+            ensure_dir(dest_dir)
+            name = stem
+            n = 1
+            while name in used[ct]:
+                n += 1
+                name = f"{stem}_{n}"
+                if n == 2:
+                    collisions.append(stem)
+            used[ct].add(name)
+            shutil.copy2(src, os.path.join(dest_dir, name + '.tif'))
+            by_class[ct] += 1
+    return {'stacks': len(stacks), 'by_class': by_class,
+            'collisions': sorted(set(collisions))}
 
 
 def read_project_manifest(out_folder: str) -> Optional[dict]:

@@ -25,7 +25,9 @@ deploy\install_windows.bat
 ```
 
 The installer drops a launcher on your Desktop. Double-click it.
-First launch asks for an image; from there the main window opens.
+The app opens on a landing page — open a stack from there (button,
+drag-and-drop, or a click on a recent file). Recent files carry work
+status: ✓ complete, ● in progress.
 
 Full install details (GPU support, model weights, troubleshooting) →
 [**INSTALL.md**](INSTALL.md).
@@ -95,8 +97,10 @@ Eye_Data_Labeller/
 │   ├── project_io.py        # save / load project state
 │   └── …
 ├── ui/                    # Qt widgets
-│   ├── main_window.py       # Toolbar + image view + panels
-│   └── io_settings_dialog.py
+│   ├── main_window.py       # Image view + panels + status bar
+│   ├── landing_page.py      # Fileless home screen (recent + status)
+│   ├── files_panel.py       # Files dock: explorer + status glyphs
+│   └── settings_dialog.py   # Settings (output, SAM model, …)
 ├── controllers/
 │   └── tool_controller.py   # Wires UI events → core logic
 ├── deploy/                # Install scripts + helpers

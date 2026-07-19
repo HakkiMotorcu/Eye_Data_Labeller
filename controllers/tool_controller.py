@@ -57,6 +57,9 @@ class ToolController:
         self._brush_snapshot_class = None # class layer that snapshot came from
         # Auto-save dirty tracking for smart-mode mask flushing.
         self._seg_dirty_since_save = False
+        # Explicit work status of the current session (None until known;
+        # 'in_progress' the moment you draw; 'complete' when you say so).
+        self._session_status = None
         # (out_folder, class_type) pairs whose mask file THIS session
         # has loaded or written. Only owned files may be retired when
         # their layer empties — every fresh seg_data allocates all
@@ -76,11 +79,13 @@ class ToolController:
         self._save_status_timer = QTimer()
         self._save_status_timer.timeout.connect(self._refresh_save_status)
         self._save_status_timer.start(10_000)
-        # SAM service — lazy-loaded on first use. Default model is the
-        # collaborators' fine-tuned ViT-B (sam_hela). User can swap via
-        # the SAM section in the View panel.
-        self.sam_service = SamService(
-            model_type='vit_b', checkpoint_path=default_sam_hela_path())
+        # SAM service — lazy-loaded on first use. The model comes from
+        # the model registry's active entry (migrated from the legacy
+        # single-checkpoint setting on first run). User swaps it via the
+        # sidebar combo or the Model menu.
+        from core import model_registry
+        model_registry.ensure_migrated()
+        self.sam_service = self._make_sam_service(model_registry.get_active())
         # Tracker service — default Trackastra via micro-sam.
         self.tracker_service = make_tracker(get_default_tracker_name())
         # Embedding precompute worker (only one alive at a time — SAM
@@ -141,12 +146,8 @@ class ToolController:
         self.window.btn_unlock_all.clicked.connect(self.unlock_all)
         self.window.btn_hide_locked.clicked.connect(self.toggle_hide_locked)
         self.window.btn_label_colors.clicked.connect(self.toggle_label_colors)
-        self.window.btn_import.clicked.connect(self.load_annotations)
-        # Load actions: Project (folder picker) vs Single Class (file picker).
-        self.window.btn_load_project.clicked.connect(self.load_project_folder)
-        self.window.btn_load_class.clicked.connect(self.load_single_class_tif)
-        self.window.btn_io_settings.clicked.connect(self.open_io_settings)
         self.window.btn_run_sam.clicked.connect(self.run_sam_segmentation)
+        self._populate_model_combo()
         self.window.combo_sam_model.currentIndexChanged.connect(self._on_sam_model_changed)
         self.window.btn_sam_precompute.clicked.connect(self.precompute_all_frames)
         self.window.btn_sam_precompute.setEnabled(SamService.available())
@@ -183,7 +184,6 @@ class ToolController:
         self.window.btn_fill_bbox.clicked.connect(self.fill_bbox_cmd)
         self.window.btn_sam_box.clicked.connect(self.run_sam_box_prompt)
         self.window.btn_clear_seg_mask.clicked.connect(self.clear_seg_mask_for_selected)
-        self.window.btn_save_seg.clicked.connect(self.save_seg_map)
         self.window.btn_propagate_mask.clicked.connect(self.propagate_vein_mask)
 
         # Display controls
@@ -584,16 +584,29 @@ class ToolController:
     # ------------------------------------------------------------------
     # ANNOTATION CRUD HELPERS
     # ------------------------------------------------------------------
-    def open_io_settings(self):
-        """Open the modal output / autosave settings dialog. On accept,
-        re-apply the autosave timer interval so changes take effect
-        without a restart."""
+    def open_io_settings(self, page=None):
+        """Open the modal settings dialog, optionally on a specific page
+        (e.g. 'SAM Model'). On accept, re-apply the autosave timer
+        interval so changes take effect without a restart."""
         from ui.settings_dialog import SettingsDialog
-        dlg = SettingsDialog(self.window)
+        from core import model_registry
+        # The SAM Model page edits the registry LIVE (add/remove/make
+        # active are not gated by OK), so snapshot the active model and
+        # re-sync afterwards regardless of accept/cancel.
+        before = model_registry.get_active()
+        dlg = SettingsDialog(self.window, page=page)
         if dlg.exec():
             self._apply_autosave_interval()
             self._reload_quality_settings()
             self._show_frame_annotations(self.window._current_frame_idx)
+        after = model_registry.get_active()
+        changed = (after['tag'], after.get('path'), after.get('base')) != (
+            before['tag'], before.get('path'), before.get('base'))
+        if changed:
+            self._activate_model_entry(after)
+        else:
+            self._populate_model_combo()
+            self._refresh_model_surfaces()
 
     # ----- Project I/O helpers ------------------------------------------
     # Dirty-mask tracking — set True every time seg pixels change, reset
@@ -601,6 +614,8 @@ class ToolController:
     # Defined as an instance attribute in __init__; helpers below.
     def _mark_seg_dirty(self):
         self._seg_dirty_since_save = True
+        # Working on a file marks it "in progress" (● glyph) immediately.
+        self._mark_working()
         # Any seg mutation may add/remove instances — drop the cached
         # anywhere-in-stack id sets (rebuilt lazily on next lookup).
         self._ids_anywhere_cache = None
@@ -653,6 +668,43 @@ class ToolController:
         self._last_mask_save_ts = time.monotonic()
         self._last_save_at = time.time()
         self._refresh_save_status()
+
+    # ----- Work status (✓ complete / ● in progress) ------------------
+    def _set_session_status(self, status):
+        """Persist the session's work status to project.json and refresh
+        the ✓/● glyphs. No-op without an open file / out folder."""
+        from core import project_io
+        self._session_status = status
+        if self.window._current_file is None:
+            return
+        out = self._resolve_out_folder()
+        if out:
+            try:
+                project_io.write_status(out, status)
+            except OSError as e:
+                log_error('controller.status', 'status write failed', exc=e)
+        self._refresh_file_surfaces()
+
+    def _mark_working(self):
+        """Drawing/editing marks the file 'in progress' on disk so the ●
+        glyph appears the moment you start working (and demotes a
+        previously 'complete' file back to in-progress). Cheap: writes
+        only on the transition, then short-circuits."""
+        if self._session_status == 'in_progress':
+            return
+        if self.window._current_file is None:
+            return
+        self._set_session_status('in_progress')
+
+    def _delete_autosave(self):
+        """Remove autosave.json — it's redundant once a real save (or a
+        save-on-leave) has written the full project."""
+        path = self._get_autosave_path()
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
     def _refresh_save_status(self):
         """Update the I/O panel's save status label + title dirty dot."""
@@ -1340,30 +1392,54 @@ class ToolController:
         from PyQt6.QtGui import QAction
         mb = self.window.menuBar()
         mb.clear()
+        # Actions that only make sense with a file open — set_home_mode
+        # greys them out while the landing page is showing. Disabling
+        # the QAction also disables any shortcut registered on it.
+        home_off = self._home_disabled_actions = []
 
         m_file = mb.addMenu("&File")
         act = QAction("&Open Image/Video…", self.window)
         act.setShortcut(QKeySequence("Ctrl+O"))
         act.triggered.connect(self.open_file_dialog)
         m_file.addAction(act)
+        self._act_open = act  # reused by the toolbar
         self._menu_recent = m_file.addMenu("Open &Recent")
         self._menu_recent.aboutToShow.connect(self._populate_recent_menu)
+        act = QAction("&Close", self.window)
+        act.setShortcut(QKeySequence("Ctrl+W"))
+        act.triggered.connect(self.close_file)
+        m_file.addAction(act)
+        home_off.append(act)
         m_file.addSeparator()
         act = QAction("&Save Project\tCtrl+S", self.window)
         act.triggered.connect(self.save_seg_map)
         m_file.addAction(act)
+        home_off.append(act)
+        self._act_save = act  # reused by the toolbar
         act = QAction("Load Project &Folder…", self.window)
         act.triggered.connect(self.load_project_folder)
         m_file.addAction(act)
         act = QAction("&Import Annotations…\tCtrl+I", self.window)
         act.triggered.connect(self.load_annotations)
         m_file.addAction(act)
+        home_off.append(act)
+        act = QAction("Load Single-Class &TIF…", self.window)
+        act.triggered.connect(self.load_single_class_tif)
+        m_file.addAction(act)
+        home_off.append(act)
         act = QAction("&Export Bundle (masks + overlay video + CSV)…",
                       self.window)
         act.triggered.connect(self.export_bundle)
         m_file.addAction(act)
+        home_off.append(act)
+        # Collate works over a whole folder of projects — usable on the
+        # landing page too, so NOT home-disabled.
+        act = QAction("&Collate masks by class…", self.window)
+        act.triggered.connect(self.collate_masks_by_class)
+        m_file.addAction(act)
         m_file.addSeparator()
-        act = QAction("I/O && Autosave Settings…", self.window)
+        # Same dialog as the landing page's Settings button — one name.
+        act = QAction("&Settings…", self.window)
         act.triggered.connect(self.open_io_settings)
         m_file.addAction(act)
         m_file.addSeparator()
@@ -1376,33 +1452,40 @@ class ToolController:
         act = QAction("&Undo\tCtrl+Z", self.window)
         act.triggered.connect(self.undo)
         m_edit.addAction(act)
+        home_off.append(act)
         act = QAction("&Redo\tCtrl+Shift+Z", self.window)
         act.setShortcut(QKeySequence("Ctrl+Y"))  # Windows-familiar alias
         act.triggered.connect(self.redo)
         m_edit.addAction(act)
+        home_off.append(act)
 
         m_view = mb.addMenu("&View")
         act = QAction("Reset &Zoom\tR", self.window)
         act.triggered.connect(self.reset_zoom)
         m_view.addAction(act)
+        home_off.append(act)
         act = QAction("Zoom to &Selection", self.window)
         act.setShortcut(QKeySequence("Z"))
         act.triggered.connect(self.zoom_to_selection)
         m_view.addAction(act)
+        home_off.append(act)
         act = QAction("Toggle Seg &Overlay", self.window)
         act.setShortcut(QKeySequence("S"))  # was advertised, never bound
         act.triggered.connect(self._on_toggle_seg)
         m_view.addAction(act)
+        home_off.append(act)
         act = QAction("Onion Skin (prev frame)", self.window)
         act.setCheckable(True)
         act.setShortcut(QKeySequence("O"))
         act.toggled.connect(self._toggle_onion_skin)
         m_view.addAction(act)
+        home_off.append(act)
         self._act_review = QAction("Review Mode", self.window)
         self._act_review.setCheckable(True)
         self._act_review.setShortcut(QKeySequence("Ctrl+R"))
         self._act_review.toggled.connect(self.toggle_review_mode)
         m_view.addAction(self._act_review)
+        home_off.append(self._act_review)
 
         # Files sidebar (browser + session queue), toggleable from View.
         from PyQt6.QtWidgets import QDockWidget
@@ -1417,6 +1500,10 @@ class ToolController:
         toggle.setText("&Files Sidebar")
         m_view.addSeparator()
         m_view.addAction(toggle)
+        # Gated by home mode: without this, Ctrl+B / the View-menu item
+        # could pop the sidebar open over the landing page (where the
+        # dock is meant to be hidden).
+        home_off.append(toggle)
         visible = str(QSettings().value(
             'ui/files_dock_visible', True)).lower() in ('1', 'true')
         dock.setVisible(visible)
@@ -1428,6 +1515,24 @@ class ToolController:
             lambda v: QSettings().setValue('ui/files_dock_visible', bool(v)))
         self._files_dock = dock
 
+        # Model menu — usable from the landing page too (configuring
+        # the model is a home-screen concern; opening files is not
+        # required first). Never blocks: the checkpoint is asked for
+        # ONCE here (or on the first SAM Box press) and remembered.
+        m_model = mb.addMenu("&Model")
+        self._act_model_current = QAction("(model status)", self.window)
+        self._act_model_current.setEnabled(False)
+        m_model.addAction(self._act_model_current)
+        m_model.addSeparator()
+        act = QAction("&Add model…", self.window)
+        act.triggered.connect(self.add_model_dialog)
+        m_model.addAction(act)
+        act = QAction("&Manage models…", self.window)
+        act.triggered.connect(
+            lambda _c=False: self.open_io_settings('SAM Model'))
+        m_model.addAction(act)
+        m_model.aboutToShow.connect(self._refresh_model_menu)
+
         m_help = mb.addMenu("&Help")
         act = QAction("&Keyboard Shortcuts", self.window)
         act.setShortcut(QKeySequence("F1"))
@@ -1436,6 +1541,75 @@ class ToolController:
         act = QAction("Open &Log Folder", self.window)
         act.triggered.connect(self._open_log_folder)
         m_help.addAction(act)
+
+        # ---- Toolbar: sidebar toggle + the two most-used actions ----
+        # A slim editor-style toolbar; hidden on the landing page by
+        # set_home_mode along with the rest of the annotation chrome.
+        from PyQt6.QtWidgets import QToolBar
+        from PyQt6.QtCore import QSize
+        tb = getattr(self, '_toolbar', None)
+        if tb is None:
+            tb = QToolBar("Main")
+            tb.setObjectName("main_toolbar")
+            tb.setMovable(False)
+            tb.setIconSize(QSize(16, 16))
+            self.window.addToolBar(tb)
+            self._toolbar = tb
+        else:
+            tb.clear()
+        toggle.setShortcut(QKeySequence("Ctrl+B"))  # editor muscle memory
+        toggle.setToolTip("Show / hide the Files sidebar  (Ctrl+B)")
+        try:
+            import qtawesome as qta
+            toggle.setIcon(qta.icon('fa5s.columns', color='#9a9aa4'))
+            self._act_open.setIcon(
+                qta.icon('fa5s.folder-open', color='#9a9aa4'))
+            self._act_save.setIcon(qta.icon('fa5s.save', color='#9a9aa4'))
+        except Exception:
+            pass  # no qtawesome → text buttons, still functional
+        tb.addAction(toggle)
+        tb.addSeparator()
+        tb.addAction(self._act_open)
+        tb.addAction(self._act_save)
+
+    def set_home_mode(self, on):
+        """Landing page ⇄ annotation view: disarm/arm the editor.
+
+        While the landing page is the current stack page, every editor
+        QShortcut and file-dependent menu action is inert, and the
+        annotation status bar + Files dock are hidden. Reversed when a
+        file opens. Called from MainWindow.show_landing() /
+        show_annotation_view() so it can never drift from what is
+        actually on screen.
+        """
+        on = bool(on)
+        if getattr(self, '_home_mode', None) is on:
+            return
+        self._home_mode = on
+        for sc in self._shortcuts:
+            sc.setEnabled(not on)
+        for act in getattr(self, '_home_disabled_actions', ()):
+            act.setEnabled(not on)
+        self.window.statusBar().setVisible(not on)
+        tbar = getattr(self, '_toolbar', None)
+        if tbar is not None:
+            tbar.setVisible(not on)
+        dock = getattr(self, '_files_dock', None)
+        if dock is not None:
+            from PyQt6.QtCore import QSettings
+            # Programmatic setVisible syncs the toggle action, which
+            # would persist this as the user's preference — block it.
+            toggle = dock.toggleViewAction()
+            toggle.blockSignals(True)
+            try:
+                if on:
+                    dock.setVisible(False)
+                else:
+                    visible = str(QSettings().value(
+                        'ui/files_dock_visible', True)).lower() in ('1', 'true')
+                    dock.setVisible(visible)
+            finally:
+                toggle.blockSignals(False)
 
     def _populate_recent_menu(self):
         from PyQt6.QtGui import QAction
@@ -1451,6 +1625,10 @@ class ToolController:
             act.setToolTip(p)
             act.triggered.connect(lambda _c=False, path=p: self.open_path(path))
             self._menu_recent.addAction(act)
+        self._menu_recent.addSeparator()
+        act = QAction("Clear Menu", self.window)
+        act.triggered.connect(self.clear_recent_files)
+        self._menu_recent.addAction(act)
 
     def _open_log_folder(self):
         from PyQt6.QtGui import QDesktopServices
@@ -1498,10 +1676,16 @@ class ToolController:
                 ("Esc", "Exit review mode"),
             ]),
             ("File", [
-                ("Ctrl+O", "Open image/video"), ("Ctrl+S", "Save project"),
+                ("Ctrl+O", "Open image/video"),
+                ("Ctrl+B", "Show / hide the Files sidebar"),
+                ("Ctrl+W", "Close file (back to the landing page)"),
+                ("Ctrl+S", "Save project"),
                 ("Ctrl+I", "Import annotations"),
                 ("Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y", "Undo / redo"),
                 ("Ctrl+Q", "Quit"),
+            ]),
+            ("Help", [
+                ("F1", "This cheat sheet"),
             ]),
         ]
         rows = []
@@ -1648,6 +1832,58 @@ class ToolController:
                 reasons.append(f"area {n}px far from frame median "
                                f"{int(med_area)}px")
         return tuple(reasons)
+
+    @log_action('action')
+    def collate_masks_by_class(self):
+        """File > Collate masks by class: copy every stack's per-class
+        mask TIFs from a source tree into Cells/ Vessels/ Capillaries/
+        folders — the type-grouped layout for feeding a training
+        pipeline, without disturbing the per-video save layout."""
+        from PyQt6.QtCore import QSettings
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtGui import QCursor
+        from core import project_io
+        start = (str(QSettings().value(project_io.SETTING_OUTPUT_CUSTOM_ROOT, ""))
+                 or (os.path.dirname(self.window._current_file)
+                     if self.window._current_file else os.path.expanduser("~")))
+        source = QFileDialog.getExistingDirectory(
+            self.window, "Folder of projects to collate (searched recursively)",
+            start)
+        if not source:
+            return
+        dest = QFileDialog.getExistingDirectory(
+            self.window, "Destination for the Cells / Vessels / Capillaries "
+            "folders", source)
+        if not dest:
+            return
+        if os.path.abspath(dest).startswith(os.path.abspath(source) + os.sep):
+            QMessageBox.warning(
+                self.window, "Collate masks",
+                "Pick a destination OUTSIDE the source folder so the "
+                "collated copies aren't re-scanned.")
+            return
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
+        try:
+            summary = project_io.collate_masks_by_class(source, dest)
+        except Exception as e:
+            log_error('controller.collate', 'collate failed', exc=e)
+            QMessageBox.critical(self.window, "Collate masks",
+                                 f"Could not collate:\n{type(e).__name__}: {e}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        bc = summary['by_class']
+        note = ""
+        if summary['collisions']:
+            note = ("\n\nDuplicate stack names were suffixed (_2, _3…): "
+                    + ", ".join(summary['collisions'][:6])
+                    + ("…" if len(summary['collisions']) > 6 else ""))
+        QMessageBox.information(
+            self.window, "Collate masks",
+            f"Collated {summary['stacks']} stack(s) into:\n{dest}\n\n"
+            f"  Cells:        {bc.get('cell', 0)}\n"
+            f"  Vessels:      {bc.get('vessel', 0)}\n"
+            f"  Capillaries:  {bc.get('capillary', 0)}{note}")
 
     @log_action('action')
     def export_bundle(self):
@@ -1910,6 +2146,106 @@ class ToolController:
     _RECENT_MAX = 10
 
     @log_action('action')
+    def _confirm_leave_session(self, verb):
+        """Status-aware leave prompt: Save & mark complete / Save &
+        mark in progress / Discard (dirty only) / Cancel.
+
+        Shown when switching or closing files with live work. The
+        chosen status lands in the out folder's project.json, which is
+        what the explorer and landing-page glyphs display (✓ / ●).
+        Returns True when it's safe to proceed.
+        """
+        from core import project_io
+        dirty = self._seg_dirty_since_save
+        out = self._resolve_out_folder()
+        status = project_io.read_status(out) if out else None
+        # Nothing at stake: clean session that is either empty or
+        # already classified — leave silently.
+        if not dirty and (not self.annotations or status is not None):
+            return True
+
+        from ui.choice_dialog import ChoiceDialog
+        name = os.path.basename(self.window._current_file or '') or 'session'
+        prefix = "Save & mark" if dirty else "Mark"
+        message = (
+            "Complete shows ✓ in the file list and Next skips it; "
+            "in progress shows ● and stays in the rotation."
+            + ("\n\nThere are unsaved changes." if dirty else ""))
+        options = [
+            ('complete', f"{prefix} complete   ✓", 'primary'),
+            ('in_progress', f"{prefix} in progress   ●", 'normal'),
+        ]
+        if dirty:
+            options.append(('discard', "Discard changes", 'danger'))
+        options.append(('cancel', "Cancel", 'normal'))
+        default_key = ('complete' if self._session_status == 'complete'
+                       else 'in_progress')
+        choice = ChoiceDialog.ask(
+            self.window, f"How should {name} be recorded before {verb}?",
+            message, options, default_key=default_key)
+
+        if choice == 'discard':
+            return True  # leave as-is on disk, status untouched
+        if choice not in ('complete', 'in_progress'):
+            return False  # Cancel / closed
+
+        if dirty:
+            if self.window.seg_data is None:
+                # Bbox-only session: no masks for save_seg_map to write
+                # (calling it would pop a spurious "No segmentation data
+                # loaded" warning). Snapshot annotations instead so a
+                # Save click never silently discards work — and KEEP the
+                # autosave.json (it's the only record of these boxes).
+                try:
+                    self._autosave()
+                except Exception:
+                    pass
+            else:
+                # ask_status=False: the leave dialog already asked.
+                self.save_seg_map(ask_status=False)
+                if self._seg_dirty_since_save:
+                    return False  # save failed; keep the session
+        status = (project_io.STATUS_COMPLETE if choice == 'complete'
+                  else project_io.STATUS_IN_PROGRESS)
+        self._session_status = status
+        out = self._resolve_out_folder()
+        if out:
+            try:
+                project_io.write_status(out, status)
+            except OSError as e:
+                log_error('controller.status', 'status write failed', exc=e)
+        # The ✓/● just changed on disk — refresh the surfaces that show
+        # it so the glyph never lags (Explorer sidebar + landing recent).
+        self._refresh_file_surfaces()
+        return True
+
+    @log_action('action')
+    def close_file(self):
+        """File > Close (Ctrl+W): tear the session down and return to
+        the landing page. The inverse of open_path's bind block."""
+        w = self.window
+        if w.video_data is None and not self.annotations:
+            return  # nothing open
+        if not self._confirm_leave_session("closing"):
+            return
+        self._loading_file = True  # gates the frame-change embed hook
+        try:
+            self._stop_embed_worker(timeout_ms=5000)
+            self._embed_pending_frame = None
+            self._clear_all_annotations()  # also exits preview/review
+            w.video_data = None
+            w.seg_data = None
+            w._current_file = None
+            self._mark_seg_clean()
+            self._ids_anywhere_cache = None
+            self._mask_files_owned.clear()
+            self._session_backup_done = False  # session boundary
+            w._projection_cache = None
+            w._update_seg_overlay()
+            w.show_landing()  # refreshes Recent + re-enters home mode
+        finally:
+            self._loading_file = False
+
     def open_path(self, path):
         """Open a different image/video into the running window.
 
@@ -1934,36 +2270,8 @@ class ToolController:
             return True  # already open
 
         # Same unsaved-work guard as closing the window.
-        if self._seg_dirty_since_save:
-            resp = QMessageBox.question(
-                self.window, "Unsaved changes",
-                "There are unsaved changes (masks / annotations).\n\n"
-                "Save before opening the next file?",
-                QMessageBox.StandardButton.Save
-                | QMessageBox.StandardButton.Discard
-                | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Save)
-            if resp == QMessageBox.StandardButton.Cancel:
-                return False
-            if resp == QMessageBox.StandardButton.Save:
-                self.save_seg_map()
-                if self._seg_dirty_since_save:
-                    if self.window.seg_data is None:
-                        # Bbox-only session: no masks for save_seg_map
-                        # to write — same fallback as closeEvent, so a
-                        # Save click never silently discards work.
-                        try:
-                            self._autosave()
-                        except Exception:
-                            pass
-                        QMessageBox.information(
-                            self.window, "Annotations snapshotted",
-                            "No mask layers exist yet, so only an "
-                            "annotation snapshot (autosave.json) was "
-                            "written. You'll be offered a resume when "
-                            "you reopen this file.")
-                    else:
-                        return False  # save failed; stay on current file
+        if not self._confirm_leave_session("opening the next file"):
+            return False
 
         try:
             data = load_frame_source(path)
@@ -1991,6 +2299,8 @@ class ToolController:
             # let a later "Start fresh" retire mask files this session
             # no longer owns.
             self._mask_files_owned.clear()
+            self._session_backup_done = False  # new file = new session
+            self._session_status = None        # unknown until read/drawn
             w._projection_cache = None
             w.load_video()
             w.show_annotation_view()   # leave the landing page
@@ -2020,6 +2330,15 @@ class ToolController:
         items = [p for p in self.recent_files() if p != path]
         items.insert(0, path)
         QSettings().setValue(self._RECENT_KEY, items[:self._RECENT_MAX])
+
+    def remove_recent_file(self, path):
+        from PyQt6.QtCore import QSettings
+        items = [p for p in self.recent_files() if p != path]
+        QSettings().setValue(self._RECENT_KEY, items)
+
+    def clear_recent_files(self):
+        from PyQt6.QtCore import QSettings
+        QSettings().setValue(self._RECENT_KEY, [])
 
     def open_file_dialog(self):
         """File>Open… — remembers the last-used directory."""
@@ -2416,16 +2735,21 @@ class ToolController:
             self.spawn_new_annotation(start_pos=start_pos)
         else:
             # Single click that wasn't already claimed by a ROI → try
-            # to select the annotation whose seg mask pixel was clicked.
+            # to select the annotation whose seg mask pixel was clicked,
+            # then fall back to bbox geometry. The fallback is what makes
+            # a LOCKED bbox with an empty mask selectable: its ROI
+            # rejects mouse input and it has no pixels to hit.
             if not ev.isAccepted():
-                self._try_select_by_seg_pixel(pos.x(), pos.y())
+                if not self._try_select_by_seg_pixel(pos.x(), pos.y()):
+                    self._try_select_by_bbox(pos.x(), pos.y())
 
     def _try_select_by_seg_pixel(self, vx, vy):
         """Select the annotation whose instance-ID occupies pixel (vx, vy)
-        in the segmentation mask.  Works for veins and cells alike."""
+        in the segmentation mask.  Works for veins and cells alike.
+        Returns True when an annotation was selected."""
         seg = self.window.seg_data
         if seg is None:
-            return
+            return False
 
         frame = self.window._current_frame_idx
         scale = self._seg_scale()
@@ -2436,7 +2760,7 @@ class ToolController:
             cx, cy = int(round(vx)), int(round(vy))
 
         if cx < 0 or cy < 0 or cx >= seg.width or cy >= seg.height:
-            return
+            return False
 
         # Walk class layers top-down (cell wins over capillary over vessel
         # by default) so the click goes to whatever the user actually sees
@@ -2455,8 +2779,37 @@ class ToolController:
                         and anno.instance_id == iid
                         and anno.class_type == ct):
                     self.select_annotation(anno)
-                    return
+                    return True
             # No annotation owns these pixels — keep looking down.
+        return False
+
+    def _try_select_by_bbox(self, vx, vy):
+        """Fallback: select the visible bbox annotation containing
+        (vx, vy). Locked ROIs reject mouse input, so a locked bbox with
+        an empty mask can't be reached any other way on the canvas.
+
+        Unlocked ROIs already claim their own clicks (so the click never
+        reaches here for them), and hidden / paint-only annotations have
+        no visible rect — so the smallest visible box containing the
+        point, which reads as topmost, is the right target.
+        """
+        frame = self.window._current_frame_idx
+        best, best_area = None, None
+        for anno in self.annotations:
+            if anno.frame_idx != frame or anno.is_paint_only:
+                continue
+            if not anno.roi.isVisible():
+                continue
+            x, y = anno.roi.pos()
+            bw, bh = anno.roi.size()
+            if x <= vx <= x + bw and y <= vy <= y + bh:
+                area = abs(float(bw) * float(bh))
+                if best_area is None or area < best_area:
+                    best, best_area = anno, area
+        if best is not None:
+            self.select_annotation(best)
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # STATISTICS
@@ -2835,13 +3188,17 @@ class ToolController:
         self.window._update_seg_overlay()
 
     @log_action('action')
-    def save_seg_map(self):
+    def save_seg_map(self, ask_status=True):
         """Save the project — 3 per-class TIFs + Meta.json + project.json.
 
         All artifacts land in the per-video output folder resolved from
         QSettings (default: ``<video_dir>/out/<stem>/``). Writes are
         atomic; existing files are backed up to ``<file>.bak`` before
         overwrite. Empty class layers are skipped.
+
+        ``ask_status`` (explicit Ctrl+S / Save) pops the "mark in
+        progress / complete" prompt afterwards; the leave-guard passes
+        False because it already asked.
         """
         from core import sidecar, project_io
 
@@ -2860,6 +3217,20 @@ class ToolController:
 
         out_folder = self._resolve_out_folder(source)
         project_io.ensure_dir(out_folder)
+
+        # One-time-per-session safety net: before the FIRST overwrite,
+        # snapshot the folder's existing masks/meta to backup/. The
+        # rolling .bak only survives one save — this survives the
+        # whole session, so resuming + saving twice can't destroy the
+        # resumed-from state.
+        if not getattr(self, '_session_backup_done', False):
+            try:
+                dest = project_io.snapshot_existing_masks(out_folder)
+                if dest:
+                    log('controller.save', 'session backup', dest=dest)
+            except Exception as e:
+                log_error('controller.save', 'session backup failed', exc=e)
+            self._session_backup_done = True
 
         written = []
         removed = []
@@ -2904,31 +3275,38 @@ class ToolController:
         # Mark the seg layers as clean so the smart autosave knows it
         # doesn't need to re-flush masks until something changes again.
         self._mark_seg_clean()
-        panel = getattr(self, '_files_panel', None)
-        if panel is not None:
-            panel.refresh()  # queue status glyphs reflect the new save
+        # A real save exists now — the autosave snapshot in THIS folder
+        # is redundant (out_folder may be a loaded project's folder, so
+        # target it directly rather than re-resolving from current_file).
+        auto = os.path.join(out_folder, project_io.FILE_AUTOSAVE)
+        if os.path.exists(auto):
+            try:
+                os.remove(auto)
+            except OSError:
+                pass
 
-        if not written:
-            extra = ""
-            if removed:
-                extra = "\nRetired to .bak (layer now empty):\n" + "\n".join(
-                    f"  {os.path.basename(p)}" for p in removed)
-            QMessageBox.information(
-                self.window, "Save Seg",
-                f"No mask layers had pixels — wrote only Meta.json + "
-                f"project.json:\n{out_folder}{extra}")
-            return
+        # Explicit Save asks how to record the file; the status write +
+        # glyph refresh happen there. Otherwise just refresh the glyphs.
+        if ask_status:
+            self._prompt_save_status()
+        else:
+            self._refresh_file_surfaces()
 
-        lines = "\n".join(f"  {os.path.basename(p)}" for p in written)
-        if removed:
-            lines += "\n" + "\n".join(
-                f"  (retired emptied {os.path.basename(p)} to .bak)"
-                for p in removed)
-        QMessageBox.information(
-            self.window, "Save Seg",
-            f"Saved into {out_folder}:\n{lines}\n"
-            f"  {project_io.FILE_META}\n"
-            f"  {project_io.FILE_PROJECT}")
+    def _prompt_save_status(self):
+        """After an explicit Save, ask how to mark the file. Default keeps
+        it in progress, so a quick Enter just checkpoints and moves on."""
+        from ui.choice_dialog import ChoiceDialog
+        name = os.path.basename(self.window._current_file or '') or 'this file'
+        choice = ChoiceDialog.ask(
+            self.window, f"Saved {name} — mark it how?",
+            "In progress ● keeps it in the rotation; complete ✓ shows the "
+            "check and Next skips it. You can change this any time.",
+            [('in_progress', "Keep in progress   ●", 'primary'),
+             ('complete', "Mark complete   ✓", 'normal')],
+            default_key=('complete' if self._session_status == 'complete'
+                         else 'in_progress'))
+        self._set_session_status(
+            'complete' if choice == 'complete' else 'in_progress')
 
     @log_action('action')
     def propagate_vein_mask(self):
@@ -3117,19 +3495,43 @@ class ToolController:
                 f"{', '.join(project_io.CLASS_MASK_FILES.values())}.")
             return
 
-        if self.annotations:
-            reply = QMessageBox.question(
-                self.window, "Replace current session?",
-                f"Loading this project will replace the current session "
-                f"(annotations, masks, meta).\n\n"
-                f"  Folder:  {folder}\n"
-                f"  Saved:   {summary.get('updated_at', '?')}\n\n"
-                f"Continue?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
+        # Fileless (landing page): a session load into the hidden
+        # annotation view would strand the user on the landing page,
+        # so open the project's source video first — open_path switches
+        # views — and let _maybe_prompt_resume load THIS folder
+        # directly instead of prompting.
+        if self.window.video_data is None:
+            manifest = summary.get('manifest') or {}
+            src = (manifest.get('source_video') or {}).get(
+                'absolute_path') or ''
+            if not src or not os.path.isfile(src):
+                # Folders saved by older versions have no manifest (or
+                # the video moved). Don't dead-end — let the user
+                # locate the video, then proceed exactly the same way.
+                QMessageBox.information(
+                    self.window, "Load Project",
+                    f"This project folder doesn't record a source video "
+                    f"that still exists:\n{src or '(none recorded)'}\n\n"
+                    f"Pick the image/video these masks belong to.")
+                from core.frame_source import SUPPORTED_EXTS
+                pats = ' '.join(f'*{e}' for e in sorted(SUPPORTED_EXTS))
+                src, _ = QFileDialog.getOpenFileName(
+                    self.window, "Locate the project's source video",
+                    os.path.dirname(folder),
+                    f"Supported ({pats});;All Files (*)")
+                if not src:
+                    return
+            self._pending_project_folder = folder
+            try:
+                self.open_path(src)
+            finally:
+                self._pending_project_folder = None
+            return  # session loaded inside open_path; view switched
+
+        # Same status-aware guard as every other way of leaving a
+        # session (File > Open, Close, quit) — one dialog, one habit.
+        if not self._confirm_leave_session("loading this project"):
+            return
 
         try:
             self._load_session_from_out_folder(folder)
@@ -3139,10 +3541,6 @@ class ToolController:
                 self.window, "Load Project",
                 f"Could not load project:\n\n{type(e).__name__}: {e}")
             return
-
-        QMessageBox.information(
-            self.window, "Load Project",
-            f"Loaded:\n{folder}")
 
     @log_action('action')
     def load_single_class_tif(self):
@@ -3285,32 +3683,107 @@ class ToolController:
             f"Imported {ct} layer from:\n{os.path.basename(path)}")
 
     # ------------------------------------------------------------------
-    # SAM panel helpers (Phase 4.1)
+    # SAM panel helpers — model registry driven
     # ------------------------------------------------------------------
-    # Map combo-box index -> (model_type, checkpoint_path | None).
-    _SAM_MODEL_CHOICES = [
-        ('vit_b', 'sam_hela'),   # fine-tuned default; checkpoint resolved at runtime
-        ('vit_b_lm', None),
-        ('vit_t', None),
-        ('vit_b', None),
-        ('vit_l', None),
-    ]
+    @staticmethod
+    def _make_sam_service(entry):
+        """Build a SamService from a registry entry. A '' path means a
+        registry-download variant (no local checkpoint)."""
+        path = entry.get('path') or None
+        return SamService(model_type=entry.get('base', 'vit_b'),
+                          checkpoint_path=path)
+
+    def _populate_model_combo(self):
+        """Fill the sidebar combo from the model registry (registered
+        models first, then built-in variants) and select the active
+        one. Signals blocked so it never triggers a service rebuild."""
+        from core import model_registry
+        combo = self.window.combo_sam_model
+        combo.blockSignals(True)
+        combo.clear()
+        active_tag = model_registry.get_active_tag()
+        active_row = 0
+        for i, m in enumerate(model_registry.all_models()):
+            label = m['tag'] if m.get('builtin') else f"{m['tag']}  ({m['base']})"
+            combo.addItem(label, m)
+            if m['tag'] == active_tag:
+                active_row = i
+        combo.setCurrentIndex(active_row)
+        combo.blockSignals(False)
+
+    def _refresh_model_surfaces(self):
+        """Every widget that mirrors the SAM model, in one call — the
+        sidebar combo's status line, the Model-menu status, and the
+        landing 'Add SAM model…' affordance. Called from BOTH paths
+        that change the model (combo + Model menu) so they can't drift."""
+        self._refresh_sam_status()
+        self._refresh_model_menu()
+        lp = getattr(self.window, '_landing_page', None)
+        if lp is not None:
+            lp.refresh_recent()
+
+    def _refresh_file_surfaces(self):
+        """Every widget that mirrors on-disk ✓/● status — the Explorer
+        sidebar glyphs and the landing recent list. Called after any
+        status write so the glyph never lags the file."""
+        panel = getattr(self, '_files_panel', None)
+        if panel is not None:
+            panel.refresh()
+        lp = getattr(self.window, '_landing_page', None)
+        if lp is not None:
+            lp.refresh_recent()
+
+    def _refresh_model_menu(self):
+        from core import model_registry
+        svc = self.sam_service
+        tag = model_registry.get_active_tag() or svc.model_type
+        ckpt = svc.checkpoint_path
+        if ckpt and os.path.exists(ckpt):
+            txt = f"Active: {tag} — {os.path.basename(ckpt)}"
+        elif ckpt:
+            txt = f"Active: {tag} — checkpoint missing (SAM off)"
+        else:
+            txt = f"Active: {tag} (registry download)"
+        self._act_model_current.setText(txt)
+
+    def _activate_model_entry(self, entry):
+        """Make a registry entry the live model and sync every surface."""
+        from core import model_registry
+        self._stop_embed_worker(timeout_ms=5000)
+        model_registry.set_active(entry['tag'])
+        self.sam_service = self._make_sam_service(entry)
+        self._populate_model_combo()   # reflect the active selection
+        self._refresh_model_surfaces()
+        if self.window.video_data is not None:
+            self.on_image_loaded()
+
+    def add_model_dialog(self):
+        """Model > Add model…: register a new named checkpoint (tag +
+        base + path, all validated) and make it active. Reachable from
+        the landing page too."""
+        from ui.model_edit_dialog import ModelEditDialog
+        from core import model_registry
+        res = ModelEditDialog.get_new(self.window)
+        if res is None:
+            return
+        try:
+            entry = model_registry.add_model(
+                res['tag'], res['path'], res['base'])
+        except ValueError as e:
+            QMessageBox.warning(self.window, "Add model", str(e))
+            return
+        self._activate_model_entry(entry)
+
+    # Back-compat alias: the landing "Add SAM model…" button and the
+    # Model menu both point here.
+    choose_model_checkpoint = add_model_dialog
 
     def _on_sam_model_changed(self, idx):
-        # Stop any in-flight embed worker — the new service has its own cache.
-        self._stop_embed_worker(timeout_ms=5000)
-        model_type, hint = self._SAM_MODEL_CHOICES[
-            idx if 0 <= idx < len(self._SAM_MODEL_CHOICES) else 0]
-        if hint == 'sam_hela':
-            ckpt = default_sam_hela_path()
-        else:
-            ckpt = None
-        self.sam_service = SamService(model_type=model_type, checkpoint_path=ckpt)
-        self._refresh_sam_status()
-        # If we have an image loaded, kick off precompute for the current
-        # frame with the new model (the previous model's embeddings are
-        # in a different cache dir so this is fresh work).
-        self.on_image_loaded()
+        combo = self.window.combo_sam_model
+        entry = combo.itemData(idx)
+        if not isinstance(entry, dict):
+            return
+        self._activate_model_entry(entry)
 
     # ------------------------------------------------------------------
     # Embedding precompute (Phase 1a) — async background worker
@@ -3377,6 +3850,10 @@ class ToolController:
         svc = self.sam_service
         if svc.checkpoint_path and not os.path.exists(svc.checkpoint_path):
             if not interactive:
+                # Visible, non-modal: annotation works fine without SAM.
+                self.window.lbl_sam_status.setText(
+                    "SAM model not set — Model menu → Choose checkpoint… "
+                    "(annotation works without it)")
                 return
             try:
                 svc.ensure_checkpoint_ready(self.window)
@@ -3384,8 +3861,8 @@ class ToolController:
                 log_error('controller.sam',
                           'checkpoint unresolved — precompute skipped', exc=e)
                 self.window.lbl_sam_status.setText(
-                    "SAM checkpoint needed — pick best.pt in I/O Settings "
-                    "(SAM Box will ask again).")
+                    "SAM checkpoint needed — pick best.pt in Settings → "
+                    "SAM Model (SAM Box will ask again).")
                 return
         frames = self._frames_to_compute(frame_indices)
         if not frames:
@@ -3547,7 +4024,12 @@ class ToolController:
         if self.window._current_file is None:
             return
         fi = self.window._current_frame_idx
-        self._start_embed_worker([fi], label=f"frame {fi}")
+        # interactive=False: opening a file must never interrogate the
+        # user about models or block on a modal progress dialog — the
+        # embed runs silently; SAM Box (B) remains the explicit path
+        # that may ask (once) for a checkpoint.
+        self._start_embed_worker([fi], label=f"frame {fi}",
+                                 interactive=False)
 
     def _maybe_prompt_resume(self):
         """If the current video has a saved session in its out folder,
@@ -3561,12 +4043,28 @@ class ToolController:
             return
         if self.annotations:
             return  # work already in progress — don't ask
+        pending = getattr(self, '_pending_project_folder', None)
+        if pending:
+            # File > Load Project Folder already chose the session
+            # explicitly — load it without asking to resume.
+            try:
+                self._load_session_from_out_folder(pending)
+            except Exception as e:
+                log_error('controller.load_project', 'load failed', exc=e)
+                QMessageBox.critical(
+                    self.window, "Load Project",
+                    f"Could not load project:\n\n{type(e).__name__}: {e}")
+            return
         out_folder = self._resolve_out_folder()
         summary = project_io.session_summary(out_folder)
         if summary is None or not summary.get('has_masks'):
-            # Also consider the legacy next-to-video sidecars: load_segmentation
-            # already handles them via the file picker, but for resume we keep
-            # it simple — only prompt when the new layout has artifacts.
+            # No masks — but light autosave may still hold bbox
+            # annotations from a session that never saved masks.
+            # That snapshot used to be write-only; offer it back.
+            auto = (os.path.join(out_folder, project_io.FILE_AUTOSAVE)
+                    if out_folder else '')
+            if auto and os.path.exists(auto):
+                self._offer_autosave_restore(auto)
             return
 
         manifest = summary.get('manifest') or {}
@@ -3576,23 +4074,19 @@ class ToolController:
         n_vess = counts.get('vessel', '?')
         n_cap  = counts.get('capillary', '?')
 
-        msg = QMessageBox(self.window)
-        msg.setWindowTitle("Resume session?")
-        msg.setIcon(QMessageBox.Icon.Question)
-        msg.setText(
-            f"Found a saved session for this video.\n\n"
-            f"  Folder:  {out_folder}\n"
-            f"  Saved:   {when}\n"
-            f"  Counts:  {n_cell} cells · {n_vess} vessels · {n_cap} capillaries\n")
-        msg.setInformativeText(
-            "Resume picks up where you left off (masks + names + locks).\n"
-            "Start fresh leaves the saved files alone — you can still "
-            "save over them later.")
-        btn_resume = msg.addButton("Resume", QMessageBox.ButtonRole.AcceptRole)
-        msg.addButton("Start fresh", QMessageBox.ButtonRole.RejectRole)
-        msg.setDefaultButton(btn_resume)
-        msg.exec()
-        if msg.clickedButton() is not btn_resume:
+        from ui.choice_dialog import ChoiceDialog
+        choice = ChoiceDialog.ask(
+            self.window, "Resume this session?",
+            f"A saved session exists for this video.\n\n"
+            f"Saved:  {when}\n"
+            f"Counts:  {n_cell} cells · {n_vess} vessels · {n_cap} capillaries"
+            f"\n\nResume picks up where you left off (masks + names + locks). "
+            f"Start fresh leaves the saved files alone — you can still save "
+            f"over them later.",
+            [('resume', "Resume", 'primary'),
+             ('fresh', "Start fresh", 'normal')],
+            default_key='resume')
+        if choice != 'resume':
             return
 
         try:
@@ -3602,6 +4096,43 @@ class ToolController:
             QMessageBox.critical(
                 self.window, "Resume failed",
                 f"Could not load saved session:\n\n{type(e).__name__}: {e}")
+
+    def _offer_autosave_restore(self, path):
+        """Offer the light-autosave annotation snapshot back on reopen.
+
+        Bbox-only sessions never write masks, so the resume prompt
+        (which requires has_masks) never fired for them and their
+        autosave.json was effectively write-only — crash or quit lost
+        the boxes unless the user manually imported the file.
+        """
+        try:
+            records = self._parse_annotation_file(path)
+        except Exception as e:
+            log_error('controller.resume', 'autosave parse failed', exc=e,
+                      path=path)
+            return
+        if not records:
+            return
+        from ui.choice_dialog import ChoiceDialog
+        choice = ChoiceDialog.ask(
+            self.window, "Restore autosaved snapshot?",
+            f"An autosaved annotation snapshot exists for this video "
+            f"({len(records)} annotations, no saved masks).\n\n"
+            f"Restore brings the boxes back where you left off. "
+            f"Start fresh leaves the snapshot file alone.",
+            [('restore', "Restore", 'primary'),
+             ('fresh', "Start fresh", 'normal')],
+            default_key='restore')
+        if choice != 'restore':
+            return
+        for rec in records:
+            self._create_annotation_from_record(rec)
+        self._normalize_anno_names_and_colors()
+        self._show_frame_annotations(self.window._current_frame_idx)
+        self._update_stats()
+        # Restored work exists only as a snapshot — keep the session
+        # dirty so saving/leaving records it properly.
+        self._mark_seg_dirty()
 
     def _load_session_from_out_folder(self, out_folder):
         """Programmatic load equivalent to load_segmentation, but
@@ -3719,6 +4250,9 @@ class ToolController:
 
         self._normalize_anno_names_and_colors()
         self._mark_seg_clean()
+        # Adopt the saved work status so editing demotes correctly and
+        # the leave dialog defaults to it.
+        self._session_status = project_io.read_status(out_folder)
         # Preserve the manifest timestamp on the status label so the
         # user sees "Saved 2 days ago" rather than "Saved 0s ago" right
         # after a resume.
@@ -3735,6 +4269,9 @@ class ToolController:
         self._show_frame_annotations(cur)
         self.window._update_seg_overlay()
         self._update_stats()
+        # Load Project Folder (already-open session) reaches here without
+        # going through open_path's refresh — keep the ✓/● glyphs current.
+        self._refresh_file_surfaces()
         log('controller.resume', 'session loaded',
             out_folder=out_folder, n_annos=len(self.annotations))
 
@@ -5284,6 +5821,10 @@ class ToolController:
     def _clear_all_annotations(self):
         # Shared "session is gone" hook — every teardown path funnels
         # here, so preview / review / marker cleanup belong here too.
+        # NOTE: the one-time mask-backup flag is reset by open_path /
+        # close_file (true session boundaries), NOT here — importing
+        # annotations with "clear existing" also lands here, and that's
+        # the SAME session, so it must keep its already-taken backup.
         self._cancel_sam_preview(quiet=True)
         if getattr(self, '_review_mode', False):
             self._exit_review_mode("Review cancelled — session changed")
