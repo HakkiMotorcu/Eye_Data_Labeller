@@ -1437,6 +1437,10 @@ class ToolController:
         toggle.setText("&Files Sidebar")
         m_view.addSeparator()
         m_view.addAction(toggle)
+        # Gated by home mode: without this, Ctrl+B / the View-menu item
+        # could pop the sidebar open over the landing page (where the
+        # dock is meant to be hidden).
+        home_off.append(toggle)
         visible = str(QSettings().value(
             'ui/files_dock_visible', True)).lower() in ('1', 'true')
         dock.setVisible(visible)
@@ -2068,23 +2072,24 @@ class ToolController:
             return False  # Cancel / closed
 
         if dirty:
-            self.save_seg_map()
-            if self._seg_dirty_since_save:
-                if self.window.seg_data is None:
-                    # Bbox-only session: no masks for save_seg_map
-                    # to write — snapshot annotations so a Save click
-                    # never silently discards work.
-                    try:
-                        self._autosave()
-                    except Exception:
-                        pass
-                    QMessageBox.information(
-                        self.window, "Annotations snapshotted",
-                        "No mask layers exist yet, so only an "
-                        "annotation snapshot (autosave.json) was "
-                        "written. You'll be offered a resume when "
-                        "you reopen this file.")
-                else:
+            if self.window.seg_data is None:
+                # Bbox-only session: no masks for save_seg_map to write
+                # (calling it would pop a spurious "No segmentation data
+                # loaded" warning). Snapshot annotations instead so a
+                # Save click never silently discards work.
+                try:
+                    self._autosave()
+                except Exception:
+                    pass
+                QMessageBox.information(
+                    self.window, "Annotations snapshotted",
+                    "No mask layers exist yet, so only an "
+                    "annotation snapshot (autosave.json) was "
+                    "written. You'll be offered a resume when "
+                    "you reopen this file.")
+            else:
+                self.save_seg_map()
+                if self._seg_dirty_since_save:
                     return False  # save failed; keep the session
         out = self._resolve_out_folder()
         if out:
@@ -2094,6 +2099,9 @@ class ToolController:
                     else project_io.STATUS_IN_PROGRESS)
             except OSError as e:
                 log_error('controller.status', 'status write failed', exc=e)
+        # The ✓/● just changed on disk — refresh the surfaces that show
+        # it so the glyph never lags (Explorer sidebar + landing recent).
+        self._refresh_file_surfaces()
         return True
 
     @log_action('action')
@@ -2116,6 +2124,7 @@ class ToolController:
             self._mark_seg_clean()
             self._ids_anywhere_cache = None
             self._mask_files_owned.clear()
+            self._session_backup_done = False  # session boundary
             w._projection_cache = None
             w._update_seg_overlay()
             w.show_landing()  # refreshes Recent + re-enters home mode
@@ -2175,6 +2184,7 @@ class ToolController:
             # let a later "Start fresh" retire mask files this session
             # no longer owns.
             self._mask_files_owned.clear()
+            self._session_backup_done = False  # new file = new session
             w._projection_cache = None
             w.load_video()
             w.show_annotation_view()   # leave the landing page
@@ -3557,6 +3567,28 @@ class ToolController:
         ('vit_l', None),
     ]
 
+    def _refresh_model_surfaces(self):
+        """Every widget that mirrors the SAM model, in one call — the
+        sidebar combo's status line, the Model-menu status, and the
+        landing 'Add SAM model…' affordance. Called from BOTH paths
+        that change the model (combo + Model menu) so they can't drift."""
+        self._refresh_sam_status()
+        self._refresh_model_menu()
+        lp = getattr(self.window, '_landing_page', None)
+        if lp is not None:
+            lp.refresh_recent()
+
+    def _refresh_file_surfaces(self):
+        """Every widget that mirrors on-disk ✓/● status — the Explorer
+        sidebar glyphs and the landing recent list. Called after any
+        status write so the glyph never lags the file."""
+        panel = getattr(self, '_files_panel', None)
+        if panel is not None:
+            panel.refresh()
+        lp = getattr(self.window, '_landing_page', None)
+        if lp is not None:
+            lp.refresh_recent()
+
     def _refresh_model_menu(self):
         svc = self.sam_service
         ckpt = svc.checkpoint_path
@@ -3591,8 +3623,7 @@ class ToolController:
         combo.blockSignals(False)
         self.sam_service = SamService(model_type='vit_b',
                                       checkpoint_path=picked)
-        self._refresh_sam_status()
-        self._refresh_model_menu()
+        self._refresh_model_surfaces()
         if self.window.video_data is not None:
             self.on_image_loaded()
 
@@ -3606,7 +3637,7 @@ class ToolController:
         else:
             ckpt = None
         self.sam_service = SamService(model_type=model_type, checkpoint_path=ckpt)
-        self._refresh_sam_status()
+        self._refresh_model_surfaces()
         # If we have an image loaded, kick off precompute for the current
         # frame with the new model (the previous model's embeddings are
         # in a different cache dir so this is fresh work).
@@ -4093,6 +4124,9 @@ class ToolController:
         self._show_frame_annotations(cur)
         self.window._update_seg_overlay()
         self._update_stats()
+        # Load Project Folder (already-open session) reaches here without
+        # going through open_path's refresh — keep the ✓/● glyphs current.
+        self._refresh_file_surfaces()
         log('controller.resume', 'session loaded',
             out_folder=out_folder, n_annos=len(self.annotations))
 
@@ -5642,8 +5676,10 @@ class ToolController:
     def _clear_all_annotations(self):
         # Shared "session is gone" hook — every teardown path funnels
         # here, so preview / review / marker cleanup belong here too.
-        # Next editing session gets a fresh one-time mask backup.
-        self._session_backup_done = False
+        # NOTE: the one-time mask-backup flag is reset by open_path /
+        # close_file (true session boundaries), NOT here — importing
+        # annotations with "clear existing" also lands here, and that's
+        # the SAME session, so it must keep its already-taken backup.
         self._cancel_sam_preview(quiet=True)
         if getattr(self, '_review_mode', False):
             self._exit_review_mode("Review cancelled — session changed")
