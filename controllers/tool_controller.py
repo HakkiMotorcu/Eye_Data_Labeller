@@ -1975,31 +1975,59 @@ class ToolController:
     _RECENT_MAX = 10
 
     @log_action('action')
-    def _guard_unsaved(self, verb):
-        """Save/Discard/Cancel prompt for unsaved work.
+    def _confirm_leave_session(self, verb):
+        """Status-aware leave prompt: Save & mark complete / Save &
+        mark in progress / Discard (dirty only) / Cancel.
 
-        Returns True when it's safe to proceed (clean session, saved,
-        or the user chose Discard); False on Cancel or a failed save.
+        Shown when switching or closing files with live work. The
+        chosen status lands in the out folder's project.json, which is
+        what the explorer and landing-page glyphs display (✓ / ●).
+        Returns True when it's safe to proceed.
         """
-        if not self._seg_dirty_since_save:
+        from core import project_io
+        dirty = self._seg_dirty_since_save
+        out = self._resolve_out_folder()
+        status = project_io.read_status(out) if out else None
+        # Nothing at stake: clean session that is either empty or
+        # already classified — leave silently.
+        if not dirty and (not self.annotations or status is not None):
             return True
-        resp = QMessageBox.question(
-            self.window, "Unsaved changes",
-            "There are unsaved changes (masks / annotations).\n\n"
-            f"Save before {verb}?",
-            QMessageBox.StandardButton.Save
-            | QMessageBox.StandardButton.Discard
-            | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Save)
-        if resp == QMessageBox.StandardButton.Cancel:
-            return False
-        if resp == QMessageBox.StandardButton.Save:
+
+        name = os.path.basename(self.window._current_file or '') or 'session'
+        prefix = "Save && mark" if dirty else "Mark"
+        msg = QMessageBox(self.window)
+        msg.setWindowTitle(f"Leaving {name}")
+        msg.setIcon(QMessageBox.Icon.Question)
+        msg.setText(f"How should {name} be recorded before {verb}?")
+        msg.setInformativeText(
+            "Complete shows ✓ in the file list and Next skips it; "
+            "in progress shows ● and stays in the rotation."
+            + ("\nThere are unsaved changes." if dirty else ""))
+        btn_done = msg.addButton(f"{prefix} complete",
+                                 QMessageBox.ButtonRole.AcceptRole)
+        btn_wip = msg.addButton(f"{prefix} in progress",
+                                QMessageBox.ButtonRole.AcceptRole)
+        btn_discard = None
+        if dirty:
+            btn_discard = msg.addButton(
+                "Discard changes", QMessageBox.ButtonRole.DestructiveRole)
+        msg.addButton(QMessageBox.StandardButton.Cancel)
+        msg.setDefaultButton(btn_wip)
+        msg.exec()
+        clicked = msg.clickedButton()
+
+        if clicked is btn_discard:
+            return True  # leave as-is on disk, status untouched
+        if clicked not in (btn_done, btn_wip):
+            return False  # Cancel / closed
+
+        if dirty:
             self.save_seg_map()
             if self._seg_dirty_since_save:
                 if self.window.seg_data is None:
                     # Bbox-only session: no masks for save_seg_map
-                    # to write — same fallback as closeEvent, so a
-                    # Save click never silently discards work.
+                    # to write — snapshot annotations so a Save click
+                    # never silently discards work.
                     try:
                         self._autosave()
                     except Exception:
@@ -2012,7 +2040,14 @@ class ToolController:
                         "you reopen this file.")
                 else:
                     return False  # save failed; keep the session
-
+        out = self._resolve_out_folder()
+        if out:
+            try:
+                project_io.write_status(
+                    out, project_io.STATUS_COMPLETE if clicked is btn_done
+                    else project_io.STATUS_IN_PROGRESS)
+            except OSError as e:
+                log_error('controller.status', 'status write failed', exc=e)
         return True
 
     @log_action('action')
@@ -2022,7 +2057,7 @@ class ToolController:
         w = self.window
         if w.video_data is None and not self.annotations:
             return  # nothing open
-        if not self._guard_unsaved("closing this file"):
+        if not self._confirm_leave_session("closing"):
             return
         self._loading_file = True  # gates the frame-change embed hook
         try:
@@ -2065,7 +2100,7 @@ class ToolController:
             return True  # already open
 
         # Same unsaved-work guard as closing the window.
-        if not self._guard_unsaved("opening the next file"):
+        if not self._confirm_leave_session("opening the next file"):
             return False
 
         try:

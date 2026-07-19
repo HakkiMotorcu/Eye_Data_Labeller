@@ -220,11 +220,13 @@ def write_project_manifest(out_folder: str, *,
     ensure_dir(out_folder)
     path = os.path.join(out_folder, FILE_PROJECT)
     created_at = _now_iso()
+    prev_status = None
     if os.path.exists(path):
         try:
             with open(path, encoding='utf-8') as f:
                 prev = json.load(f) or {}
             created_at = prev.get('created_at', created_at)
+            prev_status = prev.get('status')
         except (json.JSONDecodeError, OSError):
             pass  # corrupt manifest — overwrite cleanly
 
@@ -232,6 +234,8 @@ def write_project_manifest(out_folder: str, *,
         "version": PROJECT_SCHEMA_VERSION,
         "created_at": created_at,
         "updated_at": _now_iso(),
+        # Explicit user-set work status — survives full rewrites.
+        "status": prev_status,
         "source_video": {
             "absolute_path": os.path.abspath(source_video_path)
                               if source_video_path else "",
@@ -252,6 +256,50 @@ def write_project_manifest(out_folder: str, *,
         manifest.update(extra)
     atomic_write_json(path, manifest, keep_backup=False)
     return path
+
+
+# Explicit work status, set by the user at file-switch/close time
+# ("Save & mark complete" / "Save & mark in progress"). Lives in
+# project.json so it travels with the data.
+STATUS_COMPLETE = 'complete'
+STATUS_IN_PROGRESS = 'in_progress'
+
+
+def read_status(out_folder: str) -> Optional[str]:
+    """The manifest's explicit status field, or None."""
+    m = read_project_manifest(out_folder)
+    s = (m or {}).get('status')
+    return s if s in (STATUS_COMPLETE, STATUS_IN_PROGRESS) else None
+
+
+def write_status(out_folder: str, status: Optional[str]) -> None:
+    """Update just the status field of project.json, creating a minimal
+    manifest when none exists yet (bbox-only sessions have artifacts
+    but no full save)."""
+    ensure_dir(out_folder)
+    path = os.path.join(out_folder, FILE_PROJECT)
+    manifest = read_project_manifest(out_folder) or {
+        "version": PROJECT_SCHEMA_VERSION,
+        "created_at": _now_iso(),
+    }
+    manifest['status'] = status
+    manifest['updated_at'] = _now_iso()
+    atomic_write_json(path, manifest, keep_backup=False)
+
+
+def file_status(out_folder: str) -> Optional[str]:
+    """Display status for a stack's out folder.
+
+    'complete' only when the user explicitly marked it so;
+    'in_progress' when any session artifacts exist without that mark;
+    None when untouched.
+    """
+    summary = session_summary(out_folder)
+    if summary is None:
+        return None
+    if (summary.get('manifest') or {}).get('status') == STATUS_COMPLETE:
+        return STATUS_COMPLETE
+    return STATUS_IN_PROGRESS
 
 
 def read_project_manifest(out_folder: str) -> Optional[dict]:
