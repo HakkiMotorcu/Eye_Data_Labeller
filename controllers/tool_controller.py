@@ -586,11 +586,24 @@ class ToolController:
         (e.g. 'SAM Model'). On accept, re-apply the autosave timer
         interval so changes take effect without a restart."""
         from ui.settings_dialog import SettingsDialog
+        from core import model_registry
+        # The SAM Model page edits the registry LIVE (add/remove/make
+        # active are not gated by OK), so snapshot the active model and
+        # re-sync afterwards regardless of accept/cancel.
+        before = model_registry.get_active()
         dlg = SettingsDialog(self.window, page=page)
         if dlg.exec():
             self._apply_autosave_interval()
             self._reload_quality_settings()
             self._show_frame_annotations(self.window._current_frame_idx)
+        after = model_registry.get_active()
+        changed = (after['tag'], after.get('path'), after.get('base')) != (
+            before['tag'], before.get('path'), before.get('base'))
+        if changed:
+            self._activate_model_entry(after)
+        else:
+            self._populate_model_combo()
+            self._refresh_model_surfaces()
 
     # ----- Project I/O helpers ------------------------------------------
     # Dirty-mask tracking — set True every time seg pixels change, reset
