@@ -124,22 +124,100 @@ travel with the data (and show up on the Home screen too).
 ## 6. The SAM model
 
 The one-click **SAM Box** needs a checkpoint (`best.pt`, ~400 MB). It
-does **not** ship with the app — get it from whoever runs your lab.
-Register it once via **Model → Add model…** (tag + base architecture +
-file), and it's remembered across launches.
+does **not** ship with the app — get it from whoever runs your lab (a
+shared drive / Box / USB). You register it **once**; it's remembered
+across launches.
 
-**Settings → SAM Model** is the full registry — add, edit, remove, and
-choose which model is **active** (● marks it):
+### First-time setup — adding your model
+
+On a brand-new install with no model, the Home screen shows a dashed
+**Add SAM model…** button, and the status line notes that segmentation
+assist is off until you set one:
+
+![Home screen with no model configured](docs/images/09_landing_addmodel.png)
+
+Click **Add SAM model…** (or, any time, the menu bar's **Model → Add
+model…**) to open the registration form:
+
+![Add model dialog](docs/images/08_add_model.png)
+
+1. **Tag** — a short name you'll recognise, e.g. `sam_hela`.
+2. **Base architecture** — the SAM variant the checkpoint was
+   fine-tuned from. For the standard SAM-HeLa checkpoint that's
+   **`vit_b`** (if unsure, ask whoever gave you the file).
+3. **Checkpoint** — **Browse…** to your `best.pt`.
+4. **OK** — the model is registered *and made active* immediately. The
+   file is read in place (nothing is copied), so it can live on a
+   network drive.
+
+That's it — **SAM Box (`B`) now works.** Tags and file paths must each
+be unique, so you can't accidentally register the same thing twice.
+
+### Managing models later
+
+**Settings → SAM Model** is the full registry — **Add / Edit /
+Remove**, and **Make active** (● marks the active one). You can keep
+several checkpoints registered and switch between them:
 
 ![Model registry](docs/images/04_model_registry.png)
 
-The active model also drives the **Model** dropdown in the right panel,
-so you can switch quickly. Without a model, manual annotation works
-normally; only SAM Box is disabled (the status line tells you so).
+The active model also drives the **Model** dropdown in the annotation
+view's right panel, so switching mid-session is one click. Built-in
+variants (which download their weights on first use) are listed too.
+Without any model, manual annotation works normally; only SAM Box is
+disabled.
 
 ---
 
-## 7. Keyboard shortcuts
+## 7. The Settings panel
+
+Open **Settings** from the Home screen's **⚙ gear**, or **File →
+Settings…**. It's organised into pages down the left:
+
+### Output & Autosave
+
+![Output & Autosave settings](docs/images/10_settings_output.png)
+
+- **Output folder** — where saved masks land. The default,
+  **Subfolder under `out/`** (`<video_dir>/out/<stem>/`), keeps each
+  stack's results in their own folder next to the video. You can
+  instead prefix (`<stem>_out/`) or send everything under one
+  **Custom root**.
+- **Auto-save** — **Mode** (*Light* = annotations + meta; *Smart* also
+  flushes masks periodically; *Off*), the **Tick interval** (default
+  30 s), and, in Smart mode, the **Min mask flush** gap.
+
+### SAM Model
+
+The model registry — see [§6](#6-the-sam-model).
+
+### Detection
+
+![Detection settings](docs/images/11_settings_detection.png)
+
+Tuning for the **Auto-segment** runs (not SAM Box): optional custom
+**quality / stability thresholds** (stricter = fewer, cleaner cells)
+and a **min/max pixel-area** size filter that drops specks and merged
+blobs. Leave it on defaults unless auto-segment is over- or
+under-detecting.
+
+### Annotation
+
+![Annotation settings](docs/images/12_settings_annotation.png)
+
+**Quality flags** — optional automatic ⚠ warnings on annotations that
+look off (touching the frame edge, suspiciously split, or an unusual
+area), so a reviewer can spot likely mistakes quickly. Toggle the
+whole feature and each individual check.
+
+### Debugging
+
+Detailed logging + the log folder — see
+[§9](#9-logging--debugging-please-read-before-reporting-a-problem).
+
+---
+
+## 8. Keyboard shortcuts
 
 Press **`F1`** any time for the in-app cheat sheet:
 
@@ -153,7 +231,7 @@ you'll use most: `A` add cell · `B` SAM Box · `D`/`E` paint/erase ·
 
 ---
 
-## 8. Logging & debugging (please read before reporting a problem)
+## 9. Logging & debugging (please read before reporting a problem)
 
 If something misbehaves, the log files are what let us fix it fast.
 
