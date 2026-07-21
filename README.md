@@ -32,6 +32,9 @@ status: ✓ complete, ● in progress.
 Full install details (GPU support, model weights, troubleshooting) →
 [**INSTALL.md**](INSTALL.md).
 
+New here? The illustrated walkthrough (with screenshots) →
+[**GUIDE.md**](GUIDE.md).
+
 Using the app (workflows, all keyboard shortcuts, tips) →
 [**USAGE.md**](USAGE.md).
 
@@ -116,6 +119,7 @@ Eye_Data_Labeller/
 ├── packaging/             # PyInstaller spec for Tier A bundles
 ├── models/checkpoints/sam_hela/   # Drop best.pt here
 ├── INSTALL.md             # Setup guide
+├── GUIDE.md               # Illustrated walkthrough (docs/images/)
 └── USAGE.md               # Shortcuts + workflow
 ```
 
