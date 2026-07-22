@@ -126,7 +126,7 @@ else
     say "Skipped. Easiest way to add it later -- just drop the file at:"
     say "  $DROP_PATH"
     say "The app checks this exact path on startup; no further config needed."
-    say "Or use the app's I/O > Output settings dialog to point elsewhere."
+    say "Or register it in the app: Model menu -> Add model…"
 fi
 
 echo ""

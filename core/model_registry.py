@@ -185,18 +185,45 @@ def get_active():
     return models[0] if models else dict(BUILTINS[2])  # vit_b base
 
 
-def ensure_migrated():
-    """One-time migration from the pre-registry single-checkpoint key.
+def _legacy_checkpoint_candidates():
+    """Every place the pre-registry app looked for sam_hela/best.pt —
+    the documented locations installers, the env var, and the download
+    step still target. Order matters (explicit config wins)."""
+    from core import model_download
+    from core import app_paths
+    return [
+        # QSettings key (written by deploy/configure_model.py and the
+        # old in-app picker) OR the env var — resolve handles both.
+        model_download.resolve_sam_hela_local_path(),
+        # The in-project "magic folder" documented in
+        # models/checkpoints/sam_hela/README.md and INSTALL.md.
+        os.path.join(app_paths.bundled_root(),
+                     'models', 'checkpoints', 'sam_hela', 'best.pt'),
+        # Where the URL downloader writes for bundled installs.
+        app_paths.default_sam_hela_checkpoint_path(),
+    ]
 
-    If a legacy ``model/sam_hela_local_path`` exists and there's no
-    registry yet, register it as 'sam_hela' and make it active.
+
+def ensure_migrated():
+    """One-time adoption of pre-registry checkpoint configuration.
+
+    With no registry yet, look everywhere the old app looked — the
+    QSettings key / env var, the in-project magic folder, the per-user
+    download location — and register the first hit as 'sam_hela'
+    (active). A configured-but-missing path still migrates, so the app
+    can show "checkpoint missing" instead of silently ignoring it.
     """
-    s = _qsettings()
     if load_registry():
         if not get_active_tag():
             set_active(all_models()[0]['tag'])
         return
-    legacy = str(s.value(LEGACY_LOCAL_KEY, '') or '')
+    candidates = _legacy_checkpoint_candidates()
+    legacy = next((p for p in candidates if p and os.path.exists(p)), '')
+    if not legacy:
+        # Nothing on disk — but an explicitly configured path (settings
+        # or env var) is still worth registering so the UI can say the
+        # checkpoint is missing rather than pretending nothing was set.
+        legacy = candidates[0]
     if legacy:
         try:
             add_model('sam_hela', legacy, 'vit_b',

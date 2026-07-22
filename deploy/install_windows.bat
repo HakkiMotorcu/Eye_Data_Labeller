@@ -162,7 +162,7 @@ if defined MODEL_PATH (
     echo [install] Skipped. Easiest way to add it later -- drop the file at:
     echo [install]   "%PROJECT_ROOT%\models\checkpoints\sam_hela\best.pt"
     echo [install] The app checks this exact path on startup; no further config needed.
-    echo [install] Or use the app's I/O ^> Output settings dialog to point elsewhere.
+    echo [install] Or register it in the app: Model menu -^> Add model...
 )
 
 echo.
