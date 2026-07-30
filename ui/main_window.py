@@ -2067,6 +2067,14 @@ class MainWindow(QMainWindow):
                     else:
                         state = 'unlocked'
                     anno_state_by_class[a.class_type][int(a.instance_id)] = state
+            # While a SAM preview is showing for an already-filled cell,
+            # hide that cell's committed pixels so the cyan preview isn't
+            # drawn on top of the old mask (you'd see BOTH). Restored the
+            # moment the preview is accepted or discarded.
+            ph = getattr(ctrl, '_preview_hidden', None)
+            if ph:
+                for ct, iids in ph.items():
+                    hidden_by_class.get(ct, set()).update(iids)
 
         status_colors = {
             'locked':   (0, 200, 0),

@@ -260,6 +260,10 @@ class ToolController:
         # data until accept.
         self._sam_preview = None
         self._preview_shortcuts = None
+        # While a preview is up for a cell that already has committed
+        # pixels, {class: {iid}} of pixels to hide from the seg overlay
+        # so the preview shows alone instead of on top of the old mask.
+        self._preview_hidden = None
         # Review mode (Ctrl+R): walk every unlocked annotation, Space
         # accepts (locks) and advances, Esc exits.
         self._review_mode = False
@@ -916,6 +920,14 @@ class ToolController:
             start_pos = None
         if not self.window.video_data:
             return
+
+        # A pending SAM preview belongs to the cell you were just on.
+        # Starting a NEW annotation means you're done with it — commit it
+        # (undoable) rather than let the spawn's dirty-hook silently
+        # discard it, which lost the previewed mask (B then double-click
+        # elsewhere). Esc still discards explicitly.
+        if getattr(self, '_sam_preview', None) is not None:
+            self._accept_sam_preview()
 
         frame_idx = self.window._current_frame_idx
 
@@ -5012,6 +5024,19 @@ class ToolController:
     def _show_sam_preview(self, anno, mask):
         self._sam_preview = {'anno': anno, 'mask': mask,
                              'frame': int(anno.frame_idx)}
+        # If this cell already has committed pixels on this frame, hide
+        # them while previewing so you compare against the NEW proposal,
+        # not see the old mask under the cyan preview.
+        seg = self.window.seg_data
+        self._preview_hidden = None
+        if (seg is not None and anno.instance_id is not None):
+            layer = seg.get_layer(anno.class_type)
+            fi = int(anno.frame_idx)
+            if (layer is not None and fi < layer.shape[0]
+                    and (layer[fi] == int(anno.instance_id)).any()):
+                self._preview_hidden = {
+                    anno.class_type: {int(anno.instance_id)}}
+                self.window._update_seg_overlay()
         rgba = np.zeros((*mask.shape, 4), dtype=np.uint8)
         rgba[mask] = (80, 220, 255, 160)  # cyan — visibly "not data yet"
         self._sam_preview_item.setImage(rgba)
@@ -5036,6 +5061,10 @@ class ToolController:
         self._sam_preview_item.clear()
         for s in (self._preview_shortcuts or []):
             s.setEnabled(False)
+        # Un-hide the cell's committed pixels the preview was masking.
+        if self._preview_hidden is not None:
+            self._preview_hidden = None
+            self.window._update_seg_overlay()
 
     def _cancel_sam_preview(self, quiet=False):
         # getattr: teardown hooks can run before __init__ reaches the
