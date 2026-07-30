@@ -154,6 +154,27 @@ def _selftest():
             app.processEvents()
         print("selftest: MainWindow + ToolController constructed OK")
 
+        # SAM import-chain gate (DETERMINISTIC — no model load, so no
+        # teardown flake). sam_service imports micro_sam + util +
+        # automatic_segmentation and SWALLOWS any ImportError, setting
+        # SAM_AVAILABLE=False → the app runs but shows "micro_sam not
+        # installed" and SAM Box is dead. A frozen bundle that can't
+        # import the deeper SAM chain otherwise looks GREEN (the plain
+        # `import micro_sam` probe above passes; automatic_segmentation
+        # is what pulls the heavier deps). Assert it here so a packaging
+        # regression FAILS the build instead of silently shipping a dead
+        # SAM to collaborators. This is the deterministic half of the old
+        # EYE_LABELLER_SELFTEST_SAM smoke (which also loaded a model and
+        # flaked on macOS teardown — kept optional below).
+        from core.sam_service import SAM_AVAILABLE
+        if not SAM_AVAILABLE:
+            raise RuntimeError(
+                "SAM import chain FAILED in this build — micro_sam / "
+                "micro_sam.automatic_segmentation did not import (see the "
+                "'micro_sam import failed' error logged just above). SAM "
+                "would be dead in this bundle.")
+        print("selftest: SAM import chain OK (SAM_AVAILABLE)")
+
         # Optional REAL SAM smoke (EYE_LABELLER_SELFTEST_SAM=1): the
         # import-probe above only proves micro_sam is importable —
         # sam_service historically swallowed deeper failures, shipping
