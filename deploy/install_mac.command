@@ -46,10 +46,16 @@ else
     say "No conda found — installing Miniforge into $MINIFORGE_DIR"
     arch="$(uname -m)"   # arm64 or x86_64
     url="https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-MacOSX-${arch}.sh"
-    tmpfile="$(mktemp -t miniforge.XXXXXX.sh)"
+    # The Miniforge installer refuses to run unless $0 ends in ".sh"
+    # (its don't-source-me guard is `echo "$0" | grep '\.sh$'`), and
+    # macOS mktemp appends its random suffix AFTER the template, so
+    # `mktemp -t x.XXXXXX.sh` yields "x.XXXXXX.sh.AbCdEf". Use a temp
+    # DIRECTORY and a fixed .sh filename inside it instead.
+    tmpdir="$(mktemp -d -t miniforge)"
+    tmpfile="$tmpdir/Miniforge3.sh"
     curl -fL "$url" -o "$tmpfile" || fail "Download of Miniforge failed"
     bash "$tmpfile" -b -p "$MINIFORGE_DIR" || fail "Miniforge install failed"
-    rm -f "$tmpfile"
+    rm -rf "$tmpdir"
     CONDA_SH="$MINIFORGE_DIR/etc/profile.d/conda.sh"
 fi
 

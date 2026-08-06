@@ -50,10 +50,15 @@ elif command -v conda >/dev/null 2>&1; then
 else
     say "No conda found — installing Miniforge into $MINIFORGE_DIR"
     url="https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh"
-    tmpfile="$(mktemp -t miniforge.XXXXXX.sh)"
+    # GNU mktemp rejects a template whose XXXXXX is not at the end, and
+    # the Miniforge installer refuses to run unless $0 ends in ".sh"
+    # (its don't-source-me guard). Use a temp DIRECTORY and a fixed
+    # .sh filename inside it — works on both GNU and BSD mktemp.
+    tmpdir="$(mktemp -d -t miniforge.XXXXXX)"
+    tmpfile="$tmpdir/Miniforge3.sh"
     curl -fL "$url" -o "$tmpfile" || fail "Download of Miniforge failed"
     bash "$tmpfile" -b -p "$MINIFORGE_DIR" || fail "Miniforge install failed"
-    rm -f "$tmpfile"
+    rm -rf "$tmpdir"
     CONDA_SH="$MINIFORGE_DIR/etc/profile.d/conda.sh"
 fi
 
